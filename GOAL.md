@@ -14,6 +14,8 @@ This project aims to research and build two separate but related tools that act 
 1. **Per-Datatype Tables:** One dedicated table per distinct datatype discovered in the external system.
 2. **Flexible Schema (JSONB):** The database schema avoids brittle structured columns, relying instead on PostgreSQL's `JSONB` to store the native data payload alongside operational metadata (e.g., timestamps, hashes).
 3. **Full & Incremental Modes:** Support incremental fetching when APIs permit, but implement robust full-sync mechanisms (e.g., diffing/hashing existing records against new full payloads) when they do not.
+4. **Near Real-Time Ingestion (Event-Driven):** Support webhooks, event streams, or similar notification mechanisms to fetch changes as soon as they occur. Because external systems have varying capabilities, this must gracefully fall back to polling if needed.
+5. **Politeness & Rate Limiting:** The ingestion process must strictly enforce rate limiting, batching, and backoff strategies to prevent accidental Denial of Service (DoS) attacks on external systems, preserving their stability regardless of change volume (e.g., debouncing webhook triggers).
 
 ## Tool 2: The Synchronization Tool (Writeback)
 **Objective:** Read refined data from PostgreSQL and synchronize it back into external HTTP APIs.
@@ -22,6 +24,8 @@ This project aims to research and build two separate but related tools that act 
 1. **Per-Datatype Mapping:** Map the MDM-produced relational table to its respective external system endpoint datatype using declarative configuration.
 2. **Smart Writes:** The writeback should exclusively target records that have changed, prioritizing incremental pushes. If an API requires bulk full writes, it should handle that smoothly.
 3. **Conflict Resolution & Prevention:** The external system may receive conflicting writes from other applications or users. The tool must provide strong conflict prevention (e.g., Optimistic Concurrency Control, pre-flight state checks, or HTTP conditional requests) before committing data.
+4. **Near Real-Time Writeback:** The tool should listen for finalized changes produced by the MDM (e.g., via PostgreSQL triggers, logical replication, or event queues) and proactively push these updates to the external systems as soon as possible.
+5. **Politeness & Rate Limiting:** While striving for near real-time updates, the writeback process must remain gentle and respect external system limits. It must enforce strict rate limiting, request batching/chunking, and exponential backoff to ensure we do not bombard the target with a high volume of concurrent write operations (avoiding DoS).
 
 ## Implementation Plan (Draft)
 1. **Configuration Design:** Design a YAML/JSON configuration schema to define HTTP API integrations mapping.
