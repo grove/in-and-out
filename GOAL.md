@@ -8,6 +8,7 @@ This project aims to research and build two separate but related tools that act 
 - **Sync Modes:** The primary mode of operation is **Incremental Synchronization**, utilizing high-water marks (e.g., `updated_at`). However, both tools must gracefully handle **Full Synchronizations** when external APIs lack mechanisms to query incremental changes or during initial loads.
 - **Infrastructure-as-Code Compatibility:** Connector configuration files must be designed for IaC workflows — version-controllable, diff-able, and renderable via templating tools. This rules out binary or opaque formats and ensures configuration can be managed alongside application code in version control.
 - **Runtime Control Table:** Both tools expose a dedicated PostgreSQL control table through which operators can issue commands at runtime — triggering re-syncs, pausing processing, adjusting rate limits, or initiating credential rotation — without restarting the running process.
+- **Simulator-First Testability:** The connector abstraction must make it straightforward to swap a real external system for a lightweight simulator (a configurable HTTP stub/mock server) without changing any engine code. Simulators must be usable in CI/CD pipelines and local development where access to live external systems is unavailable, impractical, or undesirable. Each connector's test suite should ship with a reference simulator covering its key interaction patterns (pagination, auth flows, webhooks, error conditions, rate-limit responses).
 
 ## Tool 1: The Ingestion Tool
 **Objective:** Extract data from external HTTP APIs and synchronize it into PostgreSQL 18.3.
@@ -82,5 +83,6 @@ This project aims to research and build two separate but related tools that act 
 ## Implementation Plan (Draft)
 1. **Configuration Design:** Design a YAML/JSON configuration schema to define HTTP API integrations mapping.
 2. **Database Architecture:** Design the PostgreSQL schema utilizing `JSONB` for raw payloads and metadata columns for sync state tracking.
-3. **Ingestion Engine:** Build the extractor that reads configs, fetches HTTP data (incremental/full), and writes to the DB.
-4. **Writeback Engine:** Build the synchronizer that reads from the DB and pushes to external HTTP APIs with conflict resolution.
+3. **Simulator Framework:** Design and build the simulator infrastructure — a configurable HTTP stub server interface that connectors can implement to provide a fake external system for testing. Define the contract between the engine and simulators so any connector can be exercised without live credentials.
+4. **Ingestion Engine:** Build the extractor that reads configs, fetches HTTP data (incremental/full), and writes to the DB.
+5. **Writeback Engine:** Build the synchronizer that reads from the DB and pushes to external HTTP APIs with conflict resolution.
