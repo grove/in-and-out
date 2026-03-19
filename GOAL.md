@@ -19,7 +19,8 @@ This project aims to research and build two separate but related tools that act 
 6. **Near Real-Time Ingestion (Event-Driven):** Support webhooks, event streams, or similar notification mechanisms to fetch changes as soon as they occur. Because external systems have varying capabilities, this must gracefully fall back to polling if needed.
 7. **Webhook Lifecycle Management:** Actively maintain webhook registrations over time — including initial registration, periodic renewal/re-registration, health checks, and cleanup of stale subscriptions.
 8. **Full-State Resolution from Events:** When a webhook or event stream delivers a partial or notification-only payload (e.g., "object X changed"), the tool must perform a follow-up lookup to retrieve the full current state of the object.
-9. **Single Source-of-Truth Table:** Combine webhook/event data with the last known persisted state to produce and maintain one authoritative source-of-truth table per datatype. This table always reflects the best-known current state of every object.
+9. **Parameterized Sources:** Some APIs return only a list of identifiers or partial/stub objects from their list/search endpoints rather than full records. In these cases the ingestion tool must perform individual follow-up lookups — one per identifier — to retrieve the complete object state before persisting it.
+10. **Single Source-of-Truth Table:** Combine webhook/event data with the last known persisted state to produce and maintain one authoritative source-of-truth table per datatype. This table always reflects the best-known current state of every object.
 10. **Politeness & Rate Limiting:** The ingestion process must strictly enforce rate limiting, batching, and backoff strategies to prevent accidental Denial of Service (DoS) attacks on external systems, preserving their stability regardless of change volume (e.g., debouncing webhook triggers).
 
 ## Tool 2: The Synchronization Tool (Writeback)
