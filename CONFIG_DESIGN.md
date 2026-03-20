@@ -1,6 +1,15 @@
 # Configuration Design
 
-This document defines the YAML configuration schema for the In-and-Out declarative MDM synchronization tools. It covers both the **tool-level** configuration (one per running daemon) and the **connector** configuration (one per external system integration).
+## Architecture Context: OSI-Mapping Integration
+
+**As of March 2026**, this configuration design reflects a simplified scope: In-and-Out focuses on **HTTP API specification and mechanics**. Identity resolution, consolidation mapping, and multi-source conflict strategies are declared in **OSI-Mapping's YAML config** (separate from in-and-out).
+
+**Configuration Layers:**
+1. **OSI-Mapping Config** (`osi/consolidation.yaml`): Declares sources, targets, field mappings, identity rules, conflict strategies
+2. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP endpoints, auth, pagination, field selection, writeback operations
+3. **Bridge Layer** (dbt/Python/SQL): Produces desired-state tables from OSI's consolidated views
+
+This document specifies the In-and-Out connector configuration schema.
 
 ## Table of Contents
 
@@ -23,7 +32,7 @@ This document defines the YAML configuration schema for the In-and-Out declarati
 
 **P2 — No credentials in config files.** Credentials are always referenced by name (`credential_ref`). The runtime resolves them from encrypted PostgreSQL columns, environment variables, or an external secrets manager. Config files are safe to commit to version control.
 
-**P3 — Explicit over implicit.** Every operational behaviour that affects data correctness — history mode, conflict resolution strategy, fan-in policy, write-anomaly protection level — must be explicitly declared rather than falling back to silent defaults. The tool must refuse to start if a required declaration is missing. Operational tunables (retry counts, batch sizes, intervals) may have sensible defaults.
+**P3 — Explicit over implicit (HTTP & protocol mechanics).** Every HTTP-specific operational behaviour — pagination strategy, auth scheme, field selection, write operation endpoints — must be explicit. Conflict resolution strategies, identity matching rules, and consolidation logic are NOT in in-and-out config (they're in OSI-Mapping).
 
 **P4 — IaC-compatible.** Files are plain text, diff-able, and renderable by templating engines (Helm, Kustomize, Jsonnet, envsubst). Variable interpolation uses a `${...}` syntax compatible with these tools.
 
@@ -767,29 +776,30 @@ writeback:
   # Level 1: Full protection (conditional writes).
   # Level 2: Practical protection (pre-flight read only).
   # Level 3: Level 2 + post-write verification read.
+  # Note: In an OSI-integrated architecture, the bridge layer
+  # computes desired-state and populates cluster_id. This connector
+  # performs 3-way conflict detection (base vs current vs desired)
+  # to determine if writes are safe.
 
   # ─── Conflict Resolution (T2 #3, #30) ───────────────────
   conflict_resolution: dead_letter
-  # dead_letter | last_writer_wins | skip_and_warn | re_ingest_and_recompute
-  # re_ingest_and_recompute settings:
-  # reingest_max_iterations: 3
+  # dead_letter | last_writer_wins | skip_and_warn
+  # Options specific to OSI-integrated workflows:
+  #   - dead_letter: Route conflicts to queue for manual review
+  #   - last_writer_wins: Desired-state overrides current (force write)
+  #   - skip_and_warn: Skip change if conflict detected, log warning
+  # Note: "re_ingest_and_recompute" is not applicable here since OSI-Mapping
+  # handles cluster resolution and desired-state computation once, upstream.
 
-  # ─── External Reference Field (T2 #16) ──────────────────
-  external_ref_field:
+  # ─── Identity Tracking (T2 #16) ─────────────────────────
+  # Track the cluster_id → external_id (target system ID) mapping.
+  # In OSI-integrated workflow, cluster_id is pre-published by bridge layer
+  # in the desired-state table. This connector writes it to the target
+  # system and maintains reverse mapping for identity lookups.
+  identity_tracking:
     enabled: true
     target_field: properties.inout_cluster_id
-    source: cluster_id
-
-  # ─── Field Scoping for Conflict Detection (T2 #3) ───────
-  # Fields that this connector manages. Only changes to these
-  # fields (plus coupled_fields) trigger conflict detection.
-  managed_fields:
-    - email
-    - firstname
-    - lastname
-    - phone
-  # Fields logically coupled to managed fields.
-  coupled_fields: []
+    lookback: 30d                  # Days to maintain reverse mapping
 
   # ─── Batch Composition (T2 #33) ─────────────────────────
   batch:
@@ -814,14 +824,16 @@ writeback:
 
   # ─── Operations (T2 #18) ────────────────────────────────
   # Per-operation HTTP definitions.
+  # The desired-state table provides the data; these operations
+  # define how to execute writes to the target system.
   operations:
 
-    # ── Lookup (pre-flight read for conflict detection) ────
+    # ── Lookup (pre-flight read for 3-way conflict detection) ─
     lookup:
       method: GET
       path: "/crm/v3/objects/contacts/${external_id}"
       query_params:
-        properties: "${writeback.managed_fields}"
+        properties: []             # Fetch all properties for diff
       record_selector: null        # Response is the record itself.
       # Does this endpoint return an ETag/version?
       version_header: ETag         # Or null if not supported.
@@ -831,8 +843,9 @@ writeback:
     insert:
       method: POST
       path: "/crm/v3/objects/contacts"
-      # Transform: reshape MDM data into target payload.
-      # (T2 #17)
+      # Transform: reshape desired-state data into target payload.
+      # The bridge layer prepares desired-state; this template
+      # handles any final HTTP-specific reshaping.
       transform:
         template:
           properties:
@@ -840,7 +853,8 @@ writeback:
             firstname: "${data.first_name}"
             lastname: "${data.last_name}"
             phone: "${data.phone}"
-      # Where to find the generated ID in the response. (T2 #8)
+            inout_cluster_id: "${data.cluster_id}"
+      # Where to find the generated ID in the response.
       response_id_path: id
       # Pre-write validation schema (T2 #23).
       validation:
@@ -865,8 +879,8 @@ writeback:
             phone: "${data.phone}"
       # Client-side patching: compute minimal diff (T2 #5).
       patch_mode: diff             # diff | full
-      # diff: Only send changed fields.
-      # full: Send all managed fields regardless.
+      # diff: Only send changed fields (compare base vs desired).
+      # full: Send all fields regardless.
 
     # ── Delete ─────────────────────────────────────────────
     delete:
@@ -892,12 +906,14 @@ writeback:
     #   response_id_path: id
 
   # ─── API Asymmetry Mapping (T2 #12) ─────────────────────
-  # When read (GET) and write (POST/PATCH) schemas differ, define
-  # the mapping between them. The transform templates above handle
-  # outbound reshaping. This section maps inbound (lookup) response
-  # fields to the canonical field names used in conflict detection.
+  # When this target's read schema (GET response) differs from its
+  # write schema (POST/PATCH request), map GET fields to canonical
+  # names used in 3-way conflict detection.
+  # This handles per-target asymmetry (e.g., CRM returns "properties"
+  # object, but also supports "custom_field_123"). Consolidation
+  # asymmetry (e.g., CRM field ≠ ERP field) is OSI-Mapping's concern.
   read_write_mapping:
-    # Target system field → canonical MDM field name.
+    # Target system field (from GET) → field name in lookup + conflict detection
     properties.email: email
     properties.firstname: first_name
     properties.lastname: last_name
@@ -951,18 +967,22 @@ datatypes:
 
 ### 4.6 Merge & Split Actions (T2 #34)
 
-The writeback tool recognises `merge` and `split` in the desired-state `action` column. No additional per-datatype config is needed beyond the standard operations — the engine uses `insert`, `update`, `delete`/`archive`, and identity-mapping updates to execute merges and splits. The connector config must declare which operations are available so the engine knows the target system's capabilities.
+In an OSI-integrated architecture, the **bridge layer** detects cluster merges and splits from OSI-Mapping's consolidated views (e.g., two clusters becoming one, or one splitting into two) and populates the desired-state table with `action: merge` or `action: split` records. The writeback tool recognises these actions in the desired-state `action` column and executes them via standard operations (`insert`, `update`, `delete`/`archive`, and identity-mapping updates).
+
+No additional per-datatype config is needed beyond standard operations. The connector must simply declare which operations are available so the tool knows what the target system supports.
 
 ```yaml
 writeback:
   # Declare which action types this datatype supports.
+  # The bridge layer populates desired-state action based on 
+  # cluster events detected by OSI-Mapping. This connector executes them.
   supported_actions:
     - insert
     - update
     - delete
     - archive
-    - merge
-    - split
+    - merge                        # Consolidated clusters becoming one
+    - split                        # Cluster breaking into multiple
 ```
 
 ---
@@ -1247,15 +1267,10 @@ connector:
       writeback:
         protection_level: 2
         conflict_resolution: dead_letter
-        external_ref_field:
+        identity_tracking:
           enabled: true
           target_field: properties.inout_cluster_id
-          source: cluster_id
-        managed_fields:
-          - email
-          - firstname
-          - lastname
-          - phone
+          lookback: 30d
         batch:
           max_records: 10
           max_payload_bytes: 524288
@@ -1272,7 +1287,7 @@ connector:
             method: GET
             path: "/crm/v3/objects/contacts/${external_id}"
             query_params:
-              properties: "email,firstname,lastname,phone,inout_cluster_id"
+              properties: []         # Fetch all for conflict detection
             version_header: null
             version_field: null
 
@@ -1286,7 +1301,7 @@ connector:
                   firstname: "${data.first_name}"
                   lastname: "${data.last_name}"
                   phone: "${data.phone}"
-                  inout_cluster_id: "${cluster_id}"
+                  inout_cluster_id: "${data.cluster_id}"
             response_id_path: id
             validation:
               required_fields:
