@@ -10,24 +10,33 @@
 ```
 External APIs → [In-and-Out Ingestion] → PostgreSQL source tables
                                          ↓
-                        [OSI-Mapping Engine]
+                        [OSI-Mapping YAML + Engine]
                         - Identity resolution (transitive closure)
                         - Conflict resolution (per-field strategies)
-                        - Reverse projection (back to source shape)
+                        - Business filtering (filter / reverse_filter per mapping)
+                        - Field-level transforms (expression / reverse_expression)
+                        - Noop detection incl. target-centric (written_state + derive_noop)
                         - Delta classification (insert/update/delete/noop)
+                        - Insert ID feedback (cluster_members table)
                                          ↓
-                        _delta_{mapping} views (action-classified, per-source,
-                        with _cluster_id and _base — essentially desired-state)
+                        _delta_{mapping} views — complete desired-state:
+                        _action, _cluster_id, source-shaped fields, _base
                                          ↓
-                     [Optional: business-filter query / view]
-                     (thin SQL WHERE clause for app-specific filtering)
-                                         ↓
-           [In-and-Out Writeback] → External APIs (writes resolved changes back)
+           [In-and-Out Writeback] → External APIs
+           (HTTP execution + ETL feedback to written_state / cluster_members)
 ```
 
-**Key Insight:** OSI-Mapping's reverse and delta views already produce action-classified, per-source, cluster-id-tagged output with `_base` for conflict detection. This is ~80% of what a "desired-state table" needs. The remaining ~20% (business filtering, payload reshaping for API write format) is handled by an optional thin SQL query and by in-and-out's existing `transform.template` writeback config.
+**Key Insight:** OSI-Mapping's schema covers 100% of what we previously called a "bridge layer":
+- Business filtering: `reverse_filter: "email IS NOT NULL AND status = 'active'"`
+- Multi-target routing: multiple mappings with different `reverse_filter` conditions
+- Field transforms: `expression` / `reverse_expression` per field
+- Target-centric noop: `written_state: true` + `derive_noop: true`
+- Delete propagation: `reverse_required: true` on field
+- Insert tracking: `cluster_members: true` feedback table
 
-**In-and-Out's Scope:** Reliable, conflict-aware HTTP API synchronization in both directions (ingestion and writeback). Identity resolution, consolidation mapping, and field-level conflict resolution strategies are handled by OSI-Mapping and declared in a separate `osi-mapping.yaml` file (not an in-and-out concern).
+**There is no bridge layer.** OSI-Mapping config declares all business logic. In-and-Out config declares HTTP mechanics only.
+
+**In-and-Out's Scope:** Reliable, conflict-aware HTTP API synchronization in both directions (ingestion and writeback). Identity resolution, consolidation mapping, field-level conflict resolution, and business routing are handled by OSI-Mapping and declared in a separate `osi-mapping.yaml` file (not an in-and-out concern).
 
 **Key Impact on This Document:**
 - Requirements T2 #1, #7, #8, #12, #34 are recontextualized (OSI handles consolidation; in-and-out executes)
@@ -111,7 +120,7 @@ This project aims to research and build two separate but related tools that act 
 ## Tool 2: The Synchronization Tool (Writeback)
 **Objective:** Read refined data from PostgreSQL desired-state tables and synchronize changes back into external HTTP APIs.
 
-**Context:** OSI-Mapping computes what unified entities should look like, resolves identity, applies per-field conflict strategies, and produces per-source delta views with action classification (`_delta_{mapping}`). These delta views — optionally filtered by a thin business-logic query — serve as the desired-state input. The writeback tool executes writes with conflict detection.
+**Context:** OSI-Mapping computes what unified entities should look like, resolves identity, applies per-field conflict strategies, filters which rows flow in each direction (`filter` / `reverse_filter`), transforms fields (`expression` / `reverse_expression`), handles noop detection (`written_state` + `derive_noop`), and produces per-source delta views with action classification (`_delta_{mapping}`). These delta views are the complete desired-state input — no intermediate bridge layer is needed. The writeback tool reads from them directly and executes HTTP writes.
 
 **Key Requirements:**
 1. **Per-Datatype Mapping (OSI-Mapped):** The mapping between MDM-produced consolidated entities and target API endpoints is declared once in OSI-Mapping's YAML file, not in in-and-out config. In-and-out reads pre-populated desired-state tables with `cluster_id`, `data`, and `base` columns. The writeback tool focuses on **HTTP write mechanics**, not consolidation logic.

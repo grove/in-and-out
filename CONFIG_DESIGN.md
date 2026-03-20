@@ -5,11 +5,10 @@
 **As of March 2026**, this configuration design reflects a simplified scope: In-and-Out focuses on **HTTP API specification and mechanics**. Identity resolution, consolidation mapping, and multi-source conflict strategies are declared in **OSI-Mapping's YAML config** (separate from in-and-out).
 
 **Configuration Layers:**
-1. **OSI-Mapping Config** (`osi/consolidation.yaml`): Declares sources, targets, field mappings, identity rules, conflict strategies. OSI's delta views (`_delta_{mapping}`) already produce action-classified, per-source output with `_cluster_id` and `_base` — essentially the desired-state source.
-2. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP endpoints, auth, pagination, field selection, writeback operations, and `transform.template` for reshaping desired-state data into target API payloads.
-3. **Optional business-filter query** (SQL view / dbt model): Thin `WHERE` clause on OSI delta views for app-specific filtering (e.g., "only sync contacts where email IS NOT NULL"). Not a separate architectural layer — just a query.
+1. **OSI-Mapping Config** (`osi/consolidation.yaml`): Declares all consolidation and business logic — identity rules, conflict strategies, business filtering (`reverse_filter`), field transforms (`expression` / `reverse_expression`), target-centric noop (`written_state` + `derive_noop`), and insert/delete propagation. OSI's delta views (`_delta_{mapping}`) are the complete desired-state source.
+2. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP mechanics only — endpoints, auth, pagination, rate limits, and `transform.template` for wrapping source-shaped delta fields into target API JSON payloads.
 
-This document specifies the In-and-Out connector configuration schema.
+There is no bridge layer. OSI-Mapping covers 100% of business logic. In-and-Out covers 100% of HTTP mechanics.
 
 ## Table of Contents
 
