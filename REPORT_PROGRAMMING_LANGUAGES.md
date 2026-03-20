@@ -16,6 +16,7 @@
 7. [C# / .NET (9)](#7-c--net-9)
 8. [Comparison Matrix](#8-comparison-matrix)
 9. [Recommendation](#9-recommendation)
+10. [Research-Phase Reweighting: Agility Over Production Hardening](#10-research-phase-reweighting-agility-over-production-hardening)
 
 ---
 
@@ -476,6 +477,109 @@ The recommendation weakens if:
 - A large third-party connector ecosystem is a near-term priority (Python or TypeScript may be better for the SDK layer)
 - The team has deep Rust experience and values correctness guarantees above iteration speed
 - The team has strong .NET/JVM expertise and the PostgreSQL replication gap is acceptable
+
+---
+
+## 10. Research-Phase Reweighting: Agility Over Production Hardening
+
+The scoring in Sections 8–9 assumes the project is entering production-oriented implementation — where daemon stability, container efficiency, and operational reliability dominate. However, if the project is currently a **research project** where the primary goal is to **validate the architecture, explore design tradeoffs, and iterate rapidly on the config schema and engine logic**, the weighting changes substantially.
+
+### What "Research Phase" Means for Language Choice
+
+In a research phase, the dominant activities are:
+
+1. **Config schema exploration** — trying different YAML structures, expression syntaxes, and validation approaches to find the right connector authoring contract.
+2. **Engine architecture prototyping** — building the ingestion loop, the writeback loop, the circuit breaker state machine, and the scheduling model to discover which abstractions hold up under real API behaviour.
+3. **Simulator development** — standing up fake HTTP servers that mimic real API quirks (pagination edge cases, auth token expiry, partial webhook payloads) to exercise the engine.
+4. **PostgreSQL schema iteration** — evolving the table structures (per-datatype tables, watermark table, sync-run log, identity mapping) as understanding deepens.
+5. **Throwaway experiments** — writing code to test a hypothesis ("can we handle HubSpot's shared webhook endpoint with declarative fan-out rules?") and discarding it if the approach doesn't work.
+
+In this phase, the cost structure inverts:
+
+| Factor | Production Phase (Sections 8–9) | Research Phase |
+|---|---|---|
+| Daemon stability | Critical — runs for weeks | Low — restarted constantly during development |
+| Container image size | Important — affects cluster costs | Irrelevant — running locally or in a dev cluster |
+| Startup time | Important — health probe compliance | Low — no Kubernetes probes in dev |
+| Compilation speed | Moderate | **Critical** — slow builds kill iteration |
+| REPL / interactive exploration | Nice-to-have | **Critical** — try ideas without a full build cycle |
+| Config validation quality | Important | **Critical** — the config schema IS the research output |
+| Type safety | Important for correctness | Moderate — code is disposable; bugs are cheap |
+| Library ecosystem breadth | Moderate | **Critical** — need off-the-shelf solutions for fast experimentation |
+| Refactoring cost | Moderate | **Critical** — the design WILL change; the language must not resist it |
+
+### Research-Phase Scoring
+
+Reweighting with research priorities (D5 Config interpretation, D10 Development velocity, and D7 Connector SDK at 3x; D1 Daemon stability, D9 Container deployment at 0.5x):
+
+| Dimension | Weight | Go | Rust | Python | Kotlin | TypeScript | C# |
+|---|---|---|---|---|---|---|---|
+| D1 Daemon stability | **0.5x** | 2.5 | 2.5 | 1 | 2 | 1 | 2 |
+| D2 Concurrency | 1x | 5 | 4 | 3 | 5 | 2 | 5 |
+| D3 PostgreSQL | 1x | 4 | 4 | 3 | 4 | 2 | 3 |
+| D4 HTTP | 1x | 5 | 4 | 4 | 5 | 4 | 5 |
+| D5 Config interpretation | **3x** | 9 | 6 | **15** | 9 | **15** | 9 |
+| D6 Type safety | 1x | 3 | 5 | 2 | 4 | 4 | 4 |
+| D7 Connector SDK | **3x** | 9 | 6 | **15** | 6 | 12 | 6 |
+| D8 Observability | 0.5x | 2.5 | 2 | 2 | 2.5 | 1.5 | 2 |
+| D9 Container deployment | **0.5x** | 2.5 | 2.5 | 1 | 1 | 1.5 | 2 |
+| D10 Development velocity | **3x** | 12 | 6 | **15** | 9 | **15** | 9 |
+| **Research-Weighted Total** | | **54.5** | **42** | **61** | **47.5** | **58** | **47** |
+
+### The Reweighted Ranking
+
+| Rank | Language | Research Score | Production Score (§8) |
+|---|---|---|---|
+| 1 | **Python 3.13** | **61** | 50 |
+| 2 | **TypeScript 5.7** | **58** | 48 |
+| 3 | Go 1.24 | 54.5 | **64** |
+| 4 | Kotlin 2.1 | 47.5 | 55 |
+| 5 | C# / .NET 9 | 47 | 56 |
+| 6 | Rust 1.85 | 42 | 57 |
+
+The ranking inverts almost completely. Python and TypeScript — the weakest production candidates — become the strongest research candidates. Go drops from first to third. Rust drops from a tie for second to last.
+
+### Why Python Wins the Research Phase
+
+1. **The config schema IS the research output.** The most important deliverable of the research phase is a validated connector configuration schema — one that can express HubSpot webhooks, Salesforce bulk export, Stripe pagination, and arbitrary OAuth2 flows declaratively. Python's `pydantic` lets you iterate on this schema 5–10x faster than any alternative. You can define a schema, validate a YAML file against it, get a clear error message, fix the schema, and re-validate — all without a compilation step.
+
+2. **The REPL accelerates discovery.** When exploring how a real API behaves (e.g., "what does HubSpot's webhook payload actually look like when an association is created?"), you can write a quick `httpx` request in an interactive Python shell, inspect the response, parse the JSONB, and test your expression-evaluation logic in seconds. Go and Rust require writing a program, compiling it, and running it.
+
+3. **Throwaway code is cheap.** In a research phase, you'll write code to test hypotheses and discard it. Python's lack of type ceremony means throwaway code is fast to write and painless to delete. Rust's borrow checker and Go's error handling add friction to code you plan to discard.
+
+4. **Ecosystem breadth for rapid prototyping.** Need to test JSONPath evaluation? `pip install jsonpath-ng`. Need to build a fake HTTP server for a simulator? `pip install respx` or `pytest-httpserver`. Need to parse cron expressions? `pip install croniter`. The Python ecosystem has a ready-made library for nearly every building block in GOAL.md, enabling you to focus on design decisions rather than reimplementation.
+
+5. **psycopg3 is sufficient for research.** While Python's PostgreSQL logical replication story is thinner than Go's, `psycopg3` provides enough functionality to validate the writeback trigger architecture. You don't need production-grade replication slot management during research — you need enough to prove the approach works.
+
+### The Research-to-Production Transition Question
+
+Choosing Python for research raises an obvious question: **what happens when the research phase ends?**
+
+Three viable paths:
+
+**Path A: Stay in Python.** If the operational characteristics prove acceptable in testing — daemon stability under load, memory behaviour over time, async complexity — Python becomes the production language. This avoids a rewrite but accepts the long-term operational costs identified in Section 4.
+
+**Path B: Rewrite the engine in Go, keep Python for the SDK.** The research phase produces a validated config schema, a proven engine architecture, and a set of working simulators. The engine is rewritten in Go (which excels at the production dimensions). The connector SDK and config validation tooling remain in Python. This is a split-language approach — more operational complexity, but each component uses the language that fits it best.
+
+**Path C: Rewrite entirely in Go.** The research phase de-risks the architecture. The Go rewrite benefits from a complete understanding of what the engine needs to do, what the config schema looks like, and where the edge cases are. The rewrite is faster and produces better code than writing Go from scratch without the research.
+
+Path B is particularly interesting because GOAL.md's transport abstraction strategy already envisions a clean interface boundary between the engine orchestration layer and the transport adapters. This boundary is also a natural language boundary — the engine in Go, the connector config validation and SDK tooling in Python.
+
+### Research-Phase Recommendation
+
+**For a research-first project: Python 3.13.**
+
+Use Python to:
+- Design and iterate on the connector YAML schema using `pydantic` models
+- Build a working ingestion engine prototype that validates the pagination, auth, and checkpointing architecture
+- Build a working writeback engine prototype that validates the desired-state consumption, conflict detection, and identity mapping architecture
+- Develop the simulator framework and reference simulators
+- Validate the PostgreSQL schema (table naming conventions, watermark table, sync-run log, identity mapping) with real migrations
+- Exercise the full ingestion → MDM → writeback loop end-to-end
+
+Then evaluate: does the Python prototype's operational behaviour (daemon stability, memory, async correctness) meet production requirements? If yes, continue in Python. If no, the validated architecture and config schema make a Go rewrite straightforward and de-risked.
+
+**TypeScript is the runner-up** for similar reasons — excellent config interpretation and development velocity. Its weaker PostgreSQL replication support is the tiebreaker in Python's favour, since the writeback trigger architecture (T2 #10, #22, #32) is a critical research question that needs hands-on validation.
 
 ---
 
