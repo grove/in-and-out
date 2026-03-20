@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/profiles/ingestion_webhook_incremental.schema.json",
+  "allOf": [
+    {
+      "$ref": "../connector.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "connector": {
+          "type": "object",
+          "required": [
+            "generation_profile",
+            "webhooks",
+            "datatypes"
+          ],
+          "properties": {
+            "generation_profile": {
+              "const": "ingestion_webhook_incremental"
+            },
+            "webhooks": {
+              "$ref": "../defs/webhooks.schema.json"
+            },
+            "datatypes": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "ingestion"
+                ],
+                "properties": {
+                  "ingestion": {
+                    "allOf": [
+                      {
+                        "$ref": "../defs/ingestion.schema.json"
+                      },
+                      {
+                        "required": [
+                          "webhook_events"
+                        ],
+                        "properties": {
+                          "list": {
+                            "required": [
+                              "incremental"
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

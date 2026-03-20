@@ -1,0 +1,6 @@
+{
+  "fixture": "invalid_pagination_shape.yaml",
+  "expected_rule_ids": [
+    "CFG-001"
+  ]
+}

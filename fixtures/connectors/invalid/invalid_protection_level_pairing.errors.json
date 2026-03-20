@@ -1,0 +1,6 @@
+{
+  "fixture": "invalid_protection_level_pairing.yaml",
+  "expected_rule_ids": [
+    "CFG-010"
+  ]
+}

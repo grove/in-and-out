@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/connector.schema.json",
+  "title": "In-and-Out Connector Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "connector"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "connector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "system",
+        "generation_profile",
+        "api_version",
+        "connection",
+        "auth",
+        "datatypes"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "system": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation_profile": {
+          "type": "string",
+          "enum": [
+            "ingestion_polling_readonly",
+            "ingestion_webhook_incremental",
+            "writeback_patch",
+            "full_duplex"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "api_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "api_deprecation_deadline": {
+          "type": "string"
+        },
+        "runtime_params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "env",
+              "required"
+            ],
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "env": {
+                "type": "string",
+                "minLength": 1
+              },
+              "required": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "connection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "base_url"
+          ],
+          "properties": {
+            "base_url": {
+              "type": "string",
+              "minLength": 1
+            },
+            "timeout": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "connect": {
+                  "type": "string"
+                },
+                "read": {
+                  "type": "string"
+                },
+                "write": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "auth": {
+          "$ref": "defs/auth.schema.json"
+        },
+        "rate_limit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requests_per_second": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "burst": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "retry": {
+          "type": "object"
+        },
+        "circuit_breaker": {
+          "type": "object"
+        },
+        "tenancy": {
+          "type": "object"
+        },
+        "webhooks": {
+          "$ref": "defs/webhooks.schema.json"
+        },
+        "datatypes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/datatype"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "datatype": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "entity",
+            "relationship"
+          ]
+        },
+        "ingestion": {
+          "$ref": "defs/ingestion.schema.json"
+        },
+        "writeback": {
+          "$ref": "defs/writeback.schema.json"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "ingestion"
+          ]
+        },
+        {
+          "required": [
+            "writeback"
+          ]
+        }
+      ]
+    }
+  }
+}

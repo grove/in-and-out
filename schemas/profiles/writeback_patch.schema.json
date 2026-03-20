@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/profiles/writeback_patch.schema.json",
+  "allOf": [
+    {
+      "$ref": "../connector.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "connector": {
+          "type": "object",
+          "required": [
+            "generation_profile",
+            "datatypes"
+          ],
+          "properties": {
+            "generation_profile": {
+              "const": "writeback_patch"
+            },
+            "datatypes": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "writeback"
+                ],
+                "properties": {
+                  "writeback": {
+                    "allOf": [
+                      {
+                        "$ref": "../defs/writeback.schema.json"
+                      },
+                      {
+                        "properties": {
+                          "operations": {
+                            "required": [
+                              "lookup",
+                              "update"
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

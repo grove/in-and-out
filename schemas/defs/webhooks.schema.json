@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/defs/webhooks.schema.json",
+  "title": "Webhook Configuration",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "path",
+    "signature",
+    "fan_out"
+  ],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "header",
+        "credential_ref"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": [
+            "hmac-sha256",
+            "hmac-sha1",
+            "rsa-sha256"
+          ]
+        },
+        "header": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "credential_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "fan_out": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "discriminator",
+        "routes",
+        "unmatched"
+      ],
+      "properties": {
+        "discriminator": {
+          "type": "string"
+        },
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "match",
+              "datatype"
+            ],
+            "properties": {
+              "match": {
+                "type": "string"
+              },
+              "datatype": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "unmatched": {
+          "type": "string",
+          "enum": [
+            "log_and_discard",
+            "reject_400"
+          ]
+        }
+      }
+    }
+  }
+}

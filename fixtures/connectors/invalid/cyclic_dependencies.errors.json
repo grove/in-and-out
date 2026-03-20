@@ -1,0 +1,6 @@
+{
+  "fixture": "cyclic_dependencies.yaml",
+  "expected_rule_ids": [
+    "CFG-011"
+  ]
+}
