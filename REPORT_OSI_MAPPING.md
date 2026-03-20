@@ -373,12 +373,9 @@ PostgreSQL tables (inout_src_*)
    ↓
 [OSI-Mapping Engine]  ← consolidates, resolves identity, computes delta
    ↓
-PostgreSQL views (_resolved_*, _delta_*)
-   ↓
-[Bridge Layer]  ← app logic, produces desired-state table
-   ↓
-Desired-State Table  ← cluster_id, base, action populated FROM OSI
-   ↓
+PostgreSQL views (_delta_{mapping})  ← action-classified, per-source,
+                                       with _cluster_id and _base
+   ↓ (optional: thin business-filter query on top)
 [Writeback Tool]  ← executes writes, unchanged
    ↓
 External APIs
@@ -391,10 +388,13 @@ External APIs
 | **MDM Responsibility** | Assumed external | OSI-Mapping is the MDM |
 | **Identity Computation** | Writeback tool | OSI via `_cluster_id` |
 | **Conflict Resolution** | Assumed external | OSI via field strategies |
-| **Desired-State Source** | Assumed external | Bridge layer (app-specific) |
+| **Desired-State Source** | Assumed external | OSI `_delta_{mapping}` views (directly) |
 | **Base State Origin** | Assumed external | OSI's `_base` (source snapshot) |
-| **Writeback Cluster_id** | Pre-populated by external | Provided by bridge layer from OSI |
-| **Reverse Mapping** | Part of writeback config | OSI computes in delta view |
+| **Action Classification** | Assumed external | OSI's `_action` in delta views |
+| **Per-Source Routing** | Assumed external | OSI produces one `_delta` per mapping |
+| **Reverse Mapping** | Part of writeback config | OSI computes in `_rev` views |
+| **Payload Reshaping** | Part of writeback config | In-and-out `transform.template` (unchanged) |
+| **Business Filtering** | N/A | Optional thin query on OSI delta views |
 | **Testing** | Per-connector integration tests | OSI's YAML tests + in-and-out e2e tests |
 
 ---
@@ -445,40 +445,46 @@ External APIs
 │  - Conflict resolution by strategy   │
 │    (coalesce, last_modified, etc.)   │
 │  - FK resolution across ID spaces    │
-│  - Bidirectional delta detection     │
+│  - Reverse projection to source shape│
+│  - Delta classification per source   │
+│    (insert/update/delete/noop)       │
 │  - Lineage & provenance              │
 │                                      │
 │  Generates views:                    │
 │  - _resolved_contact (golden record) │
-│  - _delta_crm_contacts (changes)     │
-│  - _rev_crm_contacts (reverse shape) │
+│  - _rev_crm_contacts (source shape)  │
+│  - _delta_crm_contacts (classified)  │
 │  - _cluster_id (entity identity)     │
 │  - _base (original source values)    │
+│                                      │
+│  _delta views are the desired-state  │
+│  source: action, cluster_id, data,   │
+│  and _base are all present.          │
 └────────────┬─────────────────────────┘
              │
-          reads
+    optional business filter
              │
              ▼
 ┌──────────────────────────────────────┐
-│  BRIDGE LAYER (dbt/Python/SQL)       │
+│  OPTIONAL: BUSINESS-FILTER QUERY     │
+│  (SQL view / dbt model)              │
 │  ──────────────────────────────────  │
-│  Responsibility: Business logic      │
-│  - Read unified entities from OSI    │
-│  - Apply app-specific rules          │
-│  - Decide which changes to writeback │
-│  - Route to target systems           │
-│  - Produce desired-state table       │
+│  NOT a separate layer — just a thin  │
+│  query for app-specific filtering:   │
 │                                      │
-│  Example dbt model:                  │
-│  SELECT                              │
-│    r._cluster_id,                    │
-│    'update' as action,               │
+│  CREATE VIEW desired_state AS        │
+│  SELECT _action, _cluster_id,        │
 │    jsonb_build_object(...) as data,  │
-│    r._base                           │
-│  FROM _resolved_contact r            │
-│  WHERE <business_filters>            │
+│    _base                             │
+│  FROM _delta_crm_contacts            │
+│  WHERE email IS NOT NULL             │
+│    AND status != 'test'              │
+│                                      │
+│  For simple 1:1 sync, this can be    │
+│  skipped — writeback reads _delta    │
+│  views directly.                     │
 └────────────┬─────────────────────────┘
-             │ produces
+             │ consumes
              ▼
 ┌──────────────────────────────────────┐
 │  DESIRED-STATE TABLES                │
@@ -522,23 +528,26 @@ External APIs
 
 ### Architectural Responsibilities
 
-**OSI-Mapping (Consolidation Layer)**
+**OSI-Mapping (Consolidation + Delta Layer)**
 - Declares target entity schemas (what contact should look like)
 - Declares field mappings (how to construct targets from sources)
 - Declares identity rules (when two rows represent same entity)
 - Declares conflict strategies (which source wins for each field)
 - Computes transitive closure for identity matching
 - Produces golden records and change deltas
+- Reverse-projects resolved values back to per-source shapes
+- Classifies changes as insert/update/delete/noop per source (`_delta` views)
 - Maintains lineage & provenance
 - Provides base snapshots for 3-way merge
 - Fully testable via embedded YAML tests
+- **Key insight:** OSI's `_delta_{mapping}` views already contain `_action`, `_cluster_id`, per-source-shaped fields, and `_base` — this is essentially the desired-state source
 
-**Bridge Layer (Business Logic)**
-- Decides when to route changes (filters, conditions)
-- Applies app-specific conflict resolution (if OSI's isn't sufficient)
-- Produces desired-state table format
-- Handles atomicity across related entities
-- Can be dbt YAML, Python, stored procedures, or custom code
+**Optional Business-Filter Query (SQL view / dbt model)**
+- Thin `WHERE` clause on OSI delta views for app-specific filtering
+- Example: "Only sync contacts where email IS NOT NULL and status != 'test'"
+- For simple 1:1 sync: can be skipped entirely — writeback reads `_delta` views directly
+- NOT a separate architectural layer — just a query
+- Can be a `CREATE VIEW`, a dbt model, or a materialized query
 
 **In-and-Out Ingestion (HTTP Source Connector)**
 - Pulls data from external HTTP APIs reliably
@@ -551,11 +560,11 @@ External APIs
 - **NOT responsible for:** Identity resolution, conflict resolution, MDM logic
 
 **In-and-Out Writeback (HTTP Target Connector)**
-- Reads desired-state tables (provided by bridge)
+- Reads desired-state from OSI delta views (directly or via optional business-filter query)
 - Issues pre-flight GET for conflict detection
 - Compares base vs current vs resolved
 - Issues conditional writes (ETags) when available
-- Constructs payloads via field mapping templates
+- Constructs payloads via `transform.template` (reshapes source-shaped delta fields into target API write format)
 - Tracks last-written-state and identity links
 - Handles retries, rate limiting, dead-letter
 - Writes generated IDs back to PostgreSQL feedback table
@@ -607,41 +616,43 @@ Groups by _cluster_id:
   _base: {email: "alice@x.com", name: "Alice"}
 ```
 
-### Step 5: Bridge Layer
+### Step 5: OSI Delta View (`_delta_crm_contacts`)
+
+OSI's delta view already classifies the change and includes all fields needed for writeback:
+
 ```sql
-INSERT INTO inout_dst_crm_contact
-SELECT
-  CASE
-    WHEN r.name != prev.name THEN 'update'
-    ELSE 'noop'
-  END as action,
-  r._cluster_id,
-  jsonb_build_object('email', r.email, 'name', r.name) as data,
-  r._base,
-  NULL as base_version
-FROM _resolved_contact r
-LEFT JOIN previous_resolved prev USING (cluster_id)
-WHERE r._cluster_id IS NOT NULL
+-- OSI produces this automatically from _rev vs _base comparison:
+_action: 'noop'            -- resolved name "Alice" = _base name "Alice" → no change needed
+_cluster_id: <UUID>
+id: 100
+email: alice@x.com
+name: Alice
+_base: {id: 100, email: "alice@x.com", name: "Alice"}
 ```
 
-Produces:
+For SAP (`_delta_sap_contacts`):
+```sql
+_action: 'update'          -- resolved name "Alice" ≠ _base full_name "Alice Smith" → update
+_cluster_id: <UUID>
+customer_id: CUST-001
+contact_email: alice@x.com
+full_name: Alice           -- Resolved: CRM priority wins
+_base: {customer_id: "CUST-001", contact_email: "alice@x.com", full_name: "Alice Smith"}
 ```
-action: 'update'
-cluster_id: <UUID>
-data: {email: "alice@x.com", name: "Alice"}
-base: {email: "alice@x.com", name: "Alice"}
-base_version: NULL
-```
+
+**No separate bridge layer needed** — this is the desired-state, produced directly by OSI.
+Optional: a thin `WHERE` clause can filter (e.g., `WHERE email IS NOT NULL`).
 
 ### Step 6: Writeback Conflict Detection
 ```
-1. Read desired-state: action=update, cluster_id=<UUID>, data={...}, base={...}
-2. Issue GET /contacts/100 → {id: 100, email: "alice@x.com", name: "Alice Anderson"}
+1. Read from _delta_sap_contacts: _action=update, _cluster_id=<UUID>,
+   full_name="Alice", _base={full_name: "Alice Smith"}
+2. Issue GET /customer/CUST-001 → {full_name: "Alice Anderson"}
 3. Three-way comparison:
-   - base (from OSI): {email: "alice@x.com", name: "Alice"}
-   - current (pre-flight): {email: "alice@x.com", name: "Alice Anderson"}
-   - resolved (from bridge): {email: "alice@x.com", name: "Alice"}
-4. Conflict detected: "Anderson" added externally
+   - base (from OSI _base): {full_name: "Alice Smith"}
+   - current (pre-flight): {full_name: "Alice Anderson"}
+   - desired (from OSI delta): {full_name: "Alice"}
+4. Conflict detected: base≠current ("Anderson" added externally)
 5. Apply conflict_resolution strategy:
    - dead_letter: Route to DLQ for operator review
    - last_writer_wins: Overwrite (use caution)
@@ -652,12 +663,12 @@ base_version: NULL
 ### Step 7: OSI Delta View (Reverse Mapping)
 ```
 _delta_crm:
+  _action: noop             (resolved matches _base → no write needed)
   {id: 100, email: "alice@x.com", name: "Alice"}
-  (change type: noop if no conflict)
 
 _delta_sap:
-  {customer_id: "CUST-001", contact_email: "alice@x.com", full_name: "Alice Smith"}
-  (compare resolved against source's _base)
+  _action: update           (resolved name differs from _base's full_name)
+  {customer_id: "CUST-001", contact_email: "alice@x.com", full_name: "Alice"}
 ```
 
 ### Step 8: ETL Writes Back
@@ -831,7 +842,7 @@ tests:
 **Result:**
 - In-and-out config: **simpler, more focused**
 - OSI config: **Single source of truth for consolidation**
-- Bridge layer: **Clearly separated business logic**
+- Bridge layer: **Clearly separated as optional business-filter query**
 - Requirements: **More precise, non-overlapping**
 
 ---
@@ -843,17 +854,17 @@ tests:
 | Requirement | Current Scope | With OSI | Reason |
 |---|---|---|---|
 | **#1: Per-Datatype Mapping** | Writeback must declare API endpoint per datatype | OSI declares this in central config | Consolidation mapping, not HTTP sync concern |
-| **#7: Desired-State Table** | Writeback tool must produce these | Bridge layer produces these | MDM responsibility, not sync tool concern |
+| **#7: Desired-State Table** | Writeback tool must produce these | OSI delta views produce these directly | MDM + delta classification is OSI's concern |
 | **#8: Identity Mapping** | Writeback tool computes cluster_id | OSI's `_cluster_id` via transitive closure | Identity resolution, not HTTP protocol concern |
 | **#12: API Asymmetry Handling** | Writeback handles read≠write schemas | Split: OSI handles consolidation asymmetry, in-and-out handles target asymmetry | Consolidated schema asymmetry is MDM concern |
-| **#34: Cluster Merge & Split Propagation** | Writeback tool handles merge/split actions | Bridge layer produces merge/split actions in desired-state | Business logic decision, not HTTP sync concern |
+| **#34: Cluster Merge & Split Propagation** | Writeback tool handles merge/split actions | OSI delta views emit merge/split action classifications | Identity resolution logic, not HTTP sync concern |
 
 ### Requirements Simplified (Clearer Responsibility)
 
 | Requirement | Change | Impact |
 |---|---|---|
 | **#8: Identity Mapping** | Change from "compute + enforce unique constraint" to "accept pre-computed from bridge" | Writeback now ~50 lines simpler |
-| **#16: External Reference Field** | Move from writeback config to bridge layer | Bridge decides what field to populate |
+| **#16: External Reference Field** | Move from writeback config to OSI reverse view | OSI reverse view can include cluster_id as a mapped field |
 | **#23: Pre-Write Validation** | Simplified: validate against target API schema (not consolidation schema) | Less redundant validation |
 | **#37: Connector Validation Mode** | Move to bridge layer + OSI validation | OSI tests full consolidation pipeline |
 
@@ -906,8 +917,8 @@ tests:
 - Simplified identity mapping logic
 - Updated tests for new data contracts
 
-### Phase 3: Bridge Layer Patterns (Weeks 5-6)
-**Focus: Document how to build bridge layer**
+### Phase 3: Business-Filter Patterns & Direct Delta Consumption (Weeks 5-6)
+**Focus: Document how writeback reads OSI delta views**
 
 - Create dbt example: `_resolved_contact` → `desired_state_contact`
 - Create Python example: same transformation
@@ -991,80 +1002,64 @@ tests:
 
 ---
 
-## 13. Bridge Layer: The Missing Piece
+## 13. Business-Filter Query: Bridging OSI Delta Views to Writeback
 
 ### What Is It?
 
-The **bridge layer** is the application logic between OSI's golden records and in-and-out's writeback tool. It decides:
-- When is a change worth writing back? (filtering)
-- Should this entity go to all targets or just some? (routing)
-- Are there app-specific conflict overrides? (business rules)
-- How should related entities stay atomic? (transaction boundaries)
+OSI-Mapping's `_delta_{mapping}` views already provide action-classified, per-source, cluster-id-tagged output with `_base` — this is ~80% of a desired-state table. The remaining ~20% is an **optional thin SQL query** (not a separate architectural layer) that:
+- Filters: "Only write back contacts where email IS NOT NULL" (business rules)
+- Routes: "Enterprise accounts to ERP, SMB to CRM" (multi-target decisions)
+- Wraps: Packages OSI's flat columns into the JSONB `data` column format
+
+For simple 1:1 sync scenarios (all deltas written to target), **this query can be skipped entirely** — in-and-out reads `_delta_{mapping}` views directly.
 
 ### Implementations
 
-**Option A: dbt YAML** (SQL-centric)
+**Option A: SQL View** (simplest — recommended for most cases)
+```sql
+-- For simple cases: just filter and wrap OSI's delta output
+CREATE VIEW inout_dst_crm_contact AS
+SELECT
+  _action as action,
+  _cluster_id as cluster_id,
+  jsonb_build_object(
+    'email', email,
+    'first_name', first_name,
+    'last_name', last_name
+  ) as data,
+  _base as base,
+  null as base_version
+FROM _delta_crm_contacts
+WHERE _action != 'noop'
+  AND email IS NOT NULL;           -- business rule: email required
+```
+
+**Option B: dbt model** (for teams already using dbt)
 ```yaml
 # models/desired_state/contact_sync.sql
 select
-  r._cluster_id as cluster_id,
-  case
-    when r._ts_updated_at > cast(null as timestamp) -- check if changed
-    then 'update'
-    else 'noop'
-  end as action,
+  _action as action,
+  _cluster_id as cluster_id,
   jsonb_build_object(
-    'email', r.email,
-    'first_name', r.first_name,
-    'last_name', r.last_name
+    'email', email,
+    'first_name', first_name,
+    'last_name', last_name
   ) as data,
-  r._base,
+  _base as base,
   null as base_version
-from {{ ref('resolved_contact') }} r
-where r._cluster_id is not null
-  and r.email is not null -- business rule: email required
+from {{ source('osi', '_delta_crm_contacts') }}
+where _action != 'noop'
+  and email is not null
 ```
 
-**Option B: Python** (logic-centric)
-```python
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-
-def build_desired_state(session: Session):
-    resolved = session.execute("""
-        SELECT _cluster_id, email, first_name, ...
-        FROM _resolved_contact
-    """).fetchall()
-    
-    for row in resolved:
-        desired_action = decide_action(row)  # Custom logic
-        desired_data = construct_payload(row)
-        
-        insert_desired_state(
-            cluster_id=row['_cluster_id'],
-            action=desired_action,
-            data=desired_data,
-            base=row['_base']
-        )
-```
-
-**Option C: PostgreSQL Stored Procedure**
-```sql
-CREATE OR REPLACE FUNCTION build_desired_state_contact()
-RETURNS void AS $$
-BEGIN
-  INSERT INTO inout_dst_crm_contact
-    (cluster_id, action, data, base, base_version)
-  SELECT
-    r._cluster_id,
-    (CASE WHEN r.email != prev.email THEN 'update' ELSE 'noop' END),
-    to_jsonb(r),
-    r._base,
-    NULL
-  FROM _resolved_contact r
-  LEFT JOIN previous_contact prev USING (cluster_id);
-END
-$$ LANGUAGE plpgsql;
+**Option C: Direct consumption** (no query needed for 1:1 sync)
+```yaml
+# in-and-out writeback config: read OSI delta view directly
+writeback:
+  desired_state_source: _delta_crm_contacts   # OSI view, not a separate table
+  action_column: _action
+  cluster_id_column: _cluster_id
+  base_column: _base
 ```
 
 ### Responsibility
@@ -1198,14 +1193,16 @@ $$ LANGUAGE plpgsql;
 - Versioning: in-and-out declares required OSI version
 - Keep bridge layer as abstraction (can switch consolidation layer underneath)
 
-### Risk 3: Bridge Layer Complexity
+### Risk 3: Business-Filter Query Complexity
 
-**Concern:** Bridge layer adds another moving part.
+**Concern:** For complex routing scenarios, the optional business-filter query grows beyond a simple `WHERE` clause.
 
 **Mitigation:**
-- Provide templates (dbt, Python)
-- Start simple (direct pass-through: OSI output → desired-state)
-- Incrementally add business logic
+- For simple 1:1 sync: skip entirely — read `_delta` views directly
+- For moderate filtering: simple SQL `CREATE VIEW` with `WHERE` clauses
+- For complex routing: dbt models or stored procedures
+- Start simple (direct pass-through: OSI delta → writeback)
+- Incrementally add business logic only when needed
 - Monitor adoption patterns
 
 ### Risk 4: Performance (Views + Triggers)
@@ -1232,7 +1229,7 @@ OSI-Mapping represents a **paradigm shift** from custom integration code to **de
 3. **Improve testability** — OSI's YAML tests are executable; integration tests can be deterministic
 4. **Reduce configuration burden** — Single YAML file declares all consolidation rules, not scattered across multiple connector configs
 5. **Enable multi-system scenarios** — Naturally handles 2+ sources simultaneously, not just pairwise
-6. **Provide clear architecture** — Three clear layers: ingestion (HTTP), consolidation (OSI), sync (in-and-out)
+6. **Provide clear architecture** — Two clear components: ingestion (HTTP) and writeback (HTTP), with OSI consolidation in between; optional business-filter query, not a separate layer
 
 ### Immediate Actions
 
