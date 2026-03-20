@@ -6,9 +6,10 @@
 
 **Configuration Layers:**
 1. **OSI-Mapping Config** (`osi/consolidation.yaml`): Declares all consolidation and business logic — identity rules, conflict strategies, business filtering (`reverse_filter`), field transforms (`expression` / `reverse_expression`), target-centric noop (`written_state` + `derive_noop`), and insert/delete propagation. OSI's delta views (`_delta_{mapping}`) are the complete desired-state source.
-2. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP mechanics only — endpoints, auth, pagination, rate limits, and `transform.template` for wrapping source-shaped delta fields into target API JSON payloads.
+2. **pg-trickle Stream Tables** (SQL / dbt macros): Wraps OSI's view pipeline into automatically-refreshing stream tables using differential dataflow. Handles DAG-ordered refresh, ETL feedback loop automation via CDC, and watermark-gated ingestion coordination. Optional for small datasets; required for production scale. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md).
+3. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP mechanics only — endpoints, auth, pagination, rate limits, and `transform.template` for wrapping source-shaped delta fields into target API JSON payloads.
 
-There is no bridge layer. OSI-Mapping covers 100% of business logic. In-and-Out covers 100% of HTTP mechanics.
+There is no bridge layer. OSI-Mapping covers 100% of business logic. In-and-Out covers 100% of HTTP mechanics. pg-trickle provides incremental view maintenance to make the OSI pipeline efficient at scale.
 
 ## Table of Contents
 

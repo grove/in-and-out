@@ -975,14 +975,16 @@ tests:
 
 ### Limitations & Gaps
 
-❌ **No Orchestration** — OSI doesn't schedule syncs; external system (cron, Airflow) must trigger  
+❌ **No Orchestration** — OSI doesn't schedule syncs; external system must trigger  
 ❌ **No CDC** — OSI doesn't detect changes; external CDC tool must populate tables  
 ❌ **PostgreSQL Views Only** — Currently generates views; other targets would need engine extensions  
-❌ **No Streaming** — Batch processing model; incremental IVM discussed but deferred  
+❌ **No Streaming (native IVM)** — Batch processing model; views re-execute from scratch  
 ❌ **No Transaction Semantics** — Cannot guarantee all-or-nothing ACID guarantee across sources  
 ❌ **Expression Safety** — SQL expression safety checked at validation time; assumes trusted authors  
 
 **These gaps are not weaknesses—they're intentional scope boundaries. OSI is the consolidation layer, not the orchestration or execution layer.**
+
+> **Note:** The "No CDC" and "No Streaming/IVM" gaps are directly addressed by **pg-trickle** (https://github.com/grove/pg-trickle/), a companion PostgreSQL extension by the same team. pg-trickle converts OSI's view pipeline into automatically-refreshing stream tables maintained via differential dataflow. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for details.
 
 ---
 
@@ -1104,6 +1106,29 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 - Prevents bugs from duplicate logic
 - Clarifies responsibilities
 
+### 7. Adopt pg-trickle as the OSI Execution Substrate
+
+**Action:** Use [pg-trickle](https://github.com/grove/pg-trickle/) to convert OSI's 6-stage view pipeline into automatically-refreshing stream tables. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the full analysis.
+
+**What pg-trickle provides:**
+- **Incremental refresh (O(changed rows), not O(all rows))** — Critical for production-scale datasets
+- **ETL feedback loop automation** — CDC auto-detects writes to `_written_` / `_cluster_members_`; OSI views re-evaluate without external orchestration
+- **DAG-aware scheduling** — Maintains OSI's 6-stage pipeline in topological order automatically
+- **Watermark gating** — Holds OSI refresh until ingestion cycle is confirmed complete
+- **WITH RECURSIVE in DIFFERENTIAL mode** — Incremental transitive closure updates (only affected clusters recomputed)
+
+**Rationale:**
+- Same authors as OSI-Mapping — explicitly designed to compose with it
+- Replaces need for external orchestration of OSI pipeline
+- Makes large-scale MDM viable (thousands of source records, hundreds of connectors)
+- All within PostgreSQL — no additional infrastructure
+
+**Phasing:**
+1. Phase 1 (development/early production): Use plain OSI views — simpler, validate the architecture
+2. Phase 2 (scale): Wrap OSI views with pg-trickle stream tables when datasets grow beyond ~100K rows per source
+
+**Caveats:** pg-trickle v0.9.0 targets PostgreSQL 18 and is pre-1.0. Plan adoption for v1.0.0 and PG 16/17 compatibility (v0.12.0).
+
 ---
 
 ## 15. Competitive / Strategic Analysis
@@ -1118,7 +1143,9 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 | **dbt Cloud** | Transform warehouse data | Bridge layer + orchestration |
 | **OSI-Mapping alone** | Declarative consolidation spec | No HTTP sync, no orchestration |
 | **In-and-Out alone** | Bidirectional HTTP sync | No MDM, no consolidation |
+| **pg-trickle alone** | Incremental view maintenance for PostgreSQL | No HTTP sync, no consolidation logic |
 | **In-and-Out + OSI** | Bidirectional HTTP sync with MDM | ✅ Complete, open, modular |
+| **In-and-Out + OSI + pg-trickle** | Full stack with incremental IVM | ✅ Production-scale, self-orchestrating |
 
 ### Unique Capabilities
 
@@ -1163,14 +1190,14 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 
 ### Risk 4: Performance (Views + Triggers)
 
-**Concern:** PostgreSQL views + 6-stage pipeline might be slow.
+**Concern:** PostgreSQL views + 6-stage pipeline might be slow at scale. The `WITH RECURSIVE` transitive closure at Stage 2 is especially expensive — O(all source rows) per full recompute.
 
 **Mitigation:**
-- OSI generates standard SQL (no magic)
-- Materialized views option (IVM) discussed in OSI
-- Start with modest datasets (10K–100K records)
-- Profile and optimize as needed
-- Can parallelize ingestion ↔ consolidation
+- OSI generates standard SQL (no magic); simple scenarios are fast
+- For moderate scale (up to ~100K rows per source): plain OSI views are acceptable, especially for development
+- **For production scale (>100K rows): use pg-trickle** — converts OSI's view pipeline into differential stream tables, reducing per-cycle cost from O(all rows) to O(changed rows). Same SQL interface, no connector change required
+- pg-trickle supports `WITH RECURSIVE` in DIFFERENTIAL mode — only affected clusters recomputed, not all
+- See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the complete performance analysis and integration guide
 
 ---
 

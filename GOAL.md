@@ -9,22 +9,28 @@
 **Architecture:**
 ```
 External APIs → [In-and-Out Ingestion] → PostgreSQL source tables
+                                    advance_watermark() after each cycle
                                          ↓
                         [OSI-Mapping YAML + Engine]
-                        - Identity resolution (transitive closure)
+                        [+ pg-trickle IVM — differential refresh, DAG-ordered]
+                        - Identity resolution (transitive closure, WITH RECURSIVE)
                         - Conflict resolution (per-field strategies)
                         - Business filtering (filter / reverse_filter per mapping)
                         - Field-level transforms (expression / reverse_expression)
                         - Noop detection incl. target-centric (written_state + derive_noop)
                         - Delta classification (insert/update/delete/noop)
-                        - Insert ID feedback (cluster_members table)
+                        - Insert ID feedback (cluster_members stream table)
                                          ↓
-                        _delta_{mapping} views — complete desired-state:
+                        _delta_{mapping} stream tables — complete desired-state:
                         _action, _cluster_id, source-shaped fields, _base
+                        (pre-computed, incremental, instant reads)
                                          ↓
            [In-and-Out Writeback] → External APIs
            (HTTP execution + ETL feedback to written_state / cluster_members)
+                                         ↓ (CDC auto-triggers OSI re-evaluation)
 ```
+
+> **pg-trickle** (https://github.com/grove/pg-trickle/) is a companion PostgreSQL extension by the same team. It converts OSI's plain SQL views into automatically-refreshing stream tables using differential dataflow: only changed rows are processed per cycle (O(delta) not O(all rows)). It also automates the ETL feedback loop — writes to `_written_` and `_cluster_members_` are detected by CDC triggers and OSI views self-update without external orchestration. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the full analysis. **pg-trickle is optional for small datasets; required for production scale.**
 
 **Key Insight:** OSI-Mapping's schema covers 100% of what we previously called a "bridge layer":
 - Business filtering: `reverse_filter: "email IS NOT NULL AND status = 'active'"`
@@ -36,12 +42,15 @@ External APIs → [In-and-Out Ingestion] → PostgreSQL source tables
 
 **There is no bridge layer.** OSI-Mapping config declares all business logic. In-and-Out config declares HTTP mechanics only.
 
+**pg-trickle makes OSI production-scalable:** At large scale, plain OSI views re-execute the full 6-stage pipeline (including `WITH RECURSIVE` transitive closure) from scratch on each writeback cycle. pg-trickle converts those views into stream tables maintained by differential dataflow — only changed rows are processed per cycle. It also closes the ETL feedback loop automatically via CDC triggers. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md).
+
 **In-and-Out's Scope:** Reliable, conflict-aware HTTP API synchronization in both directions (ingestion and writeback). Identity resolution, consolidation mapping, field-level conflict resolution, and business routing are handled by OSI-Mapping and declared in a separate `osi-mapping.yaml` file (not an in-and-out concern).
 
 **Key Impact on This Document:**
 - Requirements T2 #1, #7, #8, #12, #34 are recontextualized (OSI handles consolidation; in-and-out executes)
 - Core T1 and T2 requirements remain valid and unchanged
 - See [REPORT_OSI_MAPPING.md](REPORT_OSI_MAPPING.md) for detailed integration analysis
+- See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the pg-trickle IVM analysis (OSI view execution substrate)
 
 ---
 
