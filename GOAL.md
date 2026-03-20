@@ -235,3 +235,74 @@ Every operator-initiated action — whether issued through the runtime control t
 6. **Operational CLI:** Build a command-line interface for operator interactions that go beyond raw SQL — inspecting sync-run logs, managing the runtime control table, triggering replays from the dead-letter queue, resetting high-water marks, rotating credentials, and running connector validation (T1 #43). The CLI must connect directly to the PostgreSQL instance managed by the daemons.
 7. **Connector SDK & Documentation:** Define and publish the connector authoring contract — the configuration schema specification, the simulator interface contract, the required test-suite structure, and the metadata annotations (PII fields, operation definitions, dependency declarations). Produce a reference connector implementation with an accompanying simulator to serve as the canonical example for future connector authors.
 8. **Testing Strategy:** Define and implement a multi-layer testing approach: unit tests for engine components, transformation logic, and configuration parsing; integration tests using the simulator framework (step #3) to exercise full ingestion and writeback cycles against simulated external systems; contract tests validating that the PostgreSQL schema contract between ingestion, MDM, and writeback is maintained across schema migrations; and load/stress tests verifying throughput, memory consumption, connection-pool behaviour, and replication-slot lag under sustained high-volume sync workloads.
+
+### Requirements by Implementation Step
+
+This cross-reference maps each implementation step to the specific requirements it primarily addresses. Requirements that span multiple steps are listed under the step that implements their core logic. Requirement identifiers match the numbered lists in Tool 1 and Tool 2 sections above.
+
+**Step 1 — Configuration Design** *(done — see CONFIG_DESIGN.md)*
+
+| Scope | Requirements |
+|---|---|
+| T1 (Ingestion) | #11 auth schemes · #12 pagination · #14 delta-only flag · #21 field selection · #23 ingestion-only flag · #24 custom pre-request auth · #27 configurable response expressions · #28 runtime parameters · #30 history mode · #34 signature verification config · #37 scheduling config · #39 API version declaration · #42 webhook server hardening config · #43 validation mode (config aspect) · #45 timestamp format declaration · #46 fan-in policy · #48 bulk export config |
+| T2 (Writeback) | #4 base column definition · #7 desired-state table structure · #18 per-operation HTTP config · #19 upsert config · #20 archive config · #26 dependency ordering config · #30 resolution strategy declaration · #33 batch composition config · #38 protection level declaration |
+| MDM Contract | Table naming conventions · runtime control table schema · watermark table schema |
+
+**Step 2 — Database Architecture**
+
+| Scope | Requirements |
+|---|---|
+| T1 (Ingestion) | #1 per-datatype tables · #2 JSONB schema + metadata columns · #3 watermark table · #15 history/audit table · #29 checkpoint storage · #31 schema tracking table · #32 tombstone writes · #36 PostgreSQL advisory locks · #40 watermark table schema |
+| T2 (Writeback) | #8 identity mapping table · #9 last-written-state table · #22 `REPLICA IDENTITY FULL` · #32 replication slot provision · #34 merge/split table changes |
+| MDM Contract | Ingestion output contract · writeback input contract · sync-run log schema · identity mapping schema · shared support tables · schema migration coordination · schema-version check at startup |
+
+**Step 3 — Simulator Framework**
+
+| Scope | Requirements |
+|---|---|
+| T1 (Ingestion) | #6 webhook endpoint simulation · #13 circuit-breaker trigger scenarios (empty / shrunk result sets) · #29 checkpoint recovery (simulated mid-sync failure) · #34 signature generation for test payloads · #35 out-of-order event delivery |
+| T2 (Writeback) | #14 duplicate-insert detection scenarios · #21 transaction atomicity (partial-failure simulation) · #27 dry-run / preview mode · #37 connector validation mode |
+| Simulator contract | Per-connector simulator interface · configurable pagination · configurable auth flows · configurable error and rate-limit responses |
+
+**Step 4 — Ingestion Engine**
+
+| Scope | Requirements |
+|---|---|
+| T1 (Ingestion) | #3 full & incremental execution · #4 deletion tracking · #5 deletion verification · #6 webhook reception + polling fallback · #7 webhook lifecycle management · #8 full-state resolution from notifications · #9 parameterized sources (per-ID detail fetches) · #10 single source-of-truth table · #13 circuit breakers · #16 linked/nested entity resolution · #17 raw payload preservation · #18 rate limiting & politeness · #19 fan-out routing · #20 multi-tenancy scoping · #22 relationship datatypes · #25 webhook event deduplication · #26 webhook ownership scoping · #29 intra-sync checkpointing · #33 intra-sync deduplication · #35 out-of-order event handling · #36 per-datatype concurrency control · #38 pagination drift protection · #41 soft-delete resurrection · #43 connector validation (execution) · #44 source-unavailability handling · #47 idempotent upsert writes · #48 bulk export execution |
+| Cross-cutting | Error classification & retry policy · observability (metrics, logs, traces) · graceful shutdown · health & readiness endpoints · circuit breaker lifecycle (half-open probe) · configuration hot-reloading · multi-instance HA (distributed advisory locks) |
+
+**Step 5 — Writeback Engine**
+
+| Scope | Requirements |
+|---|---|
+| T2 (Writeback) | #1 per-datatype mapping · #2 smart writes (incremental-first) · #3 conflict prevention protocol (mandatory pre-flight read, three-way comparison, field-scoped detection, conditional writes) · #5 client-side patching (diff + single GET serving both purposes) · #6 CRDT support · #8 identity mapping (capture generated IDs) · #9 last-written-state tables · #10 near real-time writeback via logical replication · #11 politeness & rate limiting · #12 API asymmetry handling · #13 response capture & audit logging · #14 duplicate insert prevention · #15 separate processing paths per operation type · #16 external reference field writeback · #17 pre-write data transformation · #21 transaction-level atomicity · #23 pre-write payload validation · #24 dead-letter queue · #25 writeback circuit breaker · #27 dry-run / preview mode · #28 write ordering per record · #29 partial-success batch response parsing · #31 delete safety guard · #35 polling-mode scheduling · #36 per-datatype concurrency control · #39 conflict-driven re-ingestion signal |
+| Cross-cutting | Error classification & retry policy · observability · graceful shutdown · health & readiness endpoints · circuit breaker lifecycle · multi-instance HA |
+
+**Step 6 — Operational CLI**
+
+| Scope | Requirements |
+|---|---|
+| T1 (Ingestion) | #43 CLI invocation of connector validation |
+| T2 (Writeback) | #27 CLI invocation of dry-run · #37 CLI invocation of writeback validation |
+| Runtime control | All nine command types: `resync` · `pause` · `resume` · `reset-watermark` · `reload-config` · `reset-circuit-breaker` · `replay-dead-letter` · `validate` · `drain` |
+| Operator audit | CLI-initiated actions written to audit log · `issued_by` tracking |
+| Other | Dead-letter inspection & replay · credential rotation · sync-run log inspection · schema migration command |
+
+**Step 7 — Connector SDK & Documentation**
+
+| Scope | Requirements |
+|---|---|
+| T1 (Ingestion) | #28 runtime-params convention (authoring docs) · #39 API version management (authoring guide) · #43 test-suite structure for validation mode |
+| T2 (Writeback) | #37 writeback connector validation authoring guide · #38 protection-level declaration per connector |
+| Cross-cutting | PII field annotation convention · configuration schema specification · simulator interface contract · required test-suite structure per connector · reference connector + reference simulator |
+
+**Step 8 — Testing Strategy**
+
+| Scope | Focus areas |
+|---|---|
+| Unit tests | Config parsing · transformation logic · path/expression evaluation · pagination strategies · error classification |
+| Integration tests (simulator-backed) | Full ingestion cycles (full + incremental) · writeback cycles (insert, update, delete, archive, upsert) · conflict resolution paths · circuit breaker open/close/probe · checkpoint recovery (T1 #29) · out-of-order event handling (T1 #35) · soft-delete resurrection (T1 #41) · duplicate insert prevention (T2 #14) · transaction atomicity (T2 #21) |
+| Concurrency tests | Per-datatype advisory lock behaviour (T1 #36, T2 #36) · multi-instance HA (two simultaneous ingestion instances) |
+| Idempotency tests | Crash-and-replay for ingestion writes (T1 #47) · crash-and-replay for writeback writes (T2 #14) · watermark atomicity (T1 #40) |
+| Contract tests | PostgreSQL schema contract across migrations · `REPLICA IDENTITY FULL` behaviour (T2 #22) · watermark table integrity |
+| Load / stress tests | Throughput under sustained high-volume sync · memory consumption · connection-pool exhaustion · replication-slot lag under backlog (T2 #32) · rate-limiting enforcement (T1 #18, T2 #11) · batch composition under load (T2 #33) |
