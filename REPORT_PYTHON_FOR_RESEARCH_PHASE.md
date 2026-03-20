@@ -117,29 +117,31 @@ The standard `asyncio` module works, but `anyio` provides structured concurrency
 
 ## 4. PostgreSQL
 
-### Recommended: `psycopg` 3.2 (async mode)
+### Recommended: `psycopg` 3.2 (async mode) + `pgoutput-decoder` (for CDC)
 
 | Library | Role |
 |---|---|
 | **psycopg[binary]** (3.2.x) | Async PostgreSQL client — queries, transactions, JSONB, advisory locks |
-| **psycopg** logical replication API | Logical replication slot consumption for writeback triggers |
 | **psycopg_pool** | Async connection pool |
+| **pgoutput-decoder** (0.1+) | Logical replication CDC — Rust-powered pgoutput protocol decoder |
+
+The PostgreSQL layer is split into two complementary libraries: `psycopg` 3 for all standard database operations (queries, transactions, COPY, advisory locks), and `pgoutput-decoder` for consuming the logical replication stream that drives Tool 2 (Writeback).
+
+### 4a. `psycopg` 3 — Queries & Transactions
 
 **Why `psycopg` 3 (not `asyncpg`):**
 
 Both are excellent async PostgreSQL drivers. `psycopg` 3 wins for this project because:
 
-1. **Logical replication support.** `psycopg` 3 has a built-in API for consuming logical replication streams (`connection.stream(ReplicationSlot(...))`) — directly supporting T2 #10, #22, and #32. `asyncpg` has no logical replication API; you'd need to implement the streaming replication protocol manually.
+1. **Advisory lock ergonomics.** `SELECT pg_advisory_lock(key)` and `pg_try_advisory_lock(key)` within async transactions work cleanly in `psycopg` 3. These are critical for T1 #36, T2 #36 (per-datatype concurrency control).
 
-2. **Advisory lock ergonomics.** `SELECT pg_advisory_lock(key)` and `pg_try_advisory_lock(key)` within async transactions work cleanly in `psycopg` 3. These are critical for T1 #36, T2 #36 (per-datatype concurrency control).
+2. **JSONB-native.** `psycopg` 3 natively serialises/deserialises Python dicts to PostgreSQL JSONB and back, using `psycopg.types.json`. No manual `json.dumps()` wrappers needed.
 
-3. **JSONB-native.** `psycopg` 3 natively serialises/deserialises Python dicts to PostgreSQL JSONB and back, using `psycopg.types.json`. No manual `json.dumps()` wrappers needed.
+3. **`COPY` protocol.** For bulk data loads (T1 #48 — bulk export API support), `psycopg` 3's async `COPY` support writes thousands of rows per second — substantially faster than individual `INSERT` statements.
 
-4. **`COPY` protocol.** For bulk data loads (T1 #48 — bulk export API support), `psycopg` 3's async `COPY` support writes thousands of rows per second — substantially faster than individual `INSERT` statements.
+4. **`LISTEN/NOTIFY`.** Native async support for PostgreSQL notifications — useful for the control table poller as an optimisation over polling.
 
-5. **`LISTEN/NOTIFY`.** Native async support for PostgreSQL notifications — useful for the control table poller as an optimisation over polling.
-
-6. **Server-side cursors.** For iterating over large result sets without loading all rows into memory — useful for full-sync diff operations (T1 #4, #13).
+5. **Server-side cursors.** For iterating over large result sets without loading all rows into memory — useful for full-sync diff operations (T1 #4, #13).
 
 **Connection pool setup:**
 
@@ -171,8 +173,120 @@ async with pool.connection() as conn:
         await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
 ```
 
+### 4b. `pgoutput-decoder` — Logical Replication / CDC
+
+`pgoutput-decoder` is a Rust-powered PostgreSQL CDC library (authored in-house, Apache 2.0) that streams database changes in real-time using PostgreSQL's native logical replication protocol. It produces **Debezium-compatible events** — structured change messages with `before`/`after` row data, operation type, LSN, and timestamps.
+
+**Why `pgoutput-decoder` instead of `psycopg` 3's replication API:**
+
+`psycopg` 3 has a logical replication API, but it gives you raw WAL bytes from the `pgoutput` plugin that you must decode yourself in Python. `pgoutput-decoder` is superior for this project because:
+
+1. **Rust-decoded pgoutput protocol.** The binary pgoutput wire format (BEGIN, RELATION, INSERT, UPDATE, DELETE, COMMIT messages) is decoded in Rust at thousands of messages per second with sub-millisecond latency — orders of magnitude faster than a pure-Python decoder.
+
+2. **Structured Debezium-compatible events.** Each change is delivered as a `ReplicationMessage` with typed fields:
+
+    ```python
+    async for message in reader:
+        message.op       # "c" (insert), "u" (update), "d" (delete)
+        message.before   # Old row data (dict) — for updates/deletes
+        message.after    # New row data (dict) — for inserts/updates
+        message.source   # {"db", "schema", "table", "lsn", "ts_ms", ...}
+        message.ts_ms    # Timestamp in milliseconds
+    ```
+
+    This maps directly to the writeback engine's needs — no intermediate parsing step.
+
+3. **Manual LSN acknowledgment.** Supports `auto_acknowledge=False` with explicit `reader.acknowledge(lsn=...)` — enabling exactly-once processing semantics for writeback operations:
+
+    ```python
+    reader = pgoutput_decoder.LogicalReplicationReader(
+        publication_name="inandout_writeback",
+        slot_name="inandout_writeback_slot",
+        host="localhost",
+        database="inandout",
+        auto_acknowledge=False,  # Manual LSN control
+    )
+
+    async for message in reader:
+        table = message.source["table"]
+        if should_process(table):
+            await dispatch_writeback(message)
+            await reader.acknowledge()  # Only after successful writeback
+    ```
+
+4. **REPLICA IDENTITY FULL support.** Captures old row values in UPDATE and DELETE operations — directly enabling T2 #4 (base-aware updates) where the writeback engine needs both the previous and current state to compute a minimal diff.
+
+5. **Auto-reconnect with exponential backoff.** Handles transient connection failures without manual retry logic — production-grade resilience out of the box.
+
+6. **Native JSONB support.** PostgreSQL JSONB columns are automatically converted to Python dicts in the `before`/`after` payloads — no manual deserialisation.
+
+7. **Async-native.** Built on `tokio` and `pyo3-asyncio`, exposing a standard Python async iterator (`async for message in reader`) that integrates directly into the `anyio` task group.
+
+**How it fits into the writeback architecture:**
+
+The `pgoutput-decoder` reader runs as a dedicated task in the writeback daemon's `anyio.TaskGroup`:
+
+```python
+async def replication_listener(reader, engine):
+    """Consumes CDC events and dispatches writeback operations."""
+    async for message in reader:
+        connector, datatype = resolve_table(message.source["table"])
+        if connector is None:
+            continue  # Table not mapped to any connector
+
+        await engine.dispatch_writeback(
+            connector=connector,
+            datatype=datatype,
+            op=message.op,
+            before=message.before,
+            after=message.after,
+            lsn=message.source["lsn"],
+        )
+        await reader.acknowledge()  # Advance replication slot
+```
+
+**Replication slot monitoring (T2 #32):**
+
+Replication slot lag is monitored via `psycopg` querying `pg_replication_slots`:
+
+```python
+async def get_replication_lag(pool):
+    async with pool.connection() as conn:
+        result = await conn.execute("""
+            SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)
+            FROM pg_replication_slots
+            WHERE slot_name = %s
+        """, ["inandout_writeback_slot"])
+        row = await result.fetchone()
+        return row[0] if row else None
+```
+
+**PostgreSQL setup requirements:**
+
+```sql
+-- postgresql.conf
+wal_level = logical
+max_replication_slots = 4
+max_wal_senders = 4
+
+-- Create publication for writeback-eligible tables
+CREATE PUBLICATION inandout_writeback FOR TABLE
+    inandout.contacts,
+    inandout.companies,
+    inandout.deals;
+
+-- Create replication slot
+SELECT pg_create_logical_replication_slot('inandout_writeback_slot', 'pgoutput');
+
+-- Enable REPLICA IDENTITY FULL for base-aware updates
+ALTER TABLE inandout.contacts REPLICA IDENTITY FULL;
+```
+
+**Why not `psycopg` 3's replication API alone:**
+`psycopg` 3 can consume logical replication streams, but it delivers raw `pgoutput` binary messages that require a Python-side decoder. Building that decoder is non-trivial (the pgoutput protocol has 8+ message types with variable-length fields and type-specific encoding). `pgoutput-decoder` has already solved this in Rust — with proper type conversion for all PostgreSQL types including JSONB, arrays, composites, timestamps, and UUIDs. Using `psycopg` 3 for replication would mean reimplementing a slower version of what `pgoutput-decoder` already provides.
+
 **Why not SQLAlchemy:**
-SQLAlchemy is the dominant Python ORM/query builder, but it adds a thick abstraction layer over PostgreSQL that hides the raw SQL we need to understand during research. Advisory locks, logical replication, `REPLICA IDENTITY FULL`, JSONB operators, and atomic watermark writes are all easier to reason about in raw SQL via `psycopg`. If the project continues in Python past the research phase, SQLAlchemy Core (not the ORM) is a reasonable addition for query composition — but it should not be the starting point.
+SQLAlchemy is the dominant Python ORM/query builder, but it adds a thick abstraction layer over PostgreSQL that hides the raw SQL we need to understand during research. Advisory locks, `REPLICA IDENTITY FULL`, JSONB operators, and atomic watermark writes are all easier to reason about in raw SQL via `psycopg`. If the project continues in Python past the research phase, SQLAlchemy Core (not the ORM) is a reasonable addition for query composition — but it should not be the starting point.
 
 ---
 
@@ -1085,6 +1199,9 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "psycopg-pool>=3.2",
 
+    # PostgreSQL CDC (logical replication)
+    "pgoutput-decoder>=0.1",
+
     # HTTP client
     "httpx>=0.28",
     "httpx[http2]",
@@ -1165,7 +1282,7 @@ dev = [
 ```
 
 ### Dependency count:
-- **Core:** 25 direct dependencies (several are lightweight or standard-library-adjacent)
+- **Core:** 26 direct dependencies (several are lightweight or standard-library-adjacent)
 - **Development:** 9 additional dev dependencies
 - **Total transitive:** Approximately 80–100 packages (most from OpenTelemetry's dependency tree)
 
@@ -1182,14 +1299,14 @@ How these libraries compose into the daemon architecture:
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │                    anyio Task Group                        │  │
 │  │                                                           │  │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐   │  │
-│  │  │  Webhook     │  │  Scheduler   │  │  Control Table │   │  │
-│  │  │  Server      │  │  (APScheduler│  │  Poller        │   │  │
-│  │  │  (starlette  │  │   or custom) │  │  (psycopg +    │   │  │
-│  │  │   + uvicorn) │  │              │  │   LISTEN/      │   │  │
-│  │  │              │  │              │  │   NOTIFY)       │   │  │
-│  │  │  Port 8080   │  │              │  │                │   │  │
-│  │  └──────┬───────┘  └──────┬───────┘  └───────┬────────┘   │  │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  ┌──────────────┐  │
+│  │  │  Webhook     │  │  Scheduler   │  │  Control Table │  │  Replication  │  │
+│  │  │  Server      │  │  (APScheduler│  │  Poller        │  │  Listener     │  │
+│  │  │  (starlette  │  │   or custom) │  │  (psycopg +    │  │  (pgoutput-   │  │
+│  │  │   + uvicorn) │  │              │  │   LISTEN/      │  │   decoder)    │  │
+│  │  │              │  │              │  │   NOTIFY)       │  │              │  │
+│  │  │  Port 8080   │  │              │  │                │  │  CDC stream   │  │
+│  │  └──────┬───────┘  └──────┬───────┘  └───────┬────────┘  └──────┬───────┘  │
 │  │         │                 │                   │            │  │
 │  │         ▼                 ▼                   ▼            │  │
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
@@ -1218,13 +1335,21 @@ How these libraries compose into the daemon architecture:
 │  │                         │                                  │  │
 │  │                         ▼                                  │  │
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
-│  │  │            PostgreSQL Layer (psycopg 3)              │  │  │
+│  │  │            PostgreSQL Layer                           │  │  │
+│  │  │                                                      │  │  │
+│  │  │  psycopg 3:                                          │  │  │
 │  │  │  • Connection pool (psycopg_pool)                    │  │  │
 │  │  │  • JSONB read/write                                  │  │  │
 │  │  │  • Atomic watermark updates                          │  │  │
 │  │  │  • Advisory locks                                    │  │  │
-│  │  │  • Logical replication (writeback tool)              │  │  │
+│  │  │  • LISTEN/NOTIFY                                     │  │  │
 │  │  │  • Schema migrations (alembic)                       │  │  │
+│  │  │                                                      │  │  │
+│  │  │  pgoutput-decoder:                                   │  │  │
+│  │  │  • Logical replication CDC stream (writeback tool)   │  │  │
+│  │  │  • Debezium-format change events                     │  │  │
+│  │  │  • Manual LSN acknowledgment                         │  │  │
+│  │  │  • Rust-decoded pgoutput protocol                    │  │  │
 │  │  └──────────────────────────────────────────────────────┘  │  │
 │  │                                                           │  │
 │  └───────────────────────────────────────────────────────────┘  │
@@ -1251,8 +1376,9 @@ How these libraries compose into the daemon architecture:
 
 1. **Pydantic models** define every data structure that crosses a boundary: connector configs, sync-run records, control table commands, watermark entries, dead-letter entries.
 2. **The transport adapter interface** is a Python `Protocol` (structural typing) — no base class inheritance required. The HTTP adapter is the first implementation; the interface is designed so a Kafka or database adapter could be added later without changing the engine.
-3. **`psycopg` 3** is the sole database access layer — no ORM. All SQL is explicit, all transactions are explicit, all advisory locks are explicit.
-4. **`anyio.TaskGroup`** is the top-level concurrency coordinator. Graceful shutdown cancels the task group, which cancels all sub-tasks, each of which completes its current operation before exiting.
+3. **`psycopg` 3** handles all standard database operations (queries, transactions, COPY, advisory locks, LISTEN/NOTIFY) — no ORM. All SQL is explicit.
+4. **`pgoutput-decoder`** owns the logical replication stream for Tool 2 (Writeback). It runs as a dedicated async task that consumes CDC events and dispatches writeback operations. LSN acknowledgment is manual — only after successful writeback to the external system.
+5. **`anyio.TaskGroup`** is the top-level concurrency coordinator. Graceful shutdown cancels the task group, which cancels all sub-tasks, each of which completes its current operation before exiting.
 
 ---
 
