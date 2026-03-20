@@ -1,0 +1,6 @@
+{
+  "fixture": "unknown_namespace.yaml",
+  "expected_rule_ids": [
+    "CFG-002"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "fixture": "missing_schema_version.yaml",
+  "expected_rule_ids": [
+    "CFG-005"
+  ]
+}

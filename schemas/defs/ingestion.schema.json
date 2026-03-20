@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/defs/ingestion.schema.json",
+  "title": "Ingestion Datatype",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "primary_key",
+    "history_mode",
+    "schedule",
+    "list"
+  ],
+  "properties": {
+    "primary_key": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "expression"
+          ],
+          "properties": {
+            "expression": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "history_mode": {
+      "type": "string",
+      "enum": [
+        "overwrite",
+        "append"
+      ]
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interval": {
+          "type": "string"
+        },
+        "cron": {
+          "type": "string"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "interval"
+          ]
+        },
+        {
+          "required": [
+            "cron"
+          ]
+        }
+      ]
+    },
+    "list": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "method",
+        "path",
+        "record_selector",
+        "pagination"
+      ],
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "record_selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pagination": {
+          "$ref": "pagination.schema.json"
+        },
+        "incremental": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cursor_field": {
+              "type": "string"
+            },
+            "cursor_type": {
+              "type": "string",
+              "enum": [
+                "timestamp",
+                "cursor",
+                "offset",
+                "sequence"
+              ]
+            },
+            "request_filter": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "query_param",
+                    "body_param",
+                    "sort_filter"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "webhook_events": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "subscriptions",
+        "record_id_path",
+        "payload_type",
+        "ordering"
+      ],
+      "properties": {
+        "subscriptions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        },
+        "record_id_path": {
+          "type": "string"
+        },
+        "payload_type": {
+          "type": "string",
+          "enum": [
+            "notification",
+            "full_state",
+            "partial"
+          ]
+        },
+        "ordering": {
+          "type": "object"
+        },
+        "debounce": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

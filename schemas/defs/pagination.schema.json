@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/defs/pagination.schema.json",
+  "title": "Pagination",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategy"
+  ],
+  "properties": {
+    "strategy": {
+      "type": "string",
+      "enum": [
+        "cursor",
+        "offset",
+        "link_header",
+        "page_number"
+      ]
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "response_path",
+        "request_param"
+      ],
+      "properties": {
+        "response_path": {
+          "type": "string"
+        },
+        "request_param": {
+          "type": "string"
+        }
+      }
+    },
+    "offset": {
+      "type": "object"
+    },
+    "link_header": {
+      "type": "object"
+    },
+    "page_number": {
+      "type": "object"
+    },
+    "termination": {
+      "type": "array",
+      "items": {
+        "type": [
+          "string",
+          "object"
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "strategy": {
+            "const": "cursor"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "cursor"
+        ]
+      }
+    }
+  ]
+}

@@ -13,6 +13,7 @@ This document defines the YAML configuration schema for the In-and-Out declarati
 7. [Concrete Example: HubSpot Connector](#7-concrete-example-hubspot-connector)
 8. [Validation Rules](#8-validation-rules)
 9. [Open Design Questions](#9-open-design-questions)
+10. [Agent Generation Contract](#10-agent-generation-contract)
 
 ---
 
@@ -233,7 +234,11 @@ A connector YAML defines one integration with a single external system. Both the
 
 ### 4.1 Top-Level Structure
 
+Every connector file MUST declare a top-level `schema_version`. Initial version is `1`.
+
 ```yaml
+schema_version: 1
+
 connector:
   # ─── Identity ──────────────────────────────────────────────
   name: hubspot                  # Unique identifier. Used in table names,
@@ -1427,6 +1432,7 @@ The engine validates every connector config file at load time and in connector v
 11. **Dependency graph** (T2 #26): if `dependencies` are declared, the graph must be acyclic. Cycles are reported as config errors.
 12. **Credential references** are syntactically valid names (actual credential existence is checked at runtime).
 13. **History mode** is explicitly declared per ingestion datatype (P3: explicit over implicit).
+14. **Schema version** is required at the top level and must be supported by the running binary (`schema_version: 1` for this spec version).
 
 ### 8.2 Connectivity Validation (connector validation mode)
 
@@ -1440,7 +1446,53 @@ Activated via CLI (`inout validate connector hubspot.yaml`) or via the runtime c
 6. **Validate field mappings** (writeback): Construct a sample payload via the transform template and verify it against the target API's known schema if discoverable.
 7. **Report:** Output a structured pass/fail report for each check.
 
-### 8.3 Runtime Validation (continuous)
+### 8.3 Validation Output Format (machine-readable)
+
+To support coding-agent workflows and CI gates, validation output MUST be available as JSON with stable rule IDs.
+
+```json
+{
+  "connector": "hubspot",
+  "schema_version": 1,
+  "valid": false,
+  "errors": [
+    {
+      "rule_id": "CFG-001",
+      "severity": "error",
+      "path": "$.connector.datatypes.contacts.ingestion.list.pagination",
+      "message": "cursor strategy requires cursor.response_path and cursor.request_param",
+      "suggested_fix": "Add cursor.response_path and cursor.request_param or switch strategy"
+    }
+  ],
+  "warnings": [
+    {
+      "rule_id": "CFG-020",
+      "severity": "warning",
+      "path": "$.connector.api_deprecation_deadline",
+      "message": "API version deprecation deadline is within 90 days",
+      "suggested_fix": "Upgrade api_version and update operation mappings"
+    }
+  ]
+}
+```
+
+Initial required rule IDs:
+
+- `CFG-001`: pagination strategy shape invalid
+- `CFG-002`: unknown interpolation namespace
+- `CFG-003`: unresolved required runtime parameter
+- `CFG-004`: invalid connector name format
+- `CFG-005`: missing required top-level keys
+- `CFG-006`: unsupported `schema_version`
+- `CFG-007`: invalid auth type or missing auth fields
+- `CFG-008`: missing ingestion primary key
+- `CFG-009`: invalid conflict resolution strategy
+- `CFG-010`: invalid protection-level / conditional-write pairing
+- `CFG-011`: cyclic dependency graph
+- `CFG-012`: invalid credential reference name
+- `CFG-013`: missing ingestion history mode
+
+### 8.4 Runtime Validation (continuous)
 
 1. **Schema drift detection** (T1 #31): On every ingested record, compare the response structure against the last known schema. Log new/removed/changed fields and increment `_schema_version`.
 2. **API version deprecation** (T1 #39): If `api_deprecation_deadline` is set and approaching (within 90 days), emit WARN-level log entries on every sync cycle.
@@ -1508,3 +1560,175 @@ As the config schema evolves, older connector files may become incompatible. Sho
 - **(b)** Use semantic versioning on the tool binary and document which config fields were added/changed in each release?
 
 **Recommendation:** (a). A `schema_version` field in each connector file enables the loader to detect and reject incompatible configs with a clear error message, and supports future automated migration tooling.
+
+Status: adopted in this document as a mandatory field (see §4.1 and §8.1).
+
+---
+
+## 10. Agent Generation Contract
+
+This section defines normative constraints to make connector generation deterministic and reliable for coding agents.
+
+### 10.1 Generation Rules (normative)
+
+Generated connector files MUST follow these rules:
+
+1. **Must be schema-valid:** pass structural validation with zero errors.
+2. **Must declare schema version:** include top-level `schema_version`.
+3. **Must declare one generation profile:** set `connector.generation_profile` to one of the supported profiles in §10.2.
+4. **Must materialize required defaults:** generated output must include all profile-required keys, even when values match defaults.
+5. **Must avoid unresolved placeholders:** no `${...}` references outside the namespace list in §6.1.
+6. **Must avoid ambiguous alternatives:** generated files must not include commented-out alternative blocks.
+7. **Must be deterministic:** key ordering follows §10.4 and repeated generation from the same inputs yields byte-identical output (excluding comments).
+
+Generated connector files SHOULD follow these rules:
+
+1. **Should include explicit `description`** at connector and datatype level.
+2. **Should include operation-level validation** (`required_fields`) for writeback insert/update.
+3. **Should include a minimum viable scheduling block** for every ingestion or polling writeback datatype.
+
+### 10.2 Supported Generation Profiles
+
+Each generated connector MUST declare one profile under `connector.generation_profile`.
+
+```yaml
+schema_version: 1
+connector:
+  generation_profile: ingestion_polling_readonly
+  # ...rest of connector
+```
+
+Profiles:
+
+| Profile | Description | Typical use |
+|---|---|---|
+| `ingestion_polling_readonly` | Polling-based ingestion only, no webhooks, no writeback | Initial connector bootstrap |
+| `ingestion_webhook_incremental` | Ingestion with webhooks + incremental polling fallback | SaaS APIs with webhook support |
+| `writeback_patch` | Writeback-only with lookup + patch/update path | Output integrations |
+| `full_duplex` | Both ingestion and writeback in one connector | Bi-directional sync |
+
+### 10.3 Required Paths by Profile
+
+`ingestion_polling_readonly` required paths:
+
+- `schema_version`
+- `connector.name`
+- `connector.system`
+- `connector.generation_profile`
+- `connector.api_version`
+- `connector.connection.base_url`
+- `connector.auth`
+- `connector.datatypes.{name}.ingestion.primary_key`
+- `connector.datatypes.{name}.ingestion.history_mode`
+- `connector.datatypes.{name}.ingestion.schedule`
+- `connector.datatypes.{name}.ingestion.list.method`
+- `connector.datatypes.{name}.ingestion.list.path`
+- `connector.datatypes.{name}.ingestion.list.record_selector`
+- `connector.datatypes.{name}.ingestion.list.pagination`
+
+`ingestion_webhook_incremental` required paths:
+
+- all required paths from `ingestion_polling_readonly`
+- `connector.webhooks.path`
+- `connector.webhooks.signature`
+- `connector.webhooks.fan_out`
+- `connector.datatypes.{name}.ingestion.incremental`
+- `connector.datatypes.{name}.ingestion.webhook_events`
+
+`writeback_patch` required paths:
+
+- `schema_version`
+- `connector.name`
+- `connector.system`
+- `connector.generation_profile`
+- `connector.api_version`
+- `connector.connection.base_url`
+- `connector.auth`
+- `connector.datatypes.{name}.writeback.protection_level`
+- `connector.datatypes.{name}.writeback.conflict_resolution`
+- `connector.datatypes.{name}.writeback.supported_actions`
+- `connector.datatypes.{name}.writeback.operations.lookup`
+- `connector.datatypes.{name}.writeback.operations.update`
+
+`full_duplex` required paths:
+
+- all required paths from `ingestion_webhook_incremental`
+- all required paths from `writeback_patch`
+
+### 10.4 Canonical Serialization Rules
+
+To reduce diffs and make generated output stable, serializer output order SHOULD be:
+
+1. `schema_version`
+2. `connector.name`
+3. `connector.system`
+4. `connector.generation_profile`
+5. `connector.description`
+6. `connector.api_version`
+7. `connector.api_deprecation_deadline`
+8. `connector.runtime_params`
+9. `connector.connection`
+10. `connector.auth`
+11. `connector.rate_limit`
+12. `connector.retry`
+13. `connector.circuit_breaker`
+14. `connector.tenancy`
+15. `connector.webhooks`
+16. `connector.datatypes`
+
+Within each datatype, use: `description`, `kind`, `ingestion`, `writeback`.
+
+### 10.5 JSON Schema Starter Layout
+
+For automation tooling, publish schema artifacts in-repo:
+
+```
+schemas/
+├── connector.schema.json
+├── defs/
+│   ├── auth.schema.json
+│   ├── pagination.schema.json
+│   ├── ingestion.schema.json
+│   ├── writeback.schema.json
+│   └── webhooks.schema.json
+└── profiles/
+    ├── ingestion_polling_readonly.schema.json
+    ├── ingestion_webhook_incremental.schema.json
+    ├── writeback_patch.schema.json
+    └── full_duplex.schema.json
+```
+
+Implementation note: profile schemas should apply additional constraints (`allOf`) on top of the base `connector.schema.json`.
+
+### 10.6 Structured Error Contract for Validators
+
+Any validator (CLI, CI action, or library) MUST emit a machine-readable format compatible with §8.3 and include:
+
+- `rule_id`
+- `severity` (`error` or `warning`)
+- JSONPath-like `path` (rooted at `$`)
+- human-readable `message`
+- actionable `suggested_fix`
+
+This format is the compatibility contract for coding agents that automatically repair or regenerate connector YAML.
+
+### 10.7 Golden Fixtures for Agent Workflows
+
+To reduce model drift and prompt ambiguity, maintain fixtures in-repo:
+
+```
+fixtures/connectors/
+├── valid/
+│   ├── minimal_ingestion_polling.yaml
+│   ├── minimal_ingestion_webhook_incremental.yaml
+│   ├── minimal_writeback_patch.yaml
+│   └── minimal_full_duplex.yaml
+└── invalid/
+    ├── missing_schema_version.yaml
+    ├── unknown_namespace.yaml
+    ├── invalid_pagination_shape.yaml
+    ├── invalid_protection_level_pairing.yaml
+    └── cyclic_dependencies.yaml
+```
+
+Each invalid fixture should have an expected error manifest (`.errors.json`) listing exact `rule_id` values.

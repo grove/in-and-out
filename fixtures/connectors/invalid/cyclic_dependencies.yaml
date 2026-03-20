@@ -1,0 +1,50 @@
+schema_version: 1
+
+connector:
+  name: invalid_cycle
+  system: demo
+  generation_profile: writeback_patch
+  api_version: v1
+  connection:
+    base_url: https://api.example.com
+  auth:
+    type: api_key
+    api_key:
+      location: header
+      name: X-API-Key
+    credential_ref: demo_api_key
+  datatypes:
+    accounts:
+      writeback:
+        protection_level: 2
+        conflict_resolution: dead_letter
+        supported_actions:
+          - update
+        dependencies:
+          - depends_on: contacts
+        operations:
+          lookup:
+            method: GET
+            path: /v1/accounts/${external_id}
+          update:
+            method: PATCH
+            path: /v1/accounts/${external_id}
+            conditional_write:
+              enabled: false
+    contacts:
+      writeback:
+        protection_level: 2
+        conflict_resolution: dead_letter
+        supported_actions:
+          - update
+        dependencies:
+          - depends_on: accounts
+        operations:
+          lookup:
+            method: GET
+            path: /v1/contacts/${external_id}
+          update:
+            method: PATCH
+            path: /v1/contacts/${external_id}
+            conditional_write:
+              enabled: false
