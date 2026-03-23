@@ -16,6 +16,7 @@ from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_writeback_tool_config
 from inandout.config.tool import WritebackToolConfig
 from inandout.engine.control import ControlDispatcher
+from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
 from inandout.postgres.version_check import SchemaVersionMismatch, check_schema_version
 from inandout.writeback.engine import WritebackEngine
@@ -129,6 +130,26 @@ async def _writeback_loop_streaming(
 
 
 # ---------------------------------------------------------------------------
+# Housekeeping loop
+# ---------------------------------------------------------------------------
+
+async def _housekeeping_loop(
+    pool: Any,
+    config: WritebackToolConfig,
+    connector_datatypes: list[tuple[str, str]],
+    interval_secs: float,
+) -> None:
+    log = logger.bind(component="writeback_housekeeping_loop")
+    log.info("writeback_housekeeping_loop_started", interval_secs=interval_secs)
+    while True:
+        await anyio.sleep(interval_secs)
+        try:
+            await run_housekeeping(pool, config.housekeeping, connector_datatypes)
+        except Exception as exc:
+            log.error("writeback_housekeeping_failed", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Control table poller
 # ---------------------------------------------------------------------------
 
@@ -198,6 +219,14 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     batch_wait = config.defaults.batch.max_wait if config.defaults.batch else "5s"
     default_interval_secs = parse_duration(batch_wait)
+    housekeeping_interval_secs = parse_duration(config.housekeeping.interval)
+
+    # Collect (connector, datatype) pairs for housekeeping
+    connector_datatypes: list[tuple[str, str]] = [
+        (cfg.connector.name, dtype_name)
+        for cfg in connector_configs
+        for dtype_name in cfg.connector.datatypes
+    ]
 
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
@@ -245,6 +274,13 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
         async with anyio.create_task_group() as tg:
             tg.start_soon(_run_health_server)
             tg.start_soon(_control_table_poller, dispatcher, control_poll_secs)
+            tg.start_soon(
+                _housekeeping_loop,
+                pool,
+                config,
+                connector_datatypes,
+                housekeeping_interval_secs,
+            )
             if config.replication_slot.slot_name:
                 tg.start_soon(_slot_monitor_loop)
 

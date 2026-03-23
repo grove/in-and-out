@@ -65,12 +65,35 @@ async def create_delta_notify_trigger(conn: Any, delta_table: str) -> None:
 async def listen_for_deltas(
     pool: Any,
     channel: str = "inandout_delta",
+    reconnect_delay_secs: float = 2.0,
+    reconnect_max_secs: float = 60.0,
 ) -> AsyncIterator[str]:
-    """Open a dedicated connection, LISTEN, and yield notification payloads."""
-    async with pool.connection() as conn:
-        await conn.set_autocommit(True)
-        await conn.execute(f"LISTEN {channel}")
-        logger.info("listening_for_delta_notifications", channel=channel)
-        async for notification in conn.notifies():
-            payload: str = notification.payload or ""
-            yield payload
+    """Open a dedicated connection, LISTEN, and yield notification payloads.
+
+    Automatically reconnects if the underlying PostgreSQL connection drops
+    (e.g. due to a network hiccup, PgBouncer timeout, or server restart).
+    Back-off starts at *reconnect_delay_secs* and doubles on each consecutive
+    failure up to *reconnect_max_secs*, then resets to the base value after a
+    successful reconnect.
+    """
+    import anyio
+
+    delay = reconnect_delay_secs
+    while True:
+        try:
+            async with pool.connection() as conn:
+                await conn.set_autocommit(True)
+                await conn.execute(f"LISTEN {channel}")
+                logger.info("listening_for_delta_notifications", channel=channel)
+                delay = reconnect_delay_secs  # reset back-off on successful connect
+                async for notification in conn.notifies():
+                    payload: str = notification.payload or ""
+                    yield payload
+        except Exception as exc:
+            logger.warning(
+                "delta_notify_connection_lost",
+                error=str(exc),
+                reconnect_in_secs=delay,
+            )
+            await anyio.sleep(delay)
+            delay = min(delay * 2, reconnect_max_secs)

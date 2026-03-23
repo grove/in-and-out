@@ -151,7 +151,8 @@ class WritebackEngine:
                 # Step 67: crash recovery — skip already-sent rows from audit log
                 if writeback_cfg.enable_crash_recovery and rows:
                     rows = await self._deduplicate_with_audit(
-                        rows, connector.name, datatype, delta_table, log, result
+                        rows, connector.name, datatype, delta_table, log, result,
+                        run_id=result.run_id,
                     )
 
                 # Dependency ordering within write batch
@@ -222,20 +223,53 @@ class WritebackEngine:
         delta_table: str,
         log: object,
         result: WritebackResult,
+        run_id: str | None = None,
     ) -> list[dict]:
-        """Filter out rows that were already successfully sent (crash recovery)."""
+        """Filter out rows that were already successfully sent (crash recovery).
+
+        When *run_id* is provided (migration 022+), queries by the stable per-cycle
+        UUID so deduplication is exact even for long-running batches.  Falls back
+        to a 1-hour processed_at window for older rows without a run_id.
+        """
         try:
             async with self._pool.connection() as conn:
-                audit_rows = await (await conn.execute(
-                    """
-                    SELECT external_id, action
-                    FROM inout_ops_writeback_result
-                    WHERE connector = %s AND datatype = %s AND delta_table = %s
-                      AND processed_at > NOW() - INTERVAL '1 hour'
-                      AND status = 'ok'
-                    """,
-                    [connector, datatype, delta_table],
-                )).fetchall()
+                if run_id:
+                    import uuid as _uuid
+                    try:
+                        run_uuid = _uuid.UUID(run_id)
+                        audit_rows = await (await conn.execute(
+                            """
+                            SELECT external_id, action
+                            FROM inout_ops_writeback_result
+                            WHERE connector = %s AND datatype = %s AND delta_table = %s
+                              AND run_id = %s
+                              AND status = 'ok'
+                            """,
+                            [connector, datatype, delta_table, run_uuid],
+                        )).fetchall()
+                    except Exception:
+                        # run_id column may not exist on pre-022 DBs — fall back
+                        audit_rows = await (await conn.execute(
+                            """
+                            SELECT external_id, action
+                            FROM inout_ops_writeback_result
+                            WHERE connector = %s AND datatype = %s AND delta_table = %s
+                              AND processed_at > NOW() - INTERVAL '1 hour'
+                              AND status = 'ok'
+                            """,
+                            [connector, datatype, delta_table],
+                        )).fetchall()
+                else:
+                    audit_rows = await (await conn.execute(
+                        """
+                        SELECT external_id, action
+                        FROM inout_ops_writeback_result
+                        WHERE connector = %s AND datatype = %s AND delta_table = %s
+                          AND processed_at > NOW() - INTERVAL '1 hour'
+                          AND status = 'ok'
+                        """,
+                        [connector, datatype, delta_table],
+                    )).fetchall()
         except Exception:
             # If the audit table doesn't exist yet, skip deduplication
             return rows

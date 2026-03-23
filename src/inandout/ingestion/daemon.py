@@ -746,6 +746,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         from inandout.transport.circuit_breaker import get_circuit_breaker, CircuitState
 
         while True:
+            # Exit cleanly on drain/SIGTERM
+            if _draining:
+                break
             await anyio.sleep(config.federation.report_interval_secs)
             for connector_file_cfg in connector_configs:
                 connector_cfg = connector_file_cfg.connector

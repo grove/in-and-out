@@ -548,18 +548,23 @@ class ControlDispatcher:
             await conn.commit()
 
     async def _complete(self, cmd_id: uuid.UUID, result: dict) -> None:
+        raw = orjson.dumps(result).decode()
+        # Guard against very large results bloating the control table
+        if len(raw) > 8000:
+            raw = orjson.dumps({"_truncated": True, "summary": raw[:500]}).decode()
         async with self._pool.connection() as conn:
             await conn.execute(
                 "UPDATE inout_ops_control SET status='completed', completed_at=NOW(), result=%s WHERE id=%s",
-                [orjson.dumps(result).decode(), cmd_id],
+                [raw, cmd_id],
             )
             await conn.commit()
 
     async def _fail(self, cmd_id: uuid.UUID, error: str) -> None:
+        raw = orjson.dumps({"error": error[:2000]}).decode()
         async with self._pool.connection() as conn:
             await conn.execute(
                 "UPDATE inout_ops_control SET status='failed', completed_at=NOW(), result=%s WHERE id=%s",
-                [orjson.dumps({"error": error}).decode(), cmd_id],
+                [raw, cmd_id],
             )
             await conn.commit()
 
