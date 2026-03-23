@@ -68,8 +68,8 @@ async def test_missing_alembic_table_raises_runtime_error() -> None:
 
 
 def test_schema_version_constant() -> None:
-    """SCHEMA_VERSION constant should be set to 23."""
-    assert SCHEMA_VERSION == 23
+    """SCHEMA_VERSION constant should be set to 24."""
+    assert SCHEMA_VERSION == 24
 
 
 def test_schema_version_mismatch_message_helpful() -> None:

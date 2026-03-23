@@ -156,6 +156,30 @@ async def handle_webhook(
         log.warning("webhook_payload_not_object")
         return JSONResponse({"error": "payload must be a JSON object"}, status_code=400)
 
+    # Idempotency / deduplication (A5)
+    if webhook_cfg.event_id_field:
+        raw_event_id = payload.get(webhook_cfg.event_id_field)
+        if raw_event_id is not None:
+            event_id_str = str(raw_event_id)
+            try:
+                async with engine._pool.connection() as dedup_conn:
+                    seen_row = await (await dedup_conn.execute(
+                        """
+                        INSERT INTO inout_ops_webhook_seen (connector, event_id)
+                        VALUES (%s, %s)
+                        ON CONFLICT DO NOTHING
+                        RETURNING event_id
+                        """,
+                        [connector.name, event_id_str],
+                    )).fetchone()
+                    await dedup_conn.commit()
+                if seen_row is None:
+                    # Row already existed — this is a duplicate event.
+                    log.info("webhook_duplicate_discarded", event_id=event_id_str)
+                    return JSONResponse({"status": "duplicate"}, status_code=200)
+            except Exception:
+                pass  # fail-open: if table doesn't exist yet, proceed normally
+
     # Fan-out routing
     datatype = _route_event(webhook_cfg, payload)
     if datatype is None:

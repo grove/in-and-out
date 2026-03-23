@@ -12,7 +12,7 @@ groups:
           description: "Last successful sync is older than configured max_lag_seconds"
 
       - alert: CircuitBreakerOpen
-        expr: circuit_breaker_state == 0
+        expr: circuit_breaker_state == 1
         for: 5m
         labels:
           severity: critical
@@ -46,3 +46,16 @@ groups:
         annotations:
           summary: "High quality violation rate for {{ $labels.connector }}/{{ $labels.datatype }}"
           description: "More than 0.1 quality violations/sec in the last 5 minutes"
+
+      - alert: ConnectorHealthStale
+        expr: sync_lag_seconds > 7200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connector health stale: {{ $labels.connector }}/{{ $labels.datatype }}"
+          description: >
+            No successful sync reported for {{ $value | humanizeDuration }}
+            (>2 hours). The daemon may be offline or the connector stuck.
+            This alert fires as a catch-all for connectors without a tighter
+            SLA configured via max_lag_seconds.

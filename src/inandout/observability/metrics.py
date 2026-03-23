@@ -121,6 +121,13 @@ pagination_drift_events_total: Counter = _counter(
     ["connector", "datatype"],
 )
 
+# Federation fan-out routing counter
+federation_routed_total: Counter = _counter(
+    "inout_federation_routed_total",
+    "Total health reports successfully fanned-out to the federation table per destination",
+    ["connector", "datatype", "destination"],
+)
+
 
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""

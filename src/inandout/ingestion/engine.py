@@ -155,6 +155,23 @@ class IngestionEngine:
                 except Exception:
                     pass  # Table may not exist yet — fall back to advisory lock
 
+                # Release any stale lock whose TTL has expired (handles crashed workers).
+                try:
+                    await conn.execute(
+                        """
+                        UPDATE inout_ops_sync_lock
+                        SET locked_until = NULL, locked_by = ''
+                        WHERE connector = %s
+                          AND datatype  = %s
+                          AND locked_until IS NOT NULL
+                          AND locked_until < NOW()
+                        """,
+                        [connector.name, datatype],
+                    )
+                    await conn.commit()
+                except Exception:
+                    pass  # Column doesn't exist yet — ignore
+
                 lock_acquired = False
                 try:
                     lock_row = await (await conn.execute(
@@ -166,6 +183,24 @@ class IngestionEngine:
                         [connector.name, datatype],
                     )).fetchone()
                     lock_acquired = lock_row is not None
+                    if lock_acquired:
+                        # Stamp the lock with our instance identity and a 1-hour TTL.
+                        try:
+                            import socket as _socket
+                            import os as _os
+                            _locked_by = f"{_socket.gethostname()}:{_os.getpid()}"
+                            await conn.execute(
+                                """
+                                UPDATE inout_ops_sync_lock
+                                SET locked_until = NOW() + INTERVAL '1 hour',
+                                    locked_by    = %s
+                                WHERE connector = %s AND datatype = %s
+                                """,
+                                [_locked_by, connector.name, datatype],
+                            )
+                            await conn.commit()
+                        except Exception:
+                            pass  # Column doesn't exist yet — ignore
                 except Exception:
                     # inout_ops_sync_lock table doesn't exist yet — fall back to advisory lock
                     lock_key = _advisory_lock_key(connector.name, datatype)

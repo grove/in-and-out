@@ -8,6 +8,8 @@ from typing import Any
 
 import structlog
 
+from inandout.observability.metrics import federation_routed_total
+
 logger = structlog.get_logger(__name__)
 
 
@@ -84,6 +86,12 @@ class FederationReporter:
                     ],
                 )
                 await conn.commit()
+            destination = f"{self.namespace}/{connector}/{datatype}"
+            federation_routed_total.labels(
+                connector=connector,
+                datatype=datatype,
+                destination=destination,
+            ).inc()
         except Exception as exc:
             logger.warning(
                 "federation_report_failed",
