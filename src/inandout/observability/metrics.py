@@ -114,6 +114,13 @@ source_unavailable_total: Counter = _counter(
     ["connector", "datatype"],
 )
 
+# Pagination drift events counter (A2 T1 #38)
+pagination_drift_events_total: Counter = _counter(
+    "inout_pagination_drift_events_total",
+    "Total pagination drift events detected during sync",
+    ["connector", "datatype"],
+)
+
 
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""

@@ -91,6 +91,23 @@ class IncrementalConfig(BaseModel):
     cursor_window: str | None = None  # e.g. "1d" — max time window per poll cycle
 
 
+class BulkExportConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    submit_path: str                   # POST to submit export job
+    submit_method: str = "POST"
+    status_path: str                   # GET {status_path}/{job_id} to poll status
+    status_field: str = "status"       # field in status response
+    complete_values: list[str] = ["completed", "done", "success"]
+    failed_values: list[str] = ["failed", "error"]
+    download_path: str                 # GET {download_path}/{job_id} to download
+    job_id_field: str = "id"           # field in submit response containing job ID
+    poll_interval: str = "30s"
+    max_wait: str = "4h"
+    result_format: Literal["jsonl", "csv", "json_array"] = "jsonl"
+    record_selector: str | None = None  # for json_array: dot-notation path to records
+
+
 class ListConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -111,6 +128,14 @@ class ListConfig(BaseModel):
     properties: list[str] = []                                           # fields to request (empty = request all)
     properties_param: str = "properties"                                  # query/body param name
     properties_format: Literal["comma", "array", "json_array"] = "comma"  # encoding format
+    # A2: pagination drift protection
+    drift_protection: bool = True
+    drift_max_shrink_pct: float = 50.0   # trip circuit breaker if result set shrinks >50%
+    drift_min_records: int = 0           # minimum expected records; 0 = use previous run's count
+    snapshot_param: str | None = None    # query param for server-side snapshot
+    reconciliation_pass: bool = False    # after full page fetch, re-query changed records
+    # A5: bulk export support
+    bulk_export: BulkExportConfig | None = None
 
 
 class WebhookPayloadType(StrEnum):

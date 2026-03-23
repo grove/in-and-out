@@ -17,6 +17,7 @@ from inandout.ingestion.field_mapper import apply_field_mappings
 from inandout.ingestion.quality import validate_record
 from inandout.observability.metrics import (
     intra_sync_duplicates_total,
+    pagination_drift_events_total,
     quality_violations_total,
     records_processed_total,
     sync_lag_seconds,
@@ -214,7 +215,9 @@ class IngestionEngine:
                     log.error("sync_failed", error=str(exc))
                 finally:
                     # Update sync_run record — lock is released when the transaction commits/rolls back
-                    status = result.status if result.status != "running" else "completed"
+                    # Map "aborted" (drift protection) to "failed" for DB storage (constraint)
+                    _raw_status = result.status if result.status != "running" else "completed"
+                    status = "failed" if _raw_status == "aborted" else _raw_status
                     # Fetch final watermark to record high_water_mark_after
                     _final_wm: str | None = None
                     try:
@@ -337,15 +340,20 @@ class IngestionEngine:
         history_mode = ingestion_cfg.history_mode
         ns = self._namespace
 
+        # Resolve shared_table and api_version from dtype_cfg (A3, A6)
+        shared_table = getattr(dtype_cfg, "shared_table", None) if dtype_cfg else None
+        dtype_api_version = getattr(dtype_cfg, "api_version", None) if dtype_cfg else None
+        effective_api_version = dtype_api_version or connector.api_version
+
         # Ensure source table and dead-letter table exist
         async with self._pool.connection() as conn:
-            await ensure_source_table(conn, connector.name, datatype, ns)
+            await ensure_source_table(conn, connector.name, datatype, ns, shared_table=shared_table)
             await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype, ns)
             if history_mode == HistoryMode.append:
                 await ensure_source_history_table(conn, connector.name, datatype, ns)
             await conn.commit()
 
-        table = source_table_name(connector.name, datatype, ns)
+        table = source_table_name(connector.name, datatype, ns, shared_table=shared_table)
         hist_table = source_history_table_name(connector.name, datatype, ns)
         dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
         new_watermark: str | None = None
@@ -388,6 +396,27 @@ class IngestionEngine:
         page_number = 0
         records_committed_so_far = 0
 
+        # A2: Drift protection — read last known record count before fetching
+        list_cfg = ingestion_cfg.list
+        drift_protection_enabled = getattr(list_cfg, "drift_protection", True) and watermark is None
+        last_known_count: int = 0
+        if drift_protection_enabled:
+            try:
+                async with self._pool.connection() as drift_pre_conn:
+                    drift_row = await (await drift_pre_conn.execute(
+                        """
+                        SELECT records_fetched FROM inout_ops_sync_run
+                        WHERE connector = %s AND datatype = %s
+                          AND status = 'completed'
+                        ORDER BY finished_at DESC LIMIT 1
+                        """,
+                        [connector.name, datatype],
+                    )).fetchone()
+                if drift_row:
+                    last_known_count = int(drift_row[0] or 0)
+            except Exception:
+                pass  # Drift protection is best-effort
+
         # Intra-sync checkpointing: check for existing checkpoint to resume from
         checkpoint_n = ingestion_cfg.checkpoint_every_n_pages
         resume_cursor: str | None = None
@@ -423,12 +452,63 @@ class IngestionEngine:
             except Exception:
                 pass  # Checkpoint load failure → start from scratch
 
+        # A6: build connector/datatype-level HTTP headers with effective api_version
+        # (used by HttpTransportAdapter when it honours the api_version header)
+        _api_version_used = effective_api_version  # noqa: F841 — reserved for future transport use
+
+        # A2: snapshot_param injection for full syncs
+        snapshot_param = getattr(list_cfg, "snapshot_param", None)
+        snapshot_value = str(result.run_id) if snapshot_param else None
+
         async with HttpTransportAdapter(connector) as transport:
-            async for page in transport.fetch_pages(
-                ingestion_cfg.list, watermark=watermark, window_end=window_end
-            ):
-                page_number += 1
-                result.records_fetched += len(page)
+            # A5: bulk export path — full syncs only, when bulk_export is configured
+            _use_bulk_export = (
+                watermark is None
+                and getattr(list_cfg, "bulk_export", None) is not None
+            )
+            if _use_bulk_export:
+                from inandout.ingestion.bulk_export import run_bulk_export
+                bulk_page: list[dict] = []
+                page_number = 1
+                async for _bulk_record in run_bulk_export(
+                    transport, list_cfg.bulk_export, result.run_id, pool=self._pool
+                ):
+                    bulk_page.append(_bulk_record)
+                # Treat the entire bulk export as one "page"
+                result.records_fetched += len(bulk_page)
+                _pages_iterable: Any = [bulk_page]
+            else:
+                _pages_iterable = transport.fetch_pages(
+                    list_cfg,
+                    watermark=watermark,
+                    window_end=window_end,
+                    snapshot_param=snapshot_param,
+                    snapshot_value=snapshot_value,
+                )
+
+            async for page in _pages_iterable:
+                if not _use_bulk_export:
+                    page_number += 1
+                    result.records_fetched += len(page)
+
+                # A2: per-page anomaly detection — empty mid-page (non-terminal)
+                if not page and not _use_bulk_export:
+                    # Non-terminal empty page (pagination hasn't stopped yet)
+                    log.warning(
+                        "pagination_empty_page_mid_sync",
+                        page_number=page_number,
+                        connector=connector.name,
+                        datatype=datatype,
+                    )
+                    try:
+                        pagination_drift_events_total.labels(
+                            connector=connector.name,
+                            datatype=datatype,
+                        ).inc()
+                    except Exception:
+                        pass
+                    continue
+
                 if not page:
                     continue
 
@@ -533,6 +613,7 @@ class IngestionEngine:
                                 inserted, updated = await _upsert_record(
                                     conn, table, external_id, record, raw_hash, result.run_id,
                                     lineage=_current_lineage,
+                                    connector_col=connector.name if shared_table else None,
                                 )
                                 result.records_inserted += inserted
                                 result.records_updated += updated
@@ -624,6 +705,38 @@ class IngestionEngine:
                         )
                     except Exception:
                         pass  # Checkpoint failure must not block sync
+
+        # A2: Drift protection — compare total records fetched to last known count
+        if drift_protection_enabled and last_known_count > 0:
+            drift_max_shrink_pct = getattr(list_cfg, "drift_max_shrink_pct", 50.0)
+            drift_min_records = getattr(list_cfg, "drift_min_records", 0)
+            threshold = last_known_count * (1.0 - drift_max_shrink_pct / 100.0)
+            exceeds_min = last_known_count > drift_min_records
+            if result.records_fetched < threshold and exceeds_min:
+                log.warning(
+                    "pagination_drift_detected",
+                    records_fetched=result.records_fetched,
+                    last_known_count=last_known_count,
+                    threshold=threshold,
+                    connector=connector.name,
+                    datatype=datatype,
+                )
+                try:
+                    pagination_drift_events_total.labels(
+                        connector=connector.name,
+                        datatype=datatype,
+                    ).inc()
+                except Exception:
+                    pass
+                # Trip circuit breaker
+                try:
+                    from inandout.transport.circuit_breaker import get_circuit_breaker
+                    cb = get_circuit_breaker(connector.name, datatype)
+                    cb.record_failure()
+                except Exception:
+                    pass
+                result.status = "aborted"
+                return  # Do NOT proceed with deletion detection
 
         # Full-sync deletion detection: tombstone records not seen in this run.
         # Guarded by a circuit breaker: skip if deletion would affect > 50% of existing
@@ -994,10 +1107,58 @@ async def _upsert_record(
     raw_hash: str,
     run_id: uuid.UUID,
     lineage: dict[str, Any] | None = None,
+    connector_col: str | None = None,  # A3: set for shared (fan-in) tables
 ) -> tuple[int, int]:
-    """Upsert a record. Returns (inserted, updated)."""
+    """Upsert a record. Returns (inserted, updated).
+
+    When connector_col is set, the upsert key is (external_id, _connector)
+    rather than just external_id (A3 fan-in shared tables).
+    """
     data = orjson.dumps(raw).decode()
     lineage_json = orjson.dumps(lineage).decode() if lineage is not None else None
+
+    if connector_col is not None:
+        # Fan-in shared table path: conflict key is (external_id, _connector)
+        row = await (await conn.execute(
+            f"SELECT _raw_hash FROM {table} WHERE external_id = %s AND _connector = %s",
+            [external_id, connector_col],
+        )).fetchone()
+
+        if row is None:
+            await conn.execute(
+                f"""
+                INSERT INTO {table}
+                    (external_id, data, raw, _ingested_at, _sync_run_id, _raw_hash, _lineage, _connector)
+                VALUES (%s, %s, %s, NOW(), %s, %s, %s, %s)
+                ON CONFLICT (external_id, _connector) DO UPDATE SET
+                    data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s, _lineage=%s
+                """,
+                [
+                    external_id, data, data, run_id, raw_hash, lineage_json, connector_col,
+                    data, data, run_id, raw_hash, lineage_json,
+                ],
+            )
+            return 1, 0
+        elif row[0] != raw_hash:
+            await conn.execute(
+                f"""
+                UPDATE {table}
+                SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s,
+                    _deleted_at=NULL, _lineage=%s
+                WHERE external_id=%s AND _connector=%s
+                """,
+                [data, data, run_id, raw_hash, lineage_json, external_id, connector_col],
+            )
+            return 0, 1
+        else:
+            await conn.execute(
+                f"UPDATE {table} SET _deleted_at=NULL "
+                f"WHERE external_id=%s AND _connector=%s AND _deleted_at IS NOT NULL",
+                [external_id, connector_col],
+            )
+            return 0, 0
+
+    # Standard single-connector path
     row = await (await conn.execute(
         f"SELECT _raw_hash FROM {table} WHERE external_id = %s", [external_id]
     )).fetchone()

@@ -8,8 +8,16 @@ SCHEMA_VERSION: int = 18
 
 
 # Table naming convention per GOAL.md
-def source_table_name(connector: str, datatype: str, namespace: str = "public") -> str:
-    base = f"inout_src_{connector}_{datatype}"
+def source_table_name(
+    connector: str,
+    datatype: str,
+    namespace: str = "public",
+    shared_table: str | None = None,
+) -> str:
+    if shared_table:
+        base = f"inout_src_{shared_table}"
+    else:
+        base = f"inout_src_{connector}_{datatype}"
     if namespace and namespace != "public":
         return f"{namespace}.{base}"
     return base
@@ -109,14 +117,54 @@ async def ensure_source_table(
     connector: str,
     datatype: str,
     namespace: str = "public",
+    shared_table: str | None = None,
 ) -> None:
     """Create the source table for a connector/datatype pair if it doesn't exist."""
-    await conn.execute(source_table_ddl(connector, datatype, namespace))
+    table = source_table_name(connector, datatype, namespace, shared_table=shared_table)
+    # For shared tables, the base DDL uses the shared table name
+    if shared_table:
+        base_ddl = source_table_ddl_for_name(table, namespace)
+        await conn.execute(base_ddl)
+    else:
+        await conn.execute(source_table_ddl(connector, datatype, namespace))
     # Ensure _lineage column exists on older tables (ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
-    table = source_table_name(connector, datatype, namespace)
     await conn.execute(
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _lineage JSONB"
     )
+    # For shared (fan-in) tables, add _connector column with default
+    if shared_table:
+        await conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+            f"_connector TEXT NOT NULL DEFAULT '{connector}'"
+        )
+        # Change the primary key to (external_id, _connector) if possible
+        # We do this by creating a unique index if it doesn't exist yet
+        idx_name = f"{table.replace('.', '_')}_fanin_pk_idx"
+        await conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} "
+            f"ON {table} (external_id, _connector)"
+        )
+
+
+def source_table_ddl_for_name(table: str, namespace: str = "public") -> str:
+    """Generate CREATE TABLE DDL when the table name is already known."""
+    prefix = _schema_prefix_ddl(namespace)
+    return f"""{prefix}CREATE TABLE IF NOT EXISTS {table} (
+    external_id TEXT NOT NULL,
+    data        JSONB NOT NULL,
+    raw         JSONB NOT NULL,
+    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    _sync_run_id    UUID,
+    _raw_hash       TEXT NOT NULL,
+    _deleted        BOOLEAN NOT NULL DEFAULT FALSE,
+    _deleted_at     TIMESTAMPTZ,
+    _schema_version INTEGER NOT NULL DEFAULT 1,
+    _source_version TEXT,
+    _last_written   JSONB,
+    _lineage        JSONB,
+    PRIMARY KEY (external_id)
+);
+CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_ingested_at_idx ON {table} (_ingested_at);""".strip()
 
 
 async def ensure_source_history_table(

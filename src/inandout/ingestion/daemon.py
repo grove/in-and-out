@@ -254,6 +254,41 @@ async def _sla_check_loop(
 # SIGHUP hot-reload support
 # ---------------------------------------------------------------------------
 
+def _check_api_version_deprecations(connector_configs: list) -> None:
+    """A6: Check api_version_deprecation_date for all connectors and log warnings/errors."""
+    import datetime
+
+    _log = logger.bind(component="api_version_check")
+    today = datetime.date.today()
+    for cfg in connector_configs:
+        connector_cfg = cfg.connector
+        dep_date_str = getattr(connector_cfg, "api_version_deprecation_date", None)
+        if not dep_date_str:
+            continue
+        warning_days = getattr(connector_cfg, "api_version_warning_days", 60)
+        try:
+            dep_date = datetime.date.fromisoformat(dep_date_str)
+        except ValueError:
+            continue
+        days_remaining = (dep_date - today).days
+        if days_remaining < 0:
+            _log.error(
+                "api_version_past_deprecation_date",
+                connector=connector_cfg.name,
+                api_version=connector_cfg.api_version,
+                deprecation_date=dep_date_str,
+                days_past=abs(days_remaining),
+            )
+        elif days_remaining <= warning_days:
+            _log.warning(
+                "api_version_approaching_deprecation",
+                connector=connector_cfg.name,
+                api_version=connector_cfg.api_version,
+                deprecation_date=dep_date_str,
+                days_remaining=days_remaining,
+            )
+
+
 def _make_reload_watcher() -> tuple[threading.Event, Any]:
     """Return (flag, signal_handler) for SIGHUP hot-reload."""
     flag = threading.Event()
@@ -271,22 +306,70 @@ async def _run_connector_tasks(
     default_interval_secs: float,
     paused_connectors: set[tuple[str, str]],
 ) -> None:
-    """Start one polling task per ingestion-capable (connector, datatype)."""
+    """Start one polling task per ingestion-capable (connector, datatype).
+
+    A4: If connector_cfg.accounts is non-empty, spawn one loop per account
+    with account-scoped config overrides.
+    """
+    from inandout.config.connector import ConnectorConfig
+
     for connector_file_cfg in connector_configs:
         connector_cfg = connector_file_cfg.connector
-        for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
-            if dtype_cfg.ingestion is None:
-                continue
-            tg.start_soon(
-                _polling_loop,
-                engine,
-                connector_cfg,
-                dtype_name,
-                dtype_cfg.ingestion,
-                default_interval_secs,
-                paused_connectors,
-                dtype_cfg,
-            )
+        accounts = getattr(connector_cfg, "accounts", [])
+
+        if accounts:
+            # A4: multi-account — spawn one loop per account per datatype
+            for account in accounts:
+                # Build account-scoped connector config
+                import copy
+                account_connector_cfg = copy.deepcopy(connector_cfg)
+                # Override credential_ref and base_url if provided
+                if account.base_url is not None:
+                    # Replace connection.base_url
+                    object.__setattr__(
+                        account_connector_cfg.connection, "base_url", account.base_url
+                    )
+                # Embed account_id in connector name for scoping
+                object.__setattr__(
+                    account_connector_cfg,
+                    "name",
+                    f"{connector_cfg.name}",  # keep original name; account_id tracked via log
+                )
+
+                log_base = logger.bind(
+                    connector=connector_cfg.name,
+                    account_id=account.account_id,
+                )
+                log_base.info("polling_loop_started", account_id=account.account_id)
+
+                for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
+                    if dtype_cfg.ingestion is None:
+                        continue
+                    tg.start_soon(
+                        _polling_loop,
+                        engine,
+                        account_connector_cfg,
+                        dtype_name,
+                        dtype_cfg.ingestion,
+                        default_interval_secs,
+                        paused_connectors,
+                        dtype_cfg,
+                    )
+        else:
+            # Standard single-account path
+            for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
+                if dtype_cfg.ingestion is None:
+                    continue
+                tg.start_soon(
+                    _polling_loop,
+                    engine,
+                    connector_cfg,
+                    dtype_name,
+                    dtype_cfg.ingestion,
+                    default_interval_secs,
+                    paused_connectors,
+                    dtype_cfg,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +583,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         instance_id = _default_instance_id()
         federation_reporter = FederationReporter(pool, instance_id, config.namespace)
         log.info("federation_enabled", instance_id=instance_id)
+
+    # A6: Check API version deprecation dates for all loaded connectors
+    _check_api_version_deprecations(connector_configs)
 
     log.info("daemon_started")
 

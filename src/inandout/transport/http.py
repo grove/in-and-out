@@ -213,6 +213,8 @@ class HttpTransportAdapter:
         list_config: ListConfig,
         watermark: str | None = None,
         window_end: str | None = None,
+        snapshot_param: str | None = None,
+        snapshot_value: str | None = None,
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
         # GraphQL mode: detect by presence of graphql_query
         graphql_query = getattr(list_config, "graphql_query", None)
@@ -240,6 +242,10 @@ class HttpTransportAdapter:
                 until_param = getattr(rf, "until_param", None)
                 if until_param and window_end is not None:
                     base_params[until_param] = window_end
+
+        # A2: inject snapshot_param for server-side snapshot token
+        if snapshot_param and snapshot_value:
+            base_params[snapshot_param] = snapshot_value
 
         termination = set(pagination.termination or [])
 

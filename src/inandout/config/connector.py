@@ -207,6 +207,8 @@ class DatatypeConfig(BaseModel):
     linked_objects: list[LinkedObject] = []     # A3: linked/nested object resolution
     timestamp_fields: list[TimestampFieldConfig] = []  # A7: timestamp normalisation
     pii_fields: list[str] = []                  # B6: fields containing PII
+    shared_table: str | None = None             # A3 fan-in: write to inout_src_{shared_table} if set
+    api_version: str | None = None              # A6: per-datatype API version override
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":
@@ -220,6 +222,17 @@ class DatatypeConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class AccountConfig(BaseModel):
+    """Per-account configuration for multi-tenant connectors (A4 T1 #20)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    credential_ref: str          # per-account credentials
+    base_url: str | None = None  # per-account base URL override (falls back to connection.base_url)
+    display_name: str | None = None
+
+
 class ConnectorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -230,6 +243,8 @@ class ConnectorConfig(BaseModel):
     api_version: str = Field(min_length=1)
     version: str = "1.0.0"
     api_deprecation_deadline: str | None = None
+    api_version_deprecation_date: str | None = None  # A6: ISO date string e.g. "2026-12-01"
+    api_version_warning_days: int = 60               # A6: warn when within this many days
     runtime_params: dict[str, RuntimeParamConfig] | None = None
     connection: ConnectionConfig
     auth: AuthConfig
@@ -240,6 +255,7 @@ class ConnectorConfig(BaseModel):
     webhooks: WebhookConfig | None = None
     datatypes: dict[str, DatatypeConfig] = Field(min_length=1)
     depends_on: list[str] = []  # connector names that must run before this one
+    accounts: list[AccountConfig] = []  # A4: if non-empty, one polling loop per account
 
     @model_validator(mode="after")
     def no_cyclic_datatype_dependencies(self) -> "ConnectorConfig":
