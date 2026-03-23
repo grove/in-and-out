@@ -9,10 +9,12 @@ from typing import Any
 import anyio
 import structlog
 import uvicorn
+from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+from prometheus_client import make_asgi_app as prometheus_make_asgi_app
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 
 from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_ingestion_tool_config
@@ -20,6 +22,8 @@ from inandout.config.tool import IngestionToolConfig
 from inandout.engine.control import ControlDispatcher, is_paused
 from inandout.ingestion.engine import IngestionEngine
 from inandout.ingestion.webhooks import handle_webhook
+from inandout.observability.metrics import REGISTRY
+from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
 
 logger = structlog.get_logger(__name__)
@@ -37,10 +41,11 @@ async def _ready(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ready", "connectors": []})
 
 
-def _build_app(engine: IngestionEngine, connector_configs: list) -> Starlette:
+def _build_app(engine: IngestionEngine, connector_configs: list) -> Any:
     routes = [
         Route("/health", _health),
         Route("/ready", _ready),
+        Mount("/metrics", prometheus_make_asgi_app(registry=REGISTRY)),
     ]
     for connector_file_cfg in connector_configs:
         connector_cfg = connector_file_cfg.connector
@@ -55,7 +60,8 @@ def _build_app(engine: IngestionEngine, connector_configs: list) -> Starlette:
 
         routes.append(Route(webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"]))
 
-    return Starlette(routes=routes)
+    app = Starlette(routes=routes)
+    return OpenTelemetryMiddleware(app)
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +154,25 @@ async def _control_table_poller(
 
 
 # ---------------------------------------------------------------------------
+# Housekeeping loop
+# ---------------------------------------------------------------------------
+
+async def _housekeeping_loop(
+    pool: Any,
+    config: IngestionToolConfig,
+    connector_datatypes: list[tuple[str, str]],
+    interval_secs: float,
+) -> None:
+    log = logger.bind(component="housekeeping_loop")
+    while True:
+        await anyio.sleep(interval_secs)
+        try:
+            await run_housekeeping(pool, config.housekeeping, connector_datatypes)
+        except Exception as exc:
+            log.error("housekeeping_failed", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # SIGHUP hot-reload support
 # ---------------------------------------------------------------------------
 
@@ -215,6 +240,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     default_interval_secs = parse_duration(
         config.defaults.scheduling.default_interval if config.defaults.scheduling else "5m"
     )
+    housekeeping_interval_secs = parse_duration(config.housekeeping.interval)
 
     # Install SIGHUP handler for hot-reload
     reload_flag, sighup_handler = _make_reload_watcher()
@@ -239,7 +265,14 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     connector_configs = _load_connectors()
 
-    # Build HTTP app (health + webhook routes)
+    # Collect (connector, datatype) pairs for housekeeping
+    connector_datatypes: list[tuple[str, str]] = [
+        (cfg.connector.name, dtype_name)
+        for cfg in connector_configs
+        for dtype_name in cfg.connector.datatypes
+    ]
+
+    # Build HTTP app (health + webhook routes + metrics)
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
         _build_app(engine, connector_configs), host=host, port=int(port_str), log_level="warning"
@@ -290,6 +323,13 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             tg.start_soon(_run_health_server)
             tg.start_soon(_control_table_poller, dispatcher, engine, control_poll_secs)
             tg.start_soon(_hot_reload_watcher, tg)
+            tg.start_soon(
+                _housekeeping_loop,
+                pool,
+                config,
+                connector_datatypes,
+                housekeeping_interval_secs,
+            )
             await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
     finally:
         log.info("daemon_stopping")

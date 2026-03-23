@@ -1,0 +1,17 @@
+database:
+  dsn: "${INOUT_DATABASE_URL}"
+
+connectors_dir: /connectors
+health_server:
+  listen: "0.0.0.0:9090"
+
+observability:
+  logging:
+    format: json
+    level: info
+  tracing:
+    enabled: false
+
+defaults:
+  scheduling:
+    default_interval: 5m

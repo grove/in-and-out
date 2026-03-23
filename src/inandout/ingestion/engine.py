@@ -8,20 +8,25 @@ from typing import Any
 import orjson
 import psycopg
 import structlog
+from opentelemetry import trace
 from psycopg_pool import AsyncConnectionPool
 
 from inandout.config.connector import ConnectorConfig
-from inandout.config.ingestion import IngestionConfig
+from inandout.config.ingestion import HistoryMode, IngestionConfig
+from inandout.observability.metrics import records_processed_total, sync_lag_seconds
 from inandout.postgres.schema import (
-    source_table_name,
-    ensure_source_table,
     dead_letter_table_name,
     ensure_dead_letter_table,
+    ensure_source_history_table,
+    ensure_source_table,
+    source_history_table_name,
+    source_table_name,
 )
 from inandout.postgres.watermark import get_watermark, set_watermark
 from inandout.transport.http import HttpTransportAdapter
 
 logger = structlog.get_logger(__name__)
+_tracer = trace.get_tracer("inandout.ingestion")
 
 
 def _advisory_lock_key(connector: str, datatype: str) -> int:
@@ -54,6 +59,7 @@ class SyncResult:
 class IngestionEngine:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
+        self._debouncer = None
 
     async def run_sync(
         self,
@@ -61,95 +67,109 @@ class IngestionEngine:
         datatype: str,
         ingestion_cfg: IngestionConfig,
     ) -> SyncResult:
-        run_id = uuid.uuid4()
-        log = logger.bind(connector=connector.name, datatype=datatype, run_id=str(run_id))
+        with _tracer.start_as_current_span("ingestion.run_sync") as span:
+            span.set_attribute("connector", connector.name)
+            span.set_attribute("datatype", datatype)
 
-        # Use a single long-lived connection to hold the advisory lock for the entire sync.
-        # PostgreSQL advisory locks are session-scoped (connection-scoped): acquiring and
-        # releasing on different connections would leave the lock permanently held or make
-        # the unlock a silent no-op. Keeping one connection open guarantees correctness.
-        async with self._pool.connection() as conn:
-            existing_wm = await get_watermark(conn, connector.name, datatype)
-            is_incremental = (
-                existing_wm is not None
-                and ingestion_cfg.list.incremental is not None
-                and ingestion_cfg.list.incremental.enabled
-            )
-            mode = "incremental" if is_incremental else "full"
-            result = SyncResult(run_id, connector.name, datatype, mode)
+            run_id = uuid.uuid4()
+            log = logger.bind(connector=connector.name, datatype=datatype, run_id=str(run_id))
 
-            log.info("sync_started", mode=mode, watermark=existing_wm)
-
-            await conn.execute(
-                """
-                INSERT INTO inout_ops_sync_run (id, connector, datatype, mode, status, started_at)
-                VALUES (%s, %s, %s, %s, 'running', NOW())
-                """,
-                [run_id, connector.name, datatype, mode],
-            )
-            await conn.commit()
-
-            # Acquire advisory lock (non-blocking) on this connection.
-            lock_key = _advisory_lock_key(connector.name, datatype)
-            row = await (await conn.execute(
-                "SELECT pg_try_advisory_lock(%s)", [lock_key]
-            )).fetchone()
-            if not row or not row[0]:
-                log.warning("advisory_lock_skipped", reason="another instance holds the lock")
-                await conn.execute(
-                    "UPDATE inout_ops_sync_run SET status='skipped', finished_at=NOW() WHERE id=%s",
-                    [run_id],
+            # Use a single long-lived connection to hold the advisory lock for the entire sync.
+            # PostgreSQL advisory locks are session-scoped (connection-scoped): acquiring and
+            # releasing on different connections would leave the lock permanently held or make
+            # the unlock a silent no-op. Keeping one connection open guarantees correctness.
+            async with self._pool.connection() as conn:
+                existing_wm = await get_watermark(conn, connector.name, datatype)
+                is_incremental = (
+                    existing_wm is not None
+                    and ingestion_cfg.list.incremental is not None
+                    and ingestion_cfg.list.incremental.enabled
                 )
-                await conn.commit()
-                result.status = "skipped"
-                return result
+                mode = "incremental" if is_incremental else "full"
+                result = SyncResult(run_id, connector.name, datatype, mode)
+                span.set_attribute("mode", mode)
 
-            try:
-                await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log)
-            except Exception as exc:
-                result.status = "failed"
-                result.error_message = str(exc)
-                log.error("sync_failed", error=str(exc))
-            finally:
-                # Update sync_run record and release the lock on the SAME connection
-                # that acquired it, so the unlock is not a no-op.
-                status = result.status if result.status != "running" else "completed"
+                log.info("sync_started", mode=mode, watermark=existing_wm)
+
                 await conn.execute(
                     """
-                    UPDATE inout_ops_sync_run SET
-                        status           = %s,
-                        finished_at      = NOW(),
-                        records_fetched  = %s,
-                        records_inserted = %s,
-                        records_updated  = %s,
-                        records_errored  = %s,
-                        error_message    = %s
-                    WHERE id = %s
+                    INSERT INTO inout_ops_sync_run (id, connector, datatype, mode, status, started_at)
+                    VALUES (%s, %s, %s, %s, 'running', NOW())
                     """,
-                    [
-                        status,
-                        result.records_fetched,
-                        result.records_inserted,
-                        result.records_updated,
-                        result.records_errored,
-                        result.error_message,
-                        run_id,
-                    ],
+                    [run_id, connector.name, datatype, mode],
                 )
-                await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
                 await conn.commit()
 
-        if result.status == "running":
-            result.status = "completed"
-        log.info(
-            "sync_finished",
-            status=result.status,
-            fetched=result.records_fetched,
-            inserted=result.records_inserted,
-            updated=result.records_updated,
-            deleted=result.records_deleted,
-        )
-        return result
+                # Acquire advisory lock (non-blocking) on this connection.
+                lock_key = _advisory_lock_key(connector.name, datatype)
+                row = await (await conn.execute(
+                    "SELECT pg_try_advisory_lock(%s)", [lock_key]
+                )).fetchone()
+                if not row or not row[0]:
+                    log.warning("advisory_lock_skipped", reason="another instance holds the lock")
+                    await conn.execute(
+                        "UPDATE inout_ops_sync_run SET status='skipped', finished_at=NOW() WHERE id=%s",
+                        [run_id],
+                    )
+                    await conn.commit()
+                    result.status = "skipped"
+                    return result
+
+                try:
+                    await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log)
+                except Exception as exc:
+                    result.status = "failed"
+                    result.error_message = str(exc)
+                    log.error("sync_failed", error=str(exc))
+                finally:
+                    # Update sync_run record and release the lock on the SAME connection
+                    # that acquired it, so the unlock is not a no-op.
+                    status = result.status if result.status != "running" else "completed"
+                    await conn.execute(
+                        """
+                        UPDATE inout_ops_sync_run SET
+                            status           = %s,
+                            finished_at      = NOW(),
+                            records_fetched  = %s,
+                            records_inserted = %s,
+                            records_updated  = %s,
+                            records_errored  = %s,
+                            error_message    = %s
+                        WHERE id = %s
+                        """,
+                        [
+                            status,
+                            result.records_fetched,
+                            result.records_inserted,
+                            result.records_updated,
+                            result.records_errored,
+                            result.error_message,
+                            run_id,
+                        ],
+                    )
+                    await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
+                    await conn.commit()
+
+            if result.status == "running":
+                result.status = "completed"
+            log.info(
+                "sync_finished",
+                status=result.status,
+                fetched=result.records_fetched,
+                inserted=result.records_inserted,
+                updated=result.records_updated,
+                deleted=result.records_deleted,
+            )
+
+            span.set_attribute("records.inserted", result.records_inserted)
+            span.set_attribute("records.updated", result.records_updated)
+
+            if result.status == "completed":
+                sync_lag_seconds.labels(
+                    tool="ingestion", connector=connector.name, datatype=datatype
+                ).set(0.0)
+
+            return result
 
     async def _do_sync(
         self,
@@ -160,13 +180,18 @@ class IngestionEngine:
         watermark: str | None,
         log: Any,
     ) -> None:
+        history_mode = ingestion_cfg.history_mode
+
         # Ensure source table and dead-letter table exist
         async with self._pool.connection() as conn:
             await ensure_source_table(conn, connector.name, datatype)
             await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype)
+            if history_mode == HistoryMode.append:
+                await ensure_source_history_table(conn, connector.name, datatype)
             await conn.commit()
 
         table = source_table_name(connector.name, datatype)
+        hist_table = source_history_table_name(connector.name, datatype)
         dl_table = dead_letter_table_name("ingestion", connector.name, datatype)
         new_watermark: str | None = None
         seen_ids: set[str] = set()
@@ -198,6 +223,35 @@ class IngestionEngine:
                             result.records_inserted += inserted
                             result.records_updated += updated
 
+                            # Metrics instrumentation
+                            if inserted:
+                                records_processed_total.labels(
+                                    tool="ingestion",
+                                    connector=connector.name,
+                                    datatype=datatype,
+                                    operation="insert",
+                                ).inc()
+                            elif updated:
+                                records_processed_total.labels(
+                                    tool="ingestion",
+                                    connector=connector.name,
+                                    datatype=datatype,
+                                    operation="update",
+                                ).inc()
+                            else:
+                                records_processed_total.labels(
+                                    tool="ingestion",
+                                    connector=connector.name,
+                                    datatype=datatype,
+                                    operation="noop",
+                                ).inc()
+
+                            # History table support
+                            if (inserted or updated) and history_mode == HistoryMode.append:
+                                await _write_history_record(
+                                    conn, hist_table, external_id, record, raw_hash, result.run_id
+                                )
+
                             # Track latest watermark from cursor field
                             inc = ingestion_cfg.list.incremental
                             if inc and inc.cursor_field:
@@ -219,7 +273,9 @@ class IngestionEngine:
         # Guarded by a circuit breaker: skip if deletion would affect > 50% of existing
         # records (signals a partial or failed fetch rather than genuine deletions).
         if watermark is None and seen_ids:
-            await self._tombstone_missing(table, seen_ids, result, log)
+            await self._tombstone_missing(
+                table, seen_ids, result, log, connector.name, datatype
+            )
 
         result.status = "completed"
 
@@ -229,6 +285,8 @@ class IngestionEngine:
         seen_ids: set[str],
         result: SyncResult,
         log: Any,
+        connector_name: str = "",
+        datatype: str = "",
     ) -> None:
         """Soft-delete source records that were not present in the latest full sync."""
         async with self._pool.connection() as conn:
@@ -267,6 +325,17 @@ class IngestionEngine:
                         [ext_id],
                     )
             result.records_deleted = len(missing_ids)
+
+            # Metrics for deletes
+            if connector_name and datatype:
+                for _ in missing_ids:
+                    records_processed_total.labels(
+                        tool="ingestion",
+                        connector=connector_name,
+                        datatype=datatype,
+                        operation="delete",
+                    ).inc()
+
             log.info("tombstone_pass_complete", deleted=len(missing_ids))
 
 
@@ -327,6 +396,25 @@ async def _upsert_record(
             [external_id],
         )
         return 0, 0
+
+
+async def _write_history_record(
+    conn: psycopg.AsyncConnection,
+    hist_table: str,
+    external_id: str,
+    raw: dict[str, Any],
+    raw_hash: str,
+    run_id: uuid.UUID,
+) -> None:
+    """Insert a row into the history table (no ON CONFLICT — always appends)."""
+    data = orjson.dumps(raw).decode()
+    await conn.execute(
+        f"""
+        INSERT INTO {hist_table} (external_id, data, raw, _ingested_at, _sync_run_id, _raw_hash)
+        VALUES (%s, %s, %s, NOW(), %s, %s)
+        """,
+        [external_id, data, data, run_id, raw_hash],
+    )
 
 
 async def _write_dead_letter(

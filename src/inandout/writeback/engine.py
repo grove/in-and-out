@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 import orjson
 import psycopg
 import structlog
+from opentelemetry import trace
 from psycopg_pool import AsyncConnectionPool
 
 from inandout.config.connector import ConnectorConfig
@@ -15,6 +17,7 @@ from inandout.config.writeback import WritebackConfig
 from inandout.transport.http import HttpTransportAdapter
 
 logger = structlog.get_logger(__name__)
+_tracer = trace.get_tracer("inandout.writeback")
 
 
 def _advisory_lock_key(connector: str, datatype: str) -> int:
@@ -44,6 +47,22 @@ class WritebackEngine:
         datatype: str,
         writeback_cfg: WritebackConfig,
         delta_table: str,
+    ) -> WritebackResult:
+        with _tracer.start_as_current_span("writeback.run_cycle") as span:
+            span.set_attribute("connector", connector.name)
+            span.set_attribute("datatype", datatype)
+            span.set_attribute("delta_table", delta_table)
+            return await self._run_writeback_cycle_inner(
+                connector, datatype, writeback_cfg, delta_table, span
+            )
+
+    async def _run_writeback_cycle_inner(
+        self,
+        connector: ConnectorConfig,
+        datatype: str,
+        writeback_cfg: WritebackConfig,
+        delta_table: str,
+        span: Any,
     ) -> WritebackResult:
         log = logger.bind(connector=connector.name, datatype=datatype, delta_table=delta_table)
         result = WritebackResult(

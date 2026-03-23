@@ -1,0 +1,53 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: inandout
+      POSTGRES_USER: inandout
+      POSTGRES_PASSWORD: inandout
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inandout"]
+      interval: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    command: inandout db upgrade --config /config/ingestion.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config:/config
+    environment:
+      INOUT_DATABASE_URL: postgresql://inandout:inandout@postgres:5432/inandout
+
+  ingest:
+    build: .
+    command: inandout ingest run --config /config/ingestion.yaml
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./connectors:/connectors
+      - ./config:/config
+    ports:
+      - "9090:9090"
+    environment:
+      INOUT_DATABASE_URL: postgresql://inandout:inandout@postgres:5432/inandout
+
+  writeback:
+    build: .
+    command: inandout writeback run --config /config/writeback.yaml
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./connectors:/connectors
+      - ./config:/config
+    ports:
+      - "9091:9090"
+    environment:
+      INOUT_DATABASE_URL: postgresql://inandout:inandout@postgres:5432/inandout

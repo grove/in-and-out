@@ -1,0 +1,69 @@
+"""Periodic housekeeping: purge old rows from operational and history tables."""
+from __future__ import annotations
+
+import structlog
+from psycopg_pool import AsyncConnectionPool
+
+from inandout.config._duration import parse_duration
+from inandout.config.tool import HousekeepingConfig
+
+logger = structlog.get_logger(__name__)
+
+
+def _to_pg_interval(duration_str: str) -> str:
+    """Convert a duration string like "90d" to a PostgreSQL interval string like "90 days"."""
+    secs = parse_duration(duration_str)
+    days = int(secs / 86400)
+    return f"{days} days"
+
+
+async def run_housekeeping(
+    pool: AsyncConnectionPool,
+    housekeeping_cfg: HousekeepingConfig,
+    connector_datatypes: list[tuple[str, str]],
+) -> dict:
+    """
+    Delete rows older than configured retention windows.
+    Returns counts of deleted rows per table.
+    """
+    retention = housekeeping_cfg.retention
+
+    sync_run_interval = _to_pg_interval(retention.sync_run_log)
+    dead_letter_interval = _to_pg_interval(retention.dead_letter)
+    history_interval = _to_pg_interval(retention.history_table)
+
+    totals: dict[str, int] = {}
+
+    async with pool.connection() as conn:
+        # Purge sync run log
+        cur = await conn.execute(
+            f"DELETE FROM inout_ops_sync_run WHERE finished_at < NOW() - INTERVAL '{sync_run_interval}'"
+        )
+        totals["sync_run"] = cur.rowcount or 0
+
+        # Purge dead-letter tables
+        for connector, datatype in connector_datatypes:
+            dl_table = f"inout_dl_ingestion_{connector}_{datatype}"
+            try:
+                cur = await conn.execute(
+                    f"DELETE FROM {dl_table} WHERE failed_at < NOW() - INTERVAL '{dead_letter_interval}'"
+                )
+                totals[f"dl_{connector}_{datatype}"] = cur.rowcount or 0
+            except Exception:
+                pass  # Table may not exist
+
+        # Purge history tables
+        for connector, datatype in connector_datatypes:
+            hist_table = f"inout_src_{connector}_{datatype}_history"
+            try:
+                cur = await conn.execute(
+                    f"DELETE FROM {hist_table} WHERE _ingested_at < NOW() - INTERVAL '{history_interval}'"
+                )
+                totals[f"hist_{connector}_{datatype}"] = cur.rowcount or 0
+            except Exception:
+                pass  # Table may not exist
+
+        await conn.commit()
+
+    logger.info("housekeeping_complete", totals=totals)
+    return totals
