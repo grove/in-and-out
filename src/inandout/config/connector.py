@@ -214,6 +214,7 @@ class ConnectorConfig(BaseModel):
     tenancy: dict[str, Any] | None = None
     webhooks: WebhookConfig | None = None
     datatypes: dict[str, DatatypeConfig] = Field(min_length=1)
+    depends_on: list[str] = []  # connector names that must run before this one
 
     @model_validator(mode="after")
     def no_cyclic_datatype_dependencies(self) -> "ConnectorConfig":

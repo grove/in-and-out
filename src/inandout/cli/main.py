@@ -808,5 +808,98 @@ def api_generate_sdk(
             pass
 
 
+# ---------------------------------------------------------------------------
+# lint command (Step 70)
+# ---------------------------------------------------------------------------
+
+
+@app.command("lint")
+def lint_connectors(
+    connectors_dir: str = typer.Option(
+        "connectors/",
+        "--connectors-dir", "-d",
+        help="Directory containing connector YAML files.",
+        show_default=True,
+    ),
+    connector: str | None = typer.Option(
+        None,
+        "--connector",
+        help="Path to a single connector YAML file (overrides --connectors-dir).",
+    ),
+) -> None:
+    """Run static analysis (linter) on connector YAML files."""
+    from inandout.config.loader import load_connector
+    from inandout.linter import lint_connector, LintDiagnostic
+
+    SEVERITY_COLORS = {
+        "error": "bold red",
+        "warning": "yellow",
+        "info": "cyan",
+    }
+
+    # Collect files
+    if connector:
+        yaml_files = [Path(connector)]
+    else:
+        dir_path = Path(connectors_dir)
+        if not dir_path.exists():
+            err_console.print(f"Connectors directory not found: {dir_path}")
+            raise typer.Exit(code=1)
+        yaml_files = sorted(dir_path.glob("*.yaml"))
+
+    if not yaml_files:
+        console.print("[yellow]No connector YAML files found.[/yellow]")
+        raise typer.Exit(code=0)
+
+    # Load all connector names for LINT006
+    all_cfgs = []
+    for yp in yaml_files:
+        try:
+            cfg = load_connector(yp)
+            all_cfgs.append((yp, cfg))
+        except Exception as exc:
+            console.print(f"[red]LOAD ERROR[/red] {yp.name}: {exc}")
+
+    known_names = [cfg.connector.name for _, cfg in all_cfgs]
+
+    table = Table(title="Connector Lint Results")
+    table.add_column("Severity", style="bold")
+    table.add_column("Rule", style="cyan")
+    table.add_column("Connector")
+    table.add_column("Message")
+    table.add_column("Path", style="dim")
+
+    total_errors = 0
+    total_diags = 0
+
+    for yaml_path, cfg in all_cfgs:
+        diags = lint_connector(cfg, known_connector_names=known_names)
+        for diag in diags:
+            total_diags += 1
+            color = SEVERITY_COLORS.get(diag.severity, "white")
+            table.add_row(
+                f"[{color}]{diag.severity.upper()}[/{color}]",
+                diag.rule_id,
+                cfg.connector.name,
+                diag.message,
+                diag.path,
+            )
+            if diag.severity == "error":
+                total_errors += 1
+
+    if total_diags > 0:
+        console.print(table)
+    else:
+        console.print("[green]No lint diagnostics found. All connectors are clean.[/green]")
+
+    console.print(
+        f"\n[bold]{total_diags} diagnostic(s)[/bold] found "
+        f"({total_errors} error(s))"
+    )
+
+    if total_errors > 0:
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

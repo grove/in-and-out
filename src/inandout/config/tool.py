@@ -17,6 +17,7 @@ class DatabaseConfig(BaseModel):
     max_open_conns: int = 20
     max_idle_conns: int = 5
     conn_max_lifetime: str = "30m"
+    read_replica_dsn: str | None = None  # optional read-replica for routing reads
 
 
 class TLSConfig(BaseModel):
@@ -208,6 +209,7 @@ class IngestionToolConfig(BaseModel):
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     schema_registry_dir: str | None = None
     alerting: AlertingConfig = Field(default_factory=AlertingConfig)
+    event_output: Any = Field(default_factory=lambda: None)  # EventOutputConfig | None
 
 
 class _WritebackHealthServerConfig(BaseModel):

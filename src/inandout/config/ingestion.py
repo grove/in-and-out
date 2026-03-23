@@ -122,3 +122,4 @@ class IngestionConfig(BaseModel):
     source_mode: Literal["polling", "cdc"] = "polling"
     cdc: Any | None = None  # CdcSourceConfig | None — imported lazily to avoid circular imports
     max_concurrent_fetches: int = 1  # parallelism for fan-out fetch (1 = no parallelism)
+    bulk_upsert_batch_size: int = 1  # 1 = single-record path; >1 = bulk batch path

@@ -136,6 +136,12 @@ class WritebackEngine:
                 if rows is None:
                     return result
 
+                # Step 67: crash recovery — skip already-sent rows from audit log
+                if writeback_cfg.enable_crash_recovery and rows:
+                    rows = await self._deduplicate_with_audit(
+                        rows, connector.name, datatype, delta_table, log, result
+                    )
+
                 semaphore = anyio.Semaphore(effective_max_writes)
 
                 async with HttpTransportAdapter(connector) as transport:
@@ -174,6 +180,57 @@ class WritebackEngine:
                 await conn.commit()
 
         return result
+
+    async def _deduplicate_with_audit(
+        self,
+        rows: list[dict],
+        connector: str,
+        datatype: str,
+        delta_table: str,
+        log: object,
+        result: WritebackResult,
+    ) -> list[dict]:
+        """Filter out rows that were already successfully sent (crash recovery)."""
+        try:
+            async with self._pool.connection() as conn:
+                audit_rows = await (await conn.execute(
+                    """
+                    SELECT external_id, action
+                    FROM inout_ops_writeback_result
+                    WHERE connector = %s AND datatype = %s AND delta_table = %s
+                      AND processed_at > NOW() - INTERVAL '1 hour'
+                      AND status = 'ok'
+                    """,
+                    [connector, datatype, delta_table],
+                )).fetchall()
+        except Exception:
+            # If the audit table doesn't exist yet, skip deduplication
+            return rows
+
+        already_sent: set[tuple[str, str]] = {
+            (str(r[0]), str(r[1])) for r in audit_rows
+        }
+        if not already_sent:
+            return rows
+
+        filtered = []
+        skipped = 0
+        for row in rows:
+            external_id = str(row.get("external_id") or row.get("_cluster_id", ""))
+            action = str(row.get("_action", ""))
+            if (external_id, action) in already_sent:
+                skipped += 1
+            else:
+                filtered.append(row)
+
+        if skipped:
+            logger.info(
+                "writeback_resume_skipped_rows",
+                connector=connector,
+                datatype=datatype,
+                skipped=skipped,
+            )
+        return filtered
 
     async def _fetch_delta_rows(
         self,

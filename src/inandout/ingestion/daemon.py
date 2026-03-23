@@ -75,6 +75,7 @@ async def _ready(request: Request) -> JSONResponse:
 def _build_app(engine: IngestionEngine, connector_configs: list, pool: Any = None) -> Any:
     from fastapi import FastAPI
     from inandout.api import build_api_router
+    from inandout.ui import build_ui_router
 
     routes = [
         Route("/health", _health),
@@ -99,6 +100,12 @@ def _build_app(engine: IngestionEngine, connector_configs: list, pool: Any = Non
     api_app = FastAPI(title="in-and-out management API", docs_url="/api/docs")
     api_app.include_router(api_router, prefix="/api")
     routes.append(Mount("/api", app=api_app))
+
+    # Mount Web UI
+    try:
+        routes.append(build_ui_router())
+    except Exception:
+        pass  # UI mount is best-effort
 
     app = Starlette(routes=routes)
     return OpenTelemetryMiddleware(app)
@@ -296,7 +303,23 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     log.info("daemon_starting", connectors_dir=config.connectors_dir)
 
     pool = await create_pool(config.database)
-    engine = IngestionEngine(pool)
+
+    # Create read pool if configured
+    from inandout.postgres.pool import create_read_pool
+    read_pool = await create_read_pool(config.database)
+
+    # Create event publisher if configured
+    publisher = None
+    event_cfg = getattr(config, "event_output", None)
+    if event_cfg is not None and getattr(event_cfg, "enabled", False):
+        try:
+            from inandout.events.publisher import get_publisher
+            publisher = get_publisher(event_cfg, pool)
+            log.info("event_publisher_created", backend=event_cfg.backend)
+        except Exception as exc:
+            log.warning("event_publisher_init_failed", error=str(exc))
+
+    engine = IngestionEngine(pool, read_pool=read_pool, publisher=publisher)
 
     paused_connectors: set[tuple[str, str]] = set()
     dispatcher = ControlDispatcher(pool, paused_connectors)
@@ -329,6 +352,17 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         return loaded
 
     connector_configs = _load_connectors()
+
+    # Apply topological sort so connectors with dependencies run after their dependencies
+    try:
+        from inandout.config.dependency_graph import topological_sort
+        connector_configs = topological_sort(connector_configs)
+        log.info(
+            "connector_start_order",
+            order=[c.connector.name for c in connector_configs],
+        )
+    except Exception as exc:
+        log.warning("connector_sort_failed", error=str(exc))
 
     # Collect (connector, datatype) pairs for housekeeping
     connector_datatypes: list[tuple[str, str]] = [
