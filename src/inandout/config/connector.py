@@ -15,6 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from inandout.config.auth import AuthConfig
+from inandout.config.field_mapping import FieldMapping
 from inandout.config.ingestion import IngestionConfig
 from inandout.config.webhooks import WebhookConfig
 from inandout.config.writeback import WritebackConfig
@@ -168,6 +169,8 @@ class DatatypeConfig(BaseModel):
     kind: Literal["entity", "relationship"] | None = None
     ingestion: IngestionConfig | None = None
     writeback: WritebackConfig | None = None
+    field_mappings: list[FieldMapping] = []
+    strict_field_mapping: bool = False
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":

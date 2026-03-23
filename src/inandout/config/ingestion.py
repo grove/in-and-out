@@ -6,11 +6,14 @@ Covers schemas/defs/ingestion.schema.json.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from inandout.config.pagination import PaginationConfig
+
+if TYPE_CHECKING:
+    from inandout.ingestion.cdc import CdcSourceConfig
 
 
 class HistoryMode(StrEnum):
@@ -110,3 +113,5 @@ class IngestionConfig(BaseModel):
     list: ListConfig = Field(alias="list")
     webhook_events: WebhookEventsConfig | None = None
     prune_orphan_columns: bool = False
+    source_mode: Literal["polling", "cdc"] = "polling"
+    cdc: Any | None = None  # CdcSourceConfig | None — imported lazily to avoid circular imports

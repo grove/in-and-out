@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inandout-writeback
+  namespace: inandout
+  labels:
+    app: inandout-writeback
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inandout-writeback
+  template:
+    metadata:
+      labels:
+        app: inandout-writeback
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: writeback
+          image: inandout:latest
+          imagePullPolicy: IfNotPresent
+          command: ["inandout", "writeback", "run", "--config", "/config/writeback.yaml"]
+          ports:
+            - name: health
+              containerPort: 9091
+          envFrom:
+            - secretRef:
+                name: inandout-credentials
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: connectors
+              mountPath: /connectors
+      volumes:
+        - name: config
+          configMap:
+            name: inandout-config
+        - name: connectors
+          configMap:
+            name: inandout-connectors
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inandout-writeback
+  namespace: inandout
+  labels:
+    app: inandout-writeback
+spec:
+  ports:
+    - name: health
+      port: 9091
+      targetPort: 9091
+  selector:
+    app: inandout-writeback

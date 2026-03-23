@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: inandout
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres.yaml
+  - migrate-job.yaml
+  - ingest-deployment.yaml
+  - writeback-deployment.yaml
+  - hpa.yaml
+  - servicemonitor.yaml
+
+commonLabels:
+  app.kubernetes.io/name: inandout
+  app.kubernetes.io/managed-by: kustomize

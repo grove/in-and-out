@@ -33,9 +33,16 @@ db_app = typer.Typer(
     no_args_is_help=True,
 )
 
+connector_app = typer.Typer(
+    name="connector",
+    help="Connector marketplace commands.",
+    no_args_is_help=True,
+)
+
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(writeback_app, name="writeback")
 app.add_typer(db_app, name="db")
+app.add_typer(connector_app, name="connector")
 
 console = Console()
 err_console = Console(stderr=True, style="bold red")
@@ -410,6 +417,120 @@ def db_status(
 
     alembic_cfg = AlembicConfig("alembic.ini")
     alembic_cmd.current(alembic_cfg)
+
+
+# ---------------------------------------------------------------------------
+# connector sub-commands (marketplace / registry)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_INDEX_URL = (
+    "https://raw.githubusercontent.com/grove/in-and-out-connectors/main/index.json"
+)
+
+
+@connector_app.command("list")
+def connector_list(
+    index: str = typer.Option(
+        _DEFAULT_INDEX_URL,
+        "--index",
+        help="URL of the connector index JSON.",
+        show_default=False,
+    ),
+) -> None:
+    """Fetch and print the connector index as a rich table."""
+    import anyio
+    from inandout.registry import fetch_index
+
+    async def _run() -> None:
+        idx = await fetch_index(index)
+        table = Table(title="Available Connectors")
+        table.add_column("Name", style="cyan")
+        table.add_column("Version", style="bold")
+        table.add_column("Description")
+        for entry in idx.connectors:
+            table.add_row(entry.name, entry.version, entry.description)
+        console.print(table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Failed to fetch connector index: {exc}")
+        raise typer.Exit(code=1)
+
+
+@connector_app.command("install")
+def connector_install(
+    name: str = typer.Argument(help="Name of the connector to install."),
+    index: str = typer.Option(
+        _DEFAULT_INDEX_URL,
+        "--index",
+        help="URL of the connector index JSON.",
+        show_default=False,
+    ),
+    dest: str = typer.Option(
+        "./connectors",
+        "--dest",
+        help="Destination directory for the installed connector.",
+        show_default=True,
+    ),
+) -> None:
+    """Install a connector by name from the index."""
+    import anyio
+    from inandout.registry import fetch_index, install_connector
+
+    async def _run() -> None:
+        idx = await fetch_index(index)
+        matches = [e for e in idx.connectors if e.name == name]
+        if not matches:
+            err_console.print(f"Connector '{name}' not found in index.")
+            raise typer.Exit(code=1)
+        entry = matches[0]
+        dest_path = Path(dest)
+        yaml_path = await install_connector(entry, dest_path)
+        console.print(f"[green]Installed[/green] {entry.name} v{entry.version} → {yaml_path}")
+
+    try:
+        anyio.run(_run)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        err_console.print(f"Install failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+@connector_app.command("search")
+def connector_search(
+    query: str = typer.Argument(help="Search query (substring match on name/description)."),
+    index: str = typer.Option(
+        _DEFAULT_INDEX_URL,
+        "--index",
+        help="URL of the connector index JSON.",
+        show_default=False,
+    ),
+) -> None:
+    """Fuzzy search connectors by name or description."""
+    import anyio
+    from inandout.registry import fetch_index, search_connectors
+
+    async def _run() -> None:
+        idx = await fetch_index(index)
+        results = search_connectors(idx, query)
+        if not results:
+            console.print(f"[yellow]No connectors matching '{query}'.[/yellow]")
+            return
+        table = Table(title=f"Search results for '{query}'")
+        table.add_column("Name", style="cyan")
+        table.add_column("Version", style="bold")
+        table.add_column("Description")
+        for entry in results:
+            table.add_row(entry.name, entry.version, entry.description)
+        console.print(table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Search failed: {exc}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from opentelemetry import trace
 from psycopg_pool import AsyncConnectionPool
 
 from inandout.config.connector import ConnectorConfig
-from inandout.config.writeback import WritebackConfig
+from inandout.config.writeback import ProtectionLevel, WritebackConfig
 from inandout.transport.http import HttpTransportAdapter
 
 logger = structlog.get_logger(__name__)
@@ -35,6 +35,7 @@ class WritebackResult:
     processed: int = 0
     skipped: int = 0
     failed: int = 0
+    conflicts: int = 0
     error_message: str | None = None
 
 
@@ -179,7 +180,53 @@ class WritebackEngine:
                     return
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.update.path)
-                await transport._request(ops.update.method.upper(), path, json=payload)
+
+                if writeback_cfg.protection_level == ProtectionLevel.optimistic:
+                    # Fetch ETag via lookup GET
+                    lookup_path = interpolate_path(ops.lookup.path)
+                    try:
+                        lookup_resp = await transport._raw_request(
+                            ops.lookup.method.upper(), lookup_path
+                        )
+                        etag = lookup_resp.headers.get(writeback_cfg.etag_header, "")
+                    except httpx.HTTPError:
+                        etag = ""
+
+                    extra_headers: dict[str, str] = {}
+                    if etag:
+                        extra_headers[writeback_cfg.if_match_header] = etag
+
+                    try:
+                        resp = await transport._raw_request(
+                            ops.update.method.upper(),
+                            path,
+                            json=payload,
+                            headers=extra_headers,
+                        )
+                        if resp.status_code == 412:
+                            logger.warning(
+                                "writeback_conflict_412",
+                                action=action,
+                                external_id=external_id,
+                            )
+                            result.conflicts += 1
+                            result.skipped += 1
+                            return
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 412:
+                            logger.warning(
+                                "writeback_conflict_412",
+                                action=action,
+                                external_id=external_id,
+                            )
+                            result.conflicts += 1
+                            result.skipped += 1
+                            return
+                        raise
+                else:
+                    await transport._request(ops.update.method.upper(), path, json=payload)
+
                 result.processed += 1
 
             elif action == "delete":

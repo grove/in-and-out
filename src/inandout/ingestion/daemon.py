@@ -25,6 +25,37 @@ from inandout.ingestion.webhooks import handle_webhook
 from inandout.observability.metrics import REGISTRY
 from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
+from inandout.secrets import configure_backend
+
+
+def _setup_credential_backend(config: IngestionToolConfig) -> None:
+    """Configure the module-level secret backend from tool config."""
+    from inandout.secrets.backend import (
+        AwsSecretsManagerBackend,
+        EnvSecretBackend,
+        GcpSecretManagerBackend,
+        VaultSecretBackend,
+    )
+
+    backend_type = config.credential_backend
+    cfg = config.credential_backend_config
+
+    if backend_type == "env":
+        configure_backend(EnvSecretBackend(prefix=cfg.get("prefix", "INOUT_CREDENTIAL_")))
+    elif backend_type == "vault":
+        configure_backend(
+            VaultSecretBackend(
+                addr=cfg["addr"],
+                token=cfg["token"],
+                mount=cfg.get("mount", "secret"),
+            )
+        )
+    elif backend_type == "aws_sm":
+        configure_backend(AwsSecretsManagerBackend(region=cfg["region"]))
+    elif backend_type == "gcp_sm":
+        configure_backend(GcpSecretManagerBackend(project=cfg["project"]))
+    else:
+        logger.warning("unknown_credential_backend", backend=backend_type)
 
 logger = structlog.get_logger(__name__)
 
@@ -41,7 +72,10 @@ async def _ready(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ready", "connectors": []})
 
 
-def _build_app(engine: IngestionEngine, connector_configs: list) -> Any:
+def _build_app(engine: IngestionEngine, connector_configs: list, pool: Any = None) -> Any:
+    from fastapi import FastAPI
+    from inandout.api import build_api_router
+
     routes = [
         Route("/health", _health),
         Route("/ready", _ready),
@@ -59,6 +93,12 @@ def _build_app(engine: IngestionEngine, connector_configs: list) -> Any:
             return _webhook_handler
 
         routes.append(Route(webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"]))
+
+    # Mount FastAPI management API
+    api_router = build_api_router(pool=pool)
+    api_app = FastAPI(title="in-and-out management API", docs_url="/api/docs")
+    api_app.include_router(api_router, prefix="/api")
+    routes.append(Mount("/api", app=api_app))
 
     app = Starlette(routes=routes)
     return OpenTelemetryMiddleware(app)
@@ -95,6 +135,7 @@ async def _polling_loop(
     ingestion_cfg: Any,
     default_interval_secs: float,
     paused_connectors: set[tuple[str, str]],
+    dtype_cfg: Any = None,
 ) -> None:
     from inandout.transport.circuit_breaker import get_circuit_breaker
 
@@ -118,7 +159,7 @@ async def _polling_loop(
             continue
 
         try:
-            result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg)
+            result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg, dtype_cfg=dtype_cfg)
             if result.status in ("completed", "skipped"):
                 cb.record_success()
             elif result.status == "failed":
@@ -207,6 +248,7 @@ async def _run_connector_tasks(
                 dtype_cfg.ingestion,
                 default_interval_secs,
                 paused_connectors,
+                dtype_cfg,
             )
 
 
@@ -218,6 +260,8 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     from inandout.observability import configure_logging, configure_metrics, configure_tracing
 
     config: IngestionToolConfig = load_ingestion_tool_config(config_path)
+
+    _setup_credential_backend(config)
 
     configure_logging(format=config.observability.logging.format, level=config.observability.logging.level)
     configure_metrics()
@@ -275,7 +319,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # Build HTTP app (health + webhook routes + metrics)
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_app(engine, connector_configs), host=host, port=int(port_str), log_level="warning"
+        _build_app(engine, connector_configs, pool=pool), host=host, port=int(port_str), log_level="warning"
     )
     health_server = uvicorn.Server(health_server_config)
 
@@ -314,6 +358,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                             dtype_cfg.ingestion,
                             default_interval_secs,
                             paused_connectors,
+                            dtype_cfg,
                         )
 
     log.info("daemon_started")

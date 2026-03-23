@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -203,6 +203,8 @@ class IngestionToolConfig(BaseModel):
     control_table: ControlTableConfig = Field(default_factory=ControlTableConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
+    credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
+    credential_backend_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class _WritebackHealthServerConfig(BaseModel):
@@ -224,3 +226,5 @@ class WritebackToolConfig(BaseModel):
     control_table: ControlTableConfig = Field(default_factory=ControlTableConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
+    credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
+    credential_backend_config: dict[str, Any] = Field(default_factory=dict)

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inandout-config
+  namespace: inandout
+data:
+  ingestion.yaml: |
+    database:
+      dsn: "${INOUT_DATABASE_URL}"
+    connectors_dir: /connectors
+    namespace: public
+    health_server:
+      listen: "0.0.0.0:9090"
+    observability:
+      logging:
+        format: json
+        level: info
+      metrics:
+        enabled: true
+      tracing:
+        enabled: false
+
+  writeback.yaml: |
+    database:
+      dsn: "${INOUT_DATABASE_URL}"
+    connectors_dir: /connectors
+    namespace: public
+    health_server:
+      listen: "0.0.0.0:9091"
+    observability:
+      logging:
+        format: json
+        level: info
+      metrics:
+        enabled: true
+      tracing:
+        enabled: false

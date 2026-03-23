@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inandout-ingest
+  namespace: inandout
+  labels:
+    app: inandout-ingest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inandout-ingest
+  template:
+    metadata:
+      labels:
+        app: inandout-ingest
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: ingest
+          image: inandout:latest
+          imagePullPolicy: IfNotPresent
+          command: ["inandout", "ingest", "run", "--config", "/config/ingestion.yaml"]
+          ports:
+            - name: health
+              containerPort: 9090
+          envFrom:
+            - secretRef:
+                name: inandout-credentials
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: connectors
+              mountPath: /connectors
+      volumes:
+        - name: config
+          configMap:
+            name: inandout-config
+        - name: connectors
+          configMap:
+            name: inandout-connectors
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inandout-ingest
+  namespace: inandout
+  labels:
+    app: inandout-ingest
+spec:
+  ports:
+    - name: health
+      port: 9090
+      targetPort: 9090
+  selector:
+    app: inandout-ingest

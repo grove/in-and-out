@@ -1,0 +1,30 @@
+# Horizontal Pod Autoscaler for the writeback daemon.
+# Scales on the custom metric "dead_letter_depth" — requires prometheus-adapter
+# to be configured in the cluster to expose this metric from Prometheus.
+#
+# Install prometheus-adapter:
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     --set prometheus.url=http://prometheus.monitoring.svc.cluster.local
+#
+# Then configure a custom metric rule for dead_letter_depth in the adapter's
+# ConfigMap pointing to: inout_dead_letter_depth (gauge exported by /metrics).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inandout-writeback
+  namespace: inandout
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inandout-writeback
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: dead_letter_depth
+        target:
+          type: AverageValue
+          averageValue: "100"

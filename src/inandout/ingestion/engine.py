@@ -11,8 +11,9 @@ import structlog
 from opentelemetry import trace
 from psycopg_pool import AsyncConnectionPool
 
-from inandout.config.connector import ConnectorConfig
+from inandout.config.connector import ConnectorConfig, DatatypeConfig
 from inandout.config.ingestion import HistoryMode, IngestionConfig
+from inandout.ingestion.field_mapper import apply_field_mappings
 from inandout.observability.metrics import records_processed_total, sync_lag_seconds
 from inandout.plugins.hooks import apply_hooks
 from inandout.postgres.schema_drift import detect_schema_drift, prune_orphan_columns
@@ -69,6 +70,7 @@ class IngestionEngine:
         connector: ConnectorConfig,
         datatype: str,
         ingestion_cfg: IngestionConfig,
+        dtype_cfg: DatatypeConfig | None = None,
     ) -> SyncResult:
         with _tracer.start_as_current_span("ingestion.run_sync") as span:
             span.set_attribute("connector", connector.name)
@@ -119,7 +121,7 @@ class IngestionEngine:
                     return result
 
                 try:
-                    await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log)
+                    await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log, dtype_cfg=dtype_cfg)
                 except Exception as exc:
                     result.status = "failed"
                     result.error_message = str(exc)
@@ -182,7 +184,18 @@ class IngestionEngine:
         result: SyncResult,
         watermark: str | None,
         log: Any,
+        dtype_cfg: DatatypeConfig | None = None,
     ) -> None:
+        # CDC mode: consume from the CDC source instead of HTTP polling
+        if ingestion_cfg.source_mode == "cdc" and ingestion_cfg.cdc is not None:
+            from inandout.ingestion.cdc import get_cdc_source
+            cdc_source = get_cdc_source(ingestion_cfg.cdc, self._pool)
+            await self._run_cdc_sync(
+                connector, datatype, ingestion_cfg, result, log, cdc_source, dtype_cfg=dtype_cfg
+            )
+            result.status = "completed"
+            return
+
         history_mode = ingestion_cfg.history_mode
         ns = self._namespace
 
@@ -209,6 +222,13 @@ class IngestionEngine:
                 async with self._pool.connection() as conn:
                     async with conn.transaction():
                         for record in page:
+                            # Apply field mappings (if configured)
+                            if dtype_cfg is not None and dtype_cfg.field_mappings:
+                                record = apply_field_mappings(
+                                    record,
+                                    dtype_cfg.field_mappings,
+                                    strict=dtype_cfg.strict_field_mapping,
+                                )
                             # Apply plugin hooks: transform → filter → enrich
                             record = await apply_hooks(record, connector.name, self._pool)
                             if record is None:
@@ -299,6 +319,71 @@ class IngestionEngine:
                     log.info("orphan_columns_pruned", count=dropped)
 
         result.status = "completed"
+
+    async def _run_cdc_sync(
+        self,
+        connector: ConnectorConfig,
+        datatype: str,
+        ingestion_cfg: IngestionConfig,
+        result: SyncResult,
+        log: Any,
+        cdc_source: Any,
+        dtype_cfg: DatatypeConfig | None = None,
+    ) -> None:
+        """Consume one CDC batch and upsert records (reusing upsert/hash/history logic)."""
+        ns = self._namespace
+        history_mode = ingestion_cfg.history_mode
+
+        async with self._pool.connection() as conn:
+            await ensure_source_table(conn, connector.name, datatype, ns)
+            await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype, ns)
+            if history_mode == HistoryMode.append:
+                await ensure_source_history_table(conn, connector.name, datatype, ns)
+            await conn.commit()
+
+        table = source_table_name(connector.name, datatype, ns)
+        hist_table = source_history_table_name(connector.name, datatype, ns)
+        dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
+
+        batch = await cdc_source.consume(batch_size=100, timeout_secs=5.0)
+        result.records_fetched += len(batch)
+
+        if batch:
+            async with self._pool.connection() as conn:
+                async with conn.transaction():
+                    for record in batch:
+                        if dtype_cfg is not None and dtype_cfg.field_mappings:
+                            record = apply_field_mappings(
+                                record,
+                                dtype_cfg.field_mappings,
+                                strict=dtype_cfg.strict_field_mapping,
+                            )
+                        record = await apply_hooks(record, connector.name, self._pool)
+                        if record is None:
+                            continue
+
+                        raw_hash = _compute_raw_hash(record)
+                        external_id = _extract_external_id(record, ingestion_cfg.primary_key)
+                        if external_id is None:
+                            result.records_errored += 1
+                            await _write_dead_letter(
+                                conn, dl_table, None, record, "could not extract primary key",
+                                "data_error", result.run_id
+                            )
+                            continue
+
+                        inserted, updated = await _upsert_record(
+                            conn, table, external_id, record, raw_hash, result.run_id
+                        )
+                        result.records_inserted += inserted
+                        result.records_updated += updated
+
+                        if (inserted or updated) and history_mode == HistoryMode.append:
+                            await _write_history_record(
+                                conn, hist_table, external_id, record, raw_hash, result.run_id
+                            )
+
+            await cdc_source.commit()
 
     async def _tombstone_missing(
         self,

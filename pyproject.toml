@@ -6,48 +6,36 @@ requires-python = ">=3.13"
 dependencies = [
     # Async runtime
     "anyio>=4.7",
-
     # PostgreSQL
     "psycopg[binary]>=3.2",
     "psycopg-pool>=3.2",
-
     # HTTP client
     "httpx[http2]>=0.28",
-
     # HTTP server (webhooks & health endpoints)
     "starlette>=0.45",
     "uvicorn[standard]>=0.34",
-
     # Configuration & validation
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "pyyaml>=6.0",
-
     # Expression evaluation
     "jmespath>=1.0",
     "jsonpath-ng>=1.6",
-
     # Data processing
     "orjson>=3.10",
     "deepdiff>=8.0",
-
     # Scheduling
     # apscheduler 4.x (async-native rewrite) — use croniter fallback if 4.x unavailable
     "apscheduler>=3.10",
     "croniter>=3.0",
-
     # Rate limiting
     "aiolimiter>=1.2",
-
     # Retry logic
     "tenacity>=9.0",
-
     # Observability — Logging
     "structlog>=24.0",
-
     # Observability — Metrics
     "prometheus-client>=0.21",
-
     # Observability — Tracing
     "opentelemetry-api>=1.29",
     "opentelemetry-sdk>=1.29",
@@ -55,16 +43,14 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.50b0",
     "opentelemetry-instrumentation-psycopg>=0.50b0",
     "opentelemetry-instrumentation-asgi>=0.50b0",
-
     # CLI
     "typer>=0.15",
     "rich>=13.0",
-
     # Cryptography
     "cryptography>=43",
-
     # Database migrations
     "alembic>=1.14",
+    "fastapi>=0.135.1",
 ]
 
 [project.optional-dependencies]

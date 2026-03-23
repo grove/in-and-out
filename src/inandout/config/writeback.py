@@ -73,6 +73,8 @@ class WritebackConfig(BaseModel):
     operations: OperationsConfig
     max_concurrent_writes: int = Field(default=10, ge=1)
     batch_size: int = Field(default=50, ge=1)
+    etag_header: str = "ETag"
+    if_match_header: str = "If-Match"
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":
