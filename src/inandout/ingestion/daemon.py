@@ -473,6 +473,36 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     )
     health_server = uvicorn.Server(health_server_config)
 
+    # Build webhook-only server if configured
+    webhook_server_cfg = getattr(config, "webhook_server", None)
+    webhook_server: uvicorn.Server | None = None
+    if webhook_server_cfg is not None and getattr(webhook_server_cfg, "listen", None):
+        from inandout.ingestion.webhook_server import build_webhook_app
+
+        webhook_app = build_webhook_app(engine, connector_configs, webhook_server_cfg)
+        webhook_host, webhook_port_str = webhook_server_cfg.listen.rsplit(":", 1)
+
+        webhook_uvicorn_kwargs: dict = {}
+        tls_cert = getattr(webhook_server_cfg, "tls_cert_file", None)
+        tls_key = getattr(webhook_server_cfg, "tls_key_file", None)
+        if tls_cert and tls_key:
+            webhook_uvicorn_kwargs["ssl_certfile"] = tls_cert
+            webhook_uvicorn_kwargs["ssl_keyfile"] = tls_key
+        elif tls_cert or tls_key:
+            log.warning(
+                "webhook_tls_incomplete",
+                reason="Both tls_cert_file and tls_key_file required for TLS; proceeding without TLS",
+            )
+
+        webhook_server_config = uvicorn.Config(
+            webhook_app,
+            host=webhook_host,
+            port=int(webhook_port_str),
+            log_level="warning",
+            **webhook_uvicorn_kwargs,
+        )
+        webhook_server = uvicorn.Server(webhook_server_config)
+
     async def _run_health_server() -> None:
         await health_server.serve()
 
@@ -666,9 +696,15 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                             error=str(exc),
                         )
 
+    async def _run_webhook_server() -> None:
+        if webhook_server is not None:
+            await webhook_server.serve()
+
     try:
         async with anyio.create_task_group() as tg:
             tg.start_soon(_run_health_server)
+            if webhook_server is not None:
+                tg.start_soon(_run_webhook_server)
             tg.start_soon(_control_table_poller, dispatcher, engine, control_poll_secs)
             tg.start_soon(_hot_reload_watcher, tg)
             tg.start_soon(

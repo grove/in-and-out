@@ -639,7 +639,7 @@ def connector_new(
         infer_auth,
         infer_pagination,
     )
-    from inandout.generator.template import render_connector_yaml
+    from inandout.generator.template import render_connector_test, render_connector_yaml
 
     async def _run() -> None:
         spec: dict | None = None
@@ -686,6 +686,21 @@ def connector_new(
         safe_name = name.lower().replace(" ", "_")
         out_path = out_dir / f"{safe_name}.yaml"
         out_path.write_text(yaml_content, encoding="utf-8")
+
+        # Write test scaffold
+        from inandout.generator.template import _make_datatype_name as _mdn
+        datatypes_list = [_mdn(ep["path"]) for ep in endpoints] if endpoints else []
+        test_content = render_connector_test(
+            name=safe_name,
+            base_url=base_url,
+            datatypes=datatypes_list,
+        )
+        test_path = out_dir / f"test_{safe_name}_connector.py"
+        test_path.write_text(test_content, encoding="utf-8")
+        console.print(
+            f"Test scaffold written to test_{safe_name}_connector.py "
+            "— fill in the TODO sections."
+        )
 
         table = Table(title=f"Generated connector: {name}")
         table.add_column("Property", style="cyan")

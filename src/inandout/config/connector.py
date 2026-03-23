@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from inandout.config.auth import AuthConfig
+from inandout.config.auth import AuthConfig, PreRequestAuthConfig
 from inandout.config.field_mapping import FieldMapping
 from inandout.config.ingestion import IngestionConfig
 from inandout.config.quality import QualityRule
@@ -128,6 +128,7 @@ class ConnectionConfig(BaseModel):
     staging_base_url: str | None = None
     timeout: TimeoutConfig | None = None
     retry_budget: RetryBudgetConfig | None = None
+    pre_request: PreRequestAuthConfig | None = None  # A3: pre-request session token auth
 
 
 # ---------------------------------------------------------------------------

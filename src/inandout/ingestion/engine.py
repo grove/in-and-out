@@ -789,19 +789,48 @@ class IngestionEngine:
         batch = await cdc_source.consume(batch_size=100, timeout_secs=5.0)
         result.records_fetched += len(batch)
 
+        # CDC watermark cursor (sequence/offset from the CDC source)
+        cdc_cursor: str | None = None
+        in_run_seen: set[str] = set()
+        quality_seen: dict[str, set] = {}
+
         if batch:
             async with self._pool.connection() as conn:
                 async with conn.transaction():
                     for record in batch:
+                        # 1. Field mapping
                         if dtype_cfg is not None and dtype_cfg.field_mappings:
                             record = apply_field_mappings(
                                 record,
                                 dtype_cfg.field_mappings,
                                 strict=dtype_cfg.strict_field_mapping,
                             )
+
+                        # 2. Timestamp normalisation (if configured)
+                        if dtype_cfg is not None and getattr(dtype_cfg, "timestamp_fields", None):
+                            try:
+                                from inandout.ingestion.timestamp import apply_timestamp_normalization
+                                record = apply_timestamp_normalization(record, dtype_cfg.timestamp_fields)
+                            except Exception:
+                                pass
+
+                        # 3. Plugin hooks
                         record = await apply_hooks(record, connector.name, self._pool)
                         if record is None:
                             continue
+
+                        # 4. Quality rules
+                        if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
+                            violations = validate_record(record, dtype_cfg.quality_rules, quality_seen)
+                            if violations:
+                                result.records_errored += 1
+                                external_id_for_dl = _extract_external_id(record, ingestion_cfg.primary_key)
+                                await _write_dead_letter(
+                                    conn, dl_table, external_id_for_dl, record,
+                                    str([str(v) for v in violations]),
+                                    "quality_violation", result.run_id,
+                                )
+                                continue
 
                         raw_hash = _compute_raw_hash(record)
                         external_id = _extract_external_id(record, ingestion_cfg.primary_key)
@@ -813,16 +842,64 @@ class IngestionEngine:
                             )
                             continue
 
+                        # 5. Intra-sync deduplication
+                        if external_id in in_run_seen:
+                            continue
+                        in_run_seen.add(external_id)
+
+                        # Track CDC watermark from record metadata
+                        cdc_seq = record.get("_cdc_seq") or record.get("_offset") or record.get("_sequence")
+                        if cdc_seq is not None:
+                            candidate = str(cdc_seq)
+                            if cdc_cursor is None or candidate > cdc_cursor:
+                                cdc_cursor = candidate
+
+                        # 6. CDC delete events → tombstone, not upsert
+                        cdc_op = record.get("_cdc_op", "")
+                        if cdc_op == "DELETE":
+                            await conn.execute(
+                                f"UPDATE {table} SET _deleted_at = NOW() "
+                                f"WHERE external_id = %s AND _deleted_at IS NULL",
+                                [external_id],
+                            )
+                            result.records_deleted = getattr(result, "records_deleted", 0) + 1
+                            continue
+
                         inserted, updated = await _upsert_record(
                             conn, table, external_id, record, raw_hash, result.run_id
                         )
                         result.records_inserted += inserted
                         result.records_updated += updated
 
+                        # 7. History table write
                         if (inserted or updated) and history_mode == HistoryMode.append:
                             await _write_history_record(
                                 conn, hist_table, external_id, record, raw_hash, result.run_id
                             )
+
+                        # 8. Event publishing
+                        if self._publisher is not None and (inserted or updated):
+                            try:
+                                from inandout.events.publisher import build_event
+                                event = build_event(
+                                    connector=connector.name,
+                                    datatype=datatype,
+                                    external_id=external_id,
+                                    action="upsert",
+                                    run_id=str(result.run_id),
+                                )
+                                await self._publisher.publish(event)
+                            except Exception:
+                                pass
+
+                    # 9. Watermark update after batch
+                    if cdc_cursor is not None:
+                        try:
+                            await set_watermark(
+                                conn, connector.name, datatype, "cursor", cdc_cursor, result.run_id
+                            )
+                        except Exception:
+                            pass
 
             await cdc_source.commit()
 

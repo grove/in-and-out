@@ -163,6 +163,7 @@ class IngestionConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     primary_key: PrimaryKey
+    primary_key_expression: str | None = None  # A2: "{account_id}:{contact_id}" style; takes precedence over primary_key
     history_mode: HistoryMode
     schedule: ScheduleConfig
     list: ListConfig = Field(alias="list")

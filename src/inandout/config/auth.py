@@ -79,6 +79,20 @@ class CustomAuth(BaseModel):
     custom: CustomConfig
 
 
+class PreRequestAuthConfig(BaseModel):
+    """Config for pre-request session-token authentication flows (A3 — T1 #24)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str                          # URL to POST to acquire session token
+    method: str = "POST"
+    credential_ref: str                    # env var holding "username:password" or just a token
+    token_field: str = "token"             # dot-notation path to token in response JSON
+    token_lifetime_secs: float = 3600.0
+    request_body: dict = {}               # static request body fields (credential injected separately)
+    token_header: str = "X-Session-Token" # header to inject on subsequent requests
+
+
 AuthConfig = Annotated[
     OAuth2Auth | ApiKeyAuth | JwtAuth | CustomAuth,
     Field(discriminator="type"),

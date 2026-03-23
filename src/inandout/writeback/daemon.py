@@ -30,7 +30,13 @@ async def _health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+# Module-level draining flag — set to True when SIGTERM/SIGINT received.
+_draining: bool = False
+
+
 async def _ready(request: Request) -> JSONResponse:
+    if _draining:
+        return JSONResponse({"status": "draining"}, status_code=503)
     return JSONResponse({"status": "ready", "connectors": []})
 
 
@@ -54,9 +60,14 @@ async def _writeback_polling_loop(
     interval_secs: float,
     max_concurrent_writes_override: int | None = None,
 ) -> None:
+    global _draining
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     log.info("writeback_polling_loop_started", interval_secs=interval_secs, delta_table=delta_table)
     while True:
+        # Check draining flag at the TOP of each iteration (after completing current cycle)
+        if _draining:
+            log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
+            break
         try:
             result = await engine.run_writeback_cycle(
                 connector_cfg, datatype, writeback_cfg, delta_table,
@@ -199,6 +210,19 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     log.info("daemon_started")
 
+    import signal as _signal
+
+    def _set_draining(sig: int, frame: Any) -> None:
+        global _draining
+        _draining = True
+        log.info("writeback_drain_signal_received", signal=sig)
+
+    try:
+        _signal.signal(_signal.SIGTERM, _set_draining)
+        _signal.signal(_signal.SIGINT, _set_draining)
+    except (OSError, AttributeError):
+        pass  # Windows or restricted environment
+
     try:
         async with anyio.create_task_group() as tg:
             tg.start_soon(_run_health_server)
@@ -237,6 +261,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                                 dtype_max_writes,
                             )
     finally:
+        log.info("writeback_drained")
         log.info("daemon_stopping")
         await pool.close()
         log.info("daemon_stopped")
