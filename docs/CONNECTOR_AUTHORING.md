@@ -272,7 +272,7 @@ Reset via control command `force_full_sync`.
 
 ```yaml
 writeback:
-  protection_level: 1                   # 1=conditional_write | 2=optimistic | 3=fire_and_forget
+  protection_level: 1                   # 0=none | 1=conditional_write | 2=optimistic | 3=post_write_verify
   conflict_resolution: last_writer_wins # dead_letter | last_writer_wins | skip_and_warn | server_wins
   supported_actions: [insert, update, delete, archive]
   max_concurrent_writes: 10
@@ -280,6 +280,9 @@ writeback:
   etag_header: "ETag"
   if_match_header: "If-Match"
   dry_run: false                        # set true to preview writes without executing
+  # CRDT-based conflict resolution (T2 #6)
+  crdt_type: null                       # null | lww_register | g_counter
+  crdt_ts_field: "_updated_at"          # field name for lww_register timestamp comparison
   operations:
     lookup:
       method: GET
@@ -406,3 +409,30 @@ inandout connector publish --connector hubspot.yaml --registry ./connectors/
 
 Connector files are version-controlled YAML. They are not deployed separately —
 they are mounted into the daemon container at `/connectors/`.
+
+---
+
+## 12. Housekeeping and Retention
+
+Both the ingestion and writeback daemons run a periodic housekeeping loop
+(default interval: **1 hour**) that deletes rows older than their configured
+retention window.  The defaults are conservative and can be tuned per
+deployment in `ingestion.yaml` / `writeback.yaml`:
+
+```yaml
+housekeeping:
+  interval: "1h"          # how often the housekeeping loop runs
+  retention:
+    sync_run_log:          "90d"   # inout_ops_sync_run rows
+    dead_letter:           "30d"   # inout_dl_ingestion_<connector>_<datatype> rows
+    history_table:         "365d"  # inout_src_<connector>_<datatype>_history rows
+    webhook_route_seq:     "7d"    # inout_ops_webhook_route_seq rows
+    writeback_result:      "30d"   # inout_ops_writeback_result audit rows
+    writeback_dead_letter: "30d"   # inout_dl_writeback_<connector>_<datatype> rows
+```
+
+> **Note**: `writeback_result` rows within the last **24 hours** are always
+> preserved regardless of the configured window.  This anchors crash-recovery
+> deduplication: if the writeback daemon crashes and restarts, it can check
+> which rows were already sent in the current cycle without risk of housekeeping
+> having pruned the audit trail mid-restart.

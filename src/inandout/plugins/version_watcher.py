@@ -64,6 +64,7 @@ async def get_plugin_versions() -> dict[str, str]:
 async def watch_plugin_versions(
     on_change: Callable[[str, str, str], Awaitable[None]],
     poll_interval_secs: float = 60.0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Poll installed plugin package versions and call *on_change* when versions change.
 
@@ -74,6 +75,10 @@ async def watch_plugin_versions(
         When a package is newly detected, old_version is "".
     poll_interval_secs:
         How often to poll for version changes.
+    should_stop:
+        Optional zero-argument callable that returns True when the loop should
+        exit cleanly (e.g. a daemon drain flag).  Checked before and after each
+        sleep so drain takes effect within at most one poll interval.
     """
     known_versions: dict[str, str] = await get_plugin_versions()
 
@@ -84,7 +89,12 @@ async def watch_plugin_versions(
     )
 
     while True:
+        if should_stop is not None and should_stop():
+            logger.info("plugin_version_watcher_stopping")
+            break
         await anyio.sleep(poll_interval_secs)
+        if should_stop is not None and should_stop():
+            break
 
         try:
             current_versions = await get_plugin_versions()

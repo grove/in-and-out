@@ -53,10 +53,17 @@ async def run_housekeeping(
         except Exception:
             pass  # Table may not exist on older DBs
 
-        # Purge writeback audit/result rows
+        # Purge writeback audit/result rows, but only rows old enough that no
+        # active crash-recovery dedup anchor can reference them.  We protect rows
+        # written within the last 24 hours regardless of the configured window so
+        # a process that crashes and restarts within a day can still deduplicate.
         try:
             cur = await conn.execute(
-                f"DELETE FROM inout_ops_writeback_result WHERE processed_at < NOW() - INTERVAL '{writeback_result_interval}'"
+                f"""
+                DELETE FROM inout_ops_writeback_result
+                WHERE processed_at < NOW() - INTERVAL '{writeback_result_interval}'
+                  AND processed_at < NOW() - INTERVAL '1 day'
+                """
             )
             totals["writeback_result"] = cur.rowcount or 0
         except Exception:

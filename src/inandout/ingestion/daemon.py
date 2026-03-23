@@ -325,7 +325,12 @@ async def _sla_check_loop(
     log = logger.bind(component="sla_check_loop")
     log.info("sla_check_loop_started")
     while True:
+        if _draining:
+            log.info("sla_check_loop_draining")
+            break
         await anyio.sleep(interval_secs)
+        if _draining:
+            break
         try:
             results = await check_all_slas(pool, connector_configs)
             if results:
@@ -739,7 +744,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                 log.warning("plugin_hooks_reregister_failed", error=str(exc))
 
         try:
-            await watch_plugin_versions(_on_plugin_change)
+            await watch_plugin_versions(_on_plugin_change, should_stop=lambda: _draining)
         except Exception as exc:
             log.warning("plugin_reload_loop_exited", error=str(exc))
 

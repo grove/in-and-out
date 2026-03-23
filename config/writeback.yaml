@@ -11,3 +11,13 @@ observability:
     level: info
   tracing:
     enabled: false
+
+housekeeping:
+  interval: "1h"
+  retention:
+    sync_run_log: "90d"
+    dead_letter: "30d"
+    history_table: "365d"
+    webhook_route_seq: "7d"
+    writeback_result: "30d"
+    writeback_dead_letter: "30d"
