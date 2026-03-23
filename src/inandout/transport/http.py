@@ -184,18 +184,10 @@ class HttpTransportAdapter:
                         ).inc()
                     except Exception:
                         pass
-                    # Check budget before retrying
-                    if retry_budget is not None and attempt > 0:
-                        allowed = await retry_budget.consume()
-                        if not allowed:
-                            raise RetryBudgetExhaustedError(
-                                f"Retry budget exhausted for connector {self._connector.name!r}"
-                            )
-                    wait = retry_after_seconds(exc) or (2 ** attempt)
-                    await anyio.sleep(min(wait, 300.0))  # honour Retry-After up to 5 min
-                    attempt += 1
-                    last_exc = exc
-                    continue
+                    # _raw_request already exhausted its own 429 retries (with
+                    # Retry-After sleep and budget checks).  Raising here prevents
+                    # a second retry-and-sleep cycle in this outer loop.
+                    raise exc
 
                 resp.raise_for_status()
                 return resp

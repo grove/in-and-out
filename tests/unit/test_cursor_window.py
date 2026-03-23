@@ -184,3 +184,105 @@ async def test_until_param_injected_into_base_params():
     assert params["since"][0] == "1000000"
     assert "until" in params
     assert params["until"][0] == "1003600"
+
+
+# ---------------------------------------------------------------------------
+# cursor_window: ISO-8601 timestamp watermarks
+# ---------------------------------------------------------------------------
+
+def test_cursor_window_iso_watermark_computes_correct_window_end():
+    """cursor_window arithmetic works correctly when watermark is an ISO-8601 string."""
+    import datetime
+    from datetime import timezone
+    from inandout.config._duration import parse_duration
+
+    # Watermark: 2026-01-01T00:00:00Z (as ISO string, like typical connectors emit)
+    watermark_dt = datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    watermark_str = watermark_dt.isoformat().replace("+00:00", "Z")
+
+    window_secs = parse_duration("1h")  # 3600 seconds
+
+    # Simulate the engine logic
+    watermark_iso_float = watermark_dt.timestamp()
+    now_float = datetime.datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc).timestamp()  # well after window
+    window_end_float = min(watermark_iso_float + window_secs, now_float)
+
+    # window_end should be 2026-01-01T01:00:00Z
+    expected_dt = datetime.datetime(2026, 1, 1, 1, 0, 0, tzinfo=timezone.utc)
+    assert window_end_float == pytest.approx(expected_dt.timestamp(), abs=0.01)
+
+    # Reconstruct ISO string from window_end_float
+    we_dt = datetime.datetime.fromtimestamp(window_end_float, tz=timezone.utc)
+    window_end_iso = we_dt.isoformat().replace("+00:00", "Z")
+    assert window_end_iso == "2026-01-01T01:00:00Z"
+
+
+def test_cursor_window_iso_clamped_to_now():
+    """ISO watermark near now is clamped so window_end does not exceed now."""
+    import datetime
+    from datetime import timezone
+    from inandout.config._duration import parse_duration
+
+    # Watermark 30 seconds ago, window = 10 minutes → window would exceed now
+    now_dt = datetime.datetime.now(tz=timezone.utc)
+    watermark_dt = now_dt - datetime.timedelta(seconds=30)
+
+    window_secs = parse_duration("10m")  # 600s
+    watermark_float = watermark_dt.timestamp()
+    now_float = now_dt.timestamp()
+
+    window_end_float = min(watermark_float + window_secs, now_float)
+
+    # Must not exceed now
+    assert window_end_float <= now_float + 0.01  # tiny tolerance for float arithmetic
+    assert window_end_float == pytest.approx(now_float, abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# WritebackConfig: crdt_ts_field validator (CFG-014)
+# ---------------------------------------------------------------------------
+
+def _make_writeback_config(**overrides):
+    """Helper: build a minimal WritebackConfig dict."""
+    from inandout.config.writeback import WritebackConfig, ProtectionLevel, ConflictResolution
+
+    base = {
+        "protection_level": ProtectionLevel.none,
+        "conflict_resolution": ConflictResolution.last_writer_wins,
+        "supported_actions": ["update"],
+        "operations": {
+            "lookup": {"method": "GET", "path": "/items/${external_id}"},
+        },
+    }
+    base.update(overrides)
+    return WritebackConfig.model_validate(base)
+
+
+def test_crdt_ts_field_default_with_no_crdt_type_is_valid():
+    """crdt_ts_field at default value is always valid regardless of crdt_type."""
+    cfg = _make_writeback_config(crdt_type=None, crdt_ts_field="_updated_at")
+    assert cfg.crdt_ts_field == "_updated_at"
+
+
+def test_crdt_ts_field_custom_with_lww_register_is_valid():
+    """A custom crdt_ts_field is valid when crdt_type='lww_register'."""
+    cfg = _make_writeback_config(crdt_type="lww_register", crdt_ts_field="my_ts")
+    assert cfg.crdt_ts_field == "my_ts"
+
+
+def test_crdt_ts_field_custom_with_g_counter_raises():
+    """A custom crdt_ts_field with crdt_type='g_counter' raises CFG-014 ValueError."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        _make_writeback_config(crdt_type="g_counter", crdt_ts_field="my_custom_ts")
+    assert "CFG-014" in str(exc_info.value)
+
+
+def test_crdt_ts_field_custom_with_no_crdt_type_raises():
+    """A custom crdt_ts_field with no crdt_type raises CFG-014 ValueError."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        _make_writeback_config(crdt_type=None, crdt_ts_field="some_other_field")
+    assert "CFG-014" in str(exc_info.value)

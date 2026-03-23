@@ -985,7 +985,8 @@ class WritebackEngine:
                 update_path = interpolate_path(ops.update.path)
                 extra_headers = _make_extra_headers(payload)
                 if extra_headers:
-                    await transport._raw_request(ops.update.method.upper(), update_path, json=payload, headers=extra_headers)
+                    _merge_upd_resp = await transport._raw_request(ops.update.method.upper(), update_path, json=payload, headers=extra_headers)
+                    _merge_upd_resp.raise_for_status()
                 else:
                     await transport._request(ops.update.method.upper(), update_path, json=payload)
 

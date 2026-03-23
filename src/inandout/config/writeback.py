@@ -121,6 +121,17 @@ class WritebackConfig(BaseModel):
     crdt_ts_field: str = "_updated_at"  # field carrying the timestamp for lww_register
 
     @model_validator(mode="after")
+    def validate_crdt_ts_field_requires_lww(self) -> "WritebackConfig":
+        """CFG-014: crdt_ts_field is only meaningful with crdt_type='lww_register'."""
+        if self.crdt_ts_field != "_updated_at" and self.crdt_type != "lww_register":
+            raise ValueError(
+                "CFG-014: crdt_ts_field is only used with crdt_type='lww_register'. "
+                f"Got crdt_type={self.crdt_type!r}. Remove crdt_ts_field or set "
+                "crdt_type='lww_register'."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":
         """CFG-010: protection_level=1 requires operations.update.conditional_write.enabled=true."""
         if self.protection_level == ProtectionLevel.conditional_write_required:

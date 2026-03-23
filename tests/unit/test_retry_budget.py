@@ -180,3 +180,126 @@ async def test_transport_raises_retry_budget_exhausted(monkeypatch):
             # before retrying, budget.consume() is called and returns False.
             with pytest.raises(RetryBudgetExhaustedError):
                 await adapter._request("GET", "/test")
+
+
+@pytest.mark.anyio
+async def test_raw_request_raises_budget_exhausted_on_429(monkeypatch):
+    """_raw_request raises RetryBudgetExhaustedError when budget is exhausted during 429 retries."""
+    import httpx
+    import respx
+
+    from inandout.config.connector import (
+        ConnectionConfig,
+        ConnectorConfig,
+        RetryBudgetConfig,
+        DatatypeConfig,
+    )
+    from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
+    from inandout.config.ingestion import IngestionConfig
+    from inandout.transport.http import HttpTransportAdapter
+    from inandout.transport.retry_budget import RetryBudgetExhaustedError, _budgets
+
+    _budgets.clear()
+    monkeypatch.setenv("INOUT_CREDENTIAL_RAWBUDGETKEY", "test-secret")
+
+    connector = ConnectorConfig(
+        name="raw-budget-test",
+        system="test",
+        generation_profile="ingestion_polling_readonly",
+        api_version="v1",
+        connection=ConnectionConfig(
+            base_url="https://api.example.com",
+            # Budget of 1: first 429 consumes it; second attempt must raise
+            retry_budget=RetryBudgetConfig(max_attempts=1, window_secs=60.0),
+        ),
+        auth=ApiKeyAuth(
+            type="api_key",
+            credential_ref="rawbudgetkey",
+            api_key=ApiKeyConfig(location="header", name="X-API-Key"),
+        ),
+        datatypes={
+            "items": DatatypeConfig(
+                ingestion=IngestionConfig.model_validate({
+                    "primary_key": "id",
+                    "history_mode": "overwrite",
+                    "schedule": {"interval": "5m"},
+                    "list": {"path": "/items", "method": "GET", "pagination": {"strategy": "offset"}},
+                })
+            )
+        },
+    )
+
+    with respx.mock:
+        # Every request returns 429
+        respx.post("https://api.example.com/writes").mock(
+            return_value=httpx.Response(429, headers={"Retry-After": "0"})
+        )
+
+        adapter = HttpTransportAdapter(connector, max_retries=5)
+        async with adapter:
+            # max_retries=5 but budget.consume() will fail on the second retry attempt
+            with pytest.raises(RetryBudgetExhaustedError):
+                await adapter._raw_request("POST", "/writes", json={"data": 1})
+
+
+@pytest.mark.anyio
+async def test_raw_request_retries_429_without_budget():
+    """_raw_request retries 429 responses up to max_retries when no budget is configured."""
+    import httpx
+    import respx
+
+    from inandout.config.connector import (
+        ConnectionConfig,
+        ConnectorConfig,
+        DatatypeConfig,
+    )
+    from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
+    from inandout.config.ingestion import IngestionConfig
+    from inandout.transport.http import HttpTransportAdapter
+    from inandout.transport.retry_budget import _budgets
+
+    _budgets.clear()
+
+    connector = ConnectorConfig(
+        name="no-budget-test",
+        system="test",
+        generation_profile="ingestion_polling_readonly",
+        api_version="v1",
+        connection=ConnectionConfig(base_url="https://api.example.com"),
+        auth=ApiKeyAuth(
+            type="api_key",
+            credential_ref="nobud",
+            api_key=ApiKeyConfig(location="header", name="X-API-Key"),
+        ),
+        datatypes={
+            "items": DatatypeConfig(
+                ingestion=IngestionConfig.model_validate({
+                    "primary_key": "id",
+                    "history_mode": "overwrite",
+                    "schedule": {"interval": "5m"},
+                    "list": {"path": "/items", "method": "GET", "pagination": {"strategy": "offset"}},
+                })
+            )
+        },
+    )
+
+    import os
+    os.environ.setdefault("INOUT_CREDENTIAL_NOBUD", "test-key")
+
+    call_count = [0]
+
+    with respx.mock:
+        def _side_effect(request):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                return httpx.Response(429, headers={"Retry-After": "0"})
+            return httpx.Response(200, json={"ok": True})
+
+        respx.get("https://api.example.com/data").mock(side_effect=_side_effect)
+
+        adapter = HttpTransportAdapter(connector, max_retries=5)
+        async with adapter:
+            resp = await adapter._raw_request("GET", "/data")
+
+    assert resp.status_code == 200
+    assert call_count[0] == 3  # two 429s then success

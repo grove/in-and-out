@@ -414,11 +414,35 @@ class IngestionEngine:
             from inandout.config._duration import parse_duration as _parse_dur
             try:
                 window_secs = _parse_dur(inc.cursor_window)
-                watermark_float = float(watermark)
                 now_float = time.time()
+                # Support both Unix epoch (numeric) and ISO-8601 string watermarks.
+                # float() works for epoch timestamps; ISO-8601 strings are parsed
+                # to a UTC unix timestamp so arithmetic is consistent.
+                _watermark_is_iso = False
+                try:
+                    watermark_float = float(watermark)
+                except (ValueError, TypeError):
+                    import datetime as _dt_mod
+                    _dt = _dt_mod.datetime.fromisoformat(
+                        watermark.replace("Z", "+00:00")
+                    )
+                    watermark_float = _dt.timestamp()
+                    _watermark_is_iso = True
+
                 window_end_float = min(watermark_float + window_secs, now_float)
-                window_end = str(window_end_float)
-                cursor_window_watermark = str(window_end_float)
+
+                if _watermark_is_iso:
+                    # Preserve ISO format so the API query param uses the same
+                    # format as the original watermark.
+                    import datetime as _dt_mod2
+                    from datetime import timezone as _tz
+                    _we_dt = _dt_mod2.datetime.fromtimestamp(window_end_float, tz=_tz.utc)
+                    window_end = _we_dt.isoformat().replace("+00:00", "Z")
+                    cursor_window_watermark = window_end
+                else:
+                    window_end = str(window_end_float)
+                    cursor_window_watermark = window_end
+
                 logger.info(
                     "incremental_window_sync",
                     window_start=watermark,
