@@ -10,6 +10,7 @@ from typing import Any, Callable
 import anyio
 import structlog
 
+
 logger = structlog.get_logger(__name__)
 
 
@@ -51,6 +52,7 @@ async def monitor_replication_slot(
     pool: Any,
     config: Any,  # ReplicationSlotConfig
     on_fallback: Callable[[], None],
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Poll the replication slot every poll_interval_secs.
 
@@ -64,10 +66,15 @@ async def monitor_replication_slot(
         return
 
     while True:
+        if should_stop is not None and should_stop():
+            logger.info("slot_monitor_draining", slot_name=slot_name)
+            break
         try:
             result = await get_slot_lag(pool, slot_name)
             if result is None:
                 await anyio.sleep(config.poll_interval_secs)
+                if should_stop is not None and should_stop():
+                    break
                 continue
 
             lag_bytes, lag_secs = result
@@ -108,3 +115,5 @@ async def monitor_replication_slot(
             logger.error("slot_monitor_error", slot_name=slot_name, error=str(exc))
 
         await anyio.sleep(config.poll_interval_secs)
+        if should_stop is not None and should_stop():
+            break

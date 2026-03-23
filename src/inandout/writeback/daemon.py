@@ -91,6 +91,9 @@ async def _writeback_polling_loop(
         except Exception as exc:
             log.error("writeback_poll_error", error=str(exc))
         await anyio.sleep(interval_secs)
+        if _draining:
+            log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
+            break
 
 
 async def _writeback_loop_streaming(
@@ -262,7 +265,10 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
         from inandout.writeback.slot_monitor import monitor_replication_slot
         if not config.replication_slot.slot_name:
             return
-        await monitor_replication_slot(pool, config.replication_slot, _on_slot_fallback)
+        await monitor_replication_slot(
+            pool, config.replication_slot, _on_slot_fallback,
+            should_stop=lambda: _draining,
+        )
 
     # B2: check if scheduling is enabled
     scheduling_enabled = getattr(config, "scheduling_enabled", True)

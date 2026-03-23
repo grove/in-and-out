@@ -99,15 +99,35 @@ class HttpTransportAdapter:
             self._client = None
 
     async def _raw_request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Issue a single raw request through the client (with rate limiting)."""
+        """Issue a request through the client, honouring Retry-After on 429s.
+
+        Returns the raw response for callers that need fine-grained status
+        handling.  Transparently retries on 429 up to max_retries times so
+        writeback operations are shielded from transient API rate-limit windows.
+        After all retries the final (possibly 429) response is returned.
+        """
+        from inandout.transport.errors import retry_after_seconds as _retry_after_secs
+
         assert self._client is not None, "Must be used as async context manager"
-        # Token-bucket rate limiting (our own implementation)
-        if self._token_bucket is not None:
-            await self._token_bucket.acquire()
-        if self._limiter:
-            async with self._limiter:
-                return await self._client.request(method, path, **kwargs)
-        return await self._client.request(method, path, **kwargs)
+        resp: httpx.Response
+        for attempt in range(self._max_retries + 1):
+            # Token-bucket rate limiting (our own implementation)
+            if self._token_bucket is not None:
+                await self._token_bucket.acquire()
+            if self._limiter:
+                async with self._limiter:
+                    resp = await self._client.request(method, path, **kwargs)
+            else:
+                resp = await self._client.request(method, path, **kwargs)
+
+            if resp.status_code != 429 or attempt >= self._max_retries:
+                return resp
+
+            exc = httpx.HTTPStatusError("429", request=resp.request, response=resp)
+            wait = _retry_after_secs(exc) or (2 ** attempt)
+            await anyio.sleep(min(wait, 300.0))
+
+        return resp  # all retries exhausted — return final response to caller
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Issue a request with retry/backoff logic."""

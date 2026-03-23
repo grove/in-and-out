@@ -63,6 +63,10 @@ def gcounter_merge(
     result: dict[str, Any] = {}
     for k, v in local.items():
         if k.startswith("_"):
+            # Metadata / system fields: forward as-is without delta treatment.
+            # Dropping them silently would strip fields like _updated_at and _id
+            # from the write payload, making the operation incomplete.
+            result[k] = v
             continue
         remote_v = remote.get(k)
         if isinstance(v, (int, float)) and isinstance(remote_v, (int, float)):
