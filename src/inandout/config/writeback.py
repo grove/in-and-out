@@ -116,6 +116,9 @@ class WritebackConfig(BaseModel):
     enable_crash_recovery: bool = True  # skip already-sent rows from audit log on restart
     use_desired_state_table: bool = False  # read delta rows from inout_dst_* instead of _delta_*
     batch_response: BatchResponseConfig | None = None  # B4: partial-success batch response parsing
+    # T2 #6: CRDT-based conflict resolution strategy ('lww_register' | 'g_counter' | None)
+    crdt_type: str | None = None
+    crdt_ts_field: str = "_updated_at"  # field carrying the timestamp for lww_register
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":

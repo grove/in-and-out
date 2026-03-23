@@ -31,11 +31,14 @@ class ControlDispatcher:
         pool: AsyncConnectionPool,
         paused_connectors: set[tuple[str, str]],
         target_tool: str | None = None,
+        drain_callback: Any | None = None,
     ) -> None:
         self._pool = pool
         self._paused = paused_connectors
         # When set, only dispatch commands addressed to this tool (or with no target_tool)
         self._target_tool = target_tool
+        # Called when a 'drain' command is received; typically sets a module-level _draining flag
+        self._drain_callback = drain_callback
 
     # ------------------------------------------------------------------
     # Main entry point — called by the polling loop every N seconds
@@ -127,8 +130,23 @@ class ControlDispatcher:
             return await self._cmd_trigger_writeback(connector, datatype, payload, engine)
         elif command == "validate":
             return await self._cmd_validate_writeback(connector, datatype, payload, engine)
+        elif command == "drain":
+            return self._cmd_drain(connector)
         else:
             raise ValueError(f"Unknown command: {command!r}")
+
+    def _cmd_drain(self, connector: str | None) -> dict:
+        """Initiate graceful drain: stop accepting new rows; finish in-flight ones.
+
+        Sets the daemon-side _draining flag via the registered callback, causing
+        all polling loops to exit cleanly after their current iteration.  The
+        process will then terminate normally when its task group unwinds.
+        """
+        if self._drain_callback is not None:
+            self._drain_callback()
+        scope = connector or "all"
+        logger.info("drain_initiated", scope=scope)
+        return {"draining": scope}
 
     async def _cmd_force_full_sync(
         self, connector: str | None, datatype: str | None

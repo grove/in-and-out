@@ -35,6 +35,13 @@ async def _health(request: Request) -> JSONResponse:
 _draining: bool = False
 
 
+def _trigger_drain() -> None:
+    """Called by ControlDispatcher when a 'drain' control command is received."""
+    global _draining
+    _draining = True
+    logger.info("writeback_drain_control_command_received")
+
+
 async def _ready(request: Request) -> JSONResponse:
     if _draining:
         return JSONResponse({"status": "draining"}, status_code=503)
@@ -186,7 +193,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     engine = WritebackEngine(pool)
 
     paused_connectors: set[tuple[str, str]] = set()
-    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="writeback")
+    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="writeback", drain_callback=_trigger_drain)
 
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     batch_wait = config.defaults.batch.max_wait if config.defaults.batch else "5s"

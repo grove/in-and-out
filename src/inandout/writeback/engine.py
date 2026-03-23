@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,6 +81,9 @@ class WritebackResult:
     _failed_external_ids: set[str] = field(default_factory=set)
     # Accumulates (external_id, action, error_message) for failed-row audit trail
     _failed_entries: list[tuple[str, str, str]] = field(default_factory=list)
+    # Stable UUID generated once per run_writeback_cycle() call; used as the per-cycle
+    # deduplication key in inout_ops_writeback_result (migration 022).
+    run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 class WritebackEngine:
@@ -556,6 +560,38 @@ class WritebackEngine:
                         # On error, fall through to normal write
                 else:
                     _3way_etag = ""
+
+                # CRDT merge: apply before diff_fields and protection-level branching.
+                # GETs the current remote state and merges local payload according to
+                # the configured strategy (lww_register, g_counter).
+                if writeback_cfg.crdt_type and ops.lookup is not None and external_id:
+                    try:
+                        from inandout.writeback.crdt import crdt_merge
+                        lookup_path_crdt = interpolate_path(ops.lookup.path)
+                        crdt_resp = await transport._raw_request(
+                            ops.lookup.method.upper(), lookup_path_crdt
+                        )
+                        remote_crdt_state: dict[str, Any] = {}
+                        try:
+                            remote_crdt_state = orjson.loads(crdt_resp.content) if crdt_resp.content else {}
+                        except Exception:
+                            pass
+                        crdt_ts_field = getattr(writeback_cfg, "crdt_ts_field", "_updated_at")
+                        merged_crdt = crdt_merge(
+                            payload, remote_crdt_state, writeback_cfg.crdt_type, ts_field=crdt_ts_field
+                        )
+                        if merged_crdt is None:
+                            logger.info(
+                                "writeback_crdt_skip_remote_newer",
+                                action=action, external_id=external_id,
+                                crdt_type=writeback_cfg.crdt_type,
+                            )
+                            result.skipped += 1
+                            return
+                        payload = merged_crdt
+                    except Exception as exc:
+                        logger.warning("writeback_crdt_merge_failed", error=str(exc))
+                        # Fall through to normal write
 
                 # Incremental writeback: only send changed fields
                 if writeback_cfg.diff_fields and external_id:
@@ -1195,14 +1231,16 @@ class WritebackEngine:
                     external_id = row.get("external_id") or row.get("_cluster_id", "")
                     payload_snap, field_diff = audit_map.get((external_id, action), (None, None))
 
-                    # Try inserting with audit columns (migration 006 may not exist yet)
+                    # Try inserting with run_id + audit columns (migration 022 / 006)
                     try:
                         await conn.execute(
                             """
                             INSERT INTO inout_ops_writeback_result
                                 (connector, datatype, delta_table, action, external_id, status,
-                                 payload_snapshot, field_diff, processed_at)
-                            VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, NOW())
+                                 run_id, payload_snapshot, field_diff, processed_at)
+                            VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, %s, NOW())
+                            ON CONFLICT (connector, datatype, run_id, external_id, action)
+                                WHERE run_id IS NOT NULL DO NOTHING
                             """,
                             [
                                 result.connector,
@@ -1210,26 +1248,47 @@ class WritebackEngine:
                                 result.delta_table,
                                 action,
                                 external_id,
+                                uuid.UUID(result.run_id),
                                 orjson.dumps(payload_snap).decode() if payload_snap is not None else None,
                                 orjson.dumps(field_diff).decode() if field_diff is not None else None,
                             ],
                         )
                     except Exception:
-                        # Fall back to insert without audit columns
-                        await conn.execute(
-                            """
-                            INSERT INTO inout_ops_writeback_result
-                                (connector, datatype, delta_table, action, external_id, status, processed_at)
-                            VALUES (%s, %s, %s, %s, %s, 'ok', NOW())
-                            """,
-                            [
-                                result.connector,
-                                result.datatype,
-                                result.delta_table,
-                                action,
-                                external_id,
-                            ],
-                        )
+                        # Fall back: without run_id (pre-022 DB) but still with audit columns
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO inout_ops_writeback_result
+                                    (connector, datatype, delta_table, action, external_id, status,
+                                     payload_snapshot, field_diff, processed_at)
+                                VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, NOW())
+                                """,
+                                [
+                                    result.connector,
+                                    result.datatype,
+                                    result.delta_table,
+                                    action,
+                                    external_id,
+                                    orjson.dumps(payload_snap).decode() if payload_snap is not None else None,
+                                    orjson.dumps(field_diff).decode() if field_diff is not None else None,
+                                ],
+                            )
+                        except Exception:
+                            # Fall back to insert without audit columns
+                            await conn.execute(
+                                """
+                                INSERT INTO inout_ops_writeback_result
+                                    (connector, datatype, delta_table, action, external_id, status, processed_at)
+                                VALUES (%s, %s, %s, %s, %s, 'ok', NOW())
+                                """,
+                                [
+                                    result.connector,
+                                    result.datatype,
+                                    result.delta_table,
+                                    action,
+                                    external_id,
+                                ],
+                            )
 
                 # Write failed rows so operators can see all outcomes
                 for ext_id, act, error_msg in result._failed_entries:

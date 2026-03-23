@@ -60,6 +60,17 @@ def _setup_credential_backend(config: IngestionToolConfig) -> None:
 
 logger = structlog.get_logger(__name__)
 
+# Drain flag — set by SIGTERM/SIGINT or a 'drain' control command.
+# All polling loops check this at the top of each iteration and exit cleanly.
+_draining: bool = False
+
+
+def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
+    """Set the drain flag; polling loops will exit after their current iteration."""
+    global _draining
+    _draining = True
+    logger.info("ingestion_drain_signal_received", signal=sig)
+
 
 # ---------------------------------------------------------------------------
 # Health / readiness endpoints
@@ -214,6 +225,11 @@ async def _polling_loop(
     cb = get_circuit_breaker(connector_cfg.name, datatype)
 
     while True:
+        # Drain check — exit cleanly when SIGTERM received or 'drain' command issued
+        if _draining:
+            log.info("polling_loop_draining")
+            break
+
         # Pause check
         if is_paused(paused_connectors, connector_cfg.name, datatype):
             log.info("polling_loop_paused")
@@ -487,13 +503,20 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     engine = IngestionEngine(pool, read_pool=read_pool, publisher=publisher)
 
     paused_connectors: set[tuple[str, str]] = set()
-    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="ingestion")
+    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="ingestion", drain_callback=_trigger_drain)
 
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     default_interval_secs = parse_duration(
         config.defaults.scheduling.default_interval if config.defaults.scheduling else "5m"
     )
     housekeeping_interval_secs = parse_duration(config.housekeeping.interval)
+
+    # Install SIGTERM/SIGINT handler for graceful drain (polls loops exit after current iteration)
+    try:
+        signal.signal(signal.SIGTERM, _trigger_drain)
+        signal.signal(signal.SIGINT, _trigger_drain)
+    except (OSError, AttributeError):
+        pass  # Windows or restricted environment
 
     # Install SIGHUP handler for hot-reload
     reload_flag, sighup_handler = _make_reload_watcher()

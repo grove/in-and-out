@@ -31,6 +31,7 @@ async def run_housekeeping(
     sync_run_interval = _to_pg_interval(retention.sync_run_log)
     dead_letter_interval = _to_pg_interval(retention.dead_letter)
     history_interval = _to_pg_interval(retention.history_table)
+    webhook_seq_interval = _to_pg_interval(getattr(retention, "webhook_route_seq", "7d"))
 
     totals: dict[str, int] = {}
 
@@ -40,6 +41,15 @@ async def run_housekeeping(
             f"DELETE FROM inout_ops_sync_run WHERE finished_at < NOW() - INTERVAL '{sync_run_interval}'"
         )
         totals["sync_run"] = cur.rowcount or 0
+
+        # Purge webhook route-sequence table (rows grow unbounded without TTL)
+        try:
+            cur = await conn.execute(
+                f"DELETE FROM inout_ops_webhook_route_seq WHERE updated_at < NOW() - INTERVAL '{webhook_seq_interval}'"
+            )
+            totals["webhook_route_seq"] = cur.rowcount or 0
+        except Exception:
+            pass  # Table may not exist on older DBs
 
         # Purge dead-letter tables
         for connector, datatype in connector_datatypes:

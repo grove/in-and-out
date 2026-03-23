@@ -181,6 +181,7 @@ class RetentionConfig(BaseModel):
     sync_run_log: str = "90d"
     dead_letter: str = "30d"
     history_table: str = "365d"
+    webhook_route_seq: str = "7d"  # TTL for inout_ops_webhook_route_seq rows
 
 
 class HousekeepingConfig(BaseModel):
