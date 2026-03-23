@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# uv
+.uv/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Environment / secrets (never commit these)
+.env
+.env.*
+*.env
+secrets/
+credentials/
+
+# Alembic (generated migration output, not scripts)
+# Keep migrations/versions/ tracked
+
+# Connectors with real credentials (use connectors/*.example.yaml instead)
+connectors/*.yaml
+!connectors/*.example.yaml
+!connectors/.gitkeep
+
+# Logs
+*.log
+logs/
