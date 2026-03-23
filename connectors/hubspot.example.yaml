@@ -1,0 +1,99 @@
+schema_version: 1
+
+connector:
+  name: hubspot
+  system: HubSpot CRM
+  generation_profile: full_duplex
+  description: >
+    HubSpot CRM contacts connector. Supports full-duplex sync:
+    polling ingestion with cursor pagination, incremental sync,
+    webhook fan-out, and writeback via PATCH.
+  api_version: "v3"
+  api_deprecation_deadline: null
+
+  connection:
+    base_url: https://api.hubapi.com
+    timeout:
+      connect: "10s"
+      read: "30s"
+      write: "30s"
+
+  auth:
+    type: oauth2
+    credential_ref: hubspot_oauth
+    oauth2:
+      grant_type: client_credentials
+      token_url: https://api.hubapi.com/oauth/v1/token
+      scopes:
+        - crm.objects.contacts.read
+        - crm.objects.contacts.write
+
+  rate_limit:
+    requests_per_second: 9.0
+    burst: 20
+
+  retry:
+    max_retries: 5
+    backoff:
+      initial: "1s"
+      max: "60s"
+      multiplier: 2.0
+      jitter: true
+
+  circuit_breaker:
+    error_threshold: 10
+    pause_duration: "60s"
+
+  webhooks:
+    signature_header: X-HubSpot-Signature
+    credential_ref: hubspot_webhook_secret
+    fan_out:
+      discriminator: objectType
+      routes:
+        - match: contact.creation
+          datatype: contacts
+        - match: contact.propertyChange
+          datatype: contacts
+
+  datatypes:
+    contacts:
+      description: HubSpot CRM contacts
+      kind: entity
+
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: "5m"
+        list:
+          method: GET
+          path: /crm/v3/objects/contacts
+          record_selector: results
+          pagination:
+            strategy: cursor
+            cursor:
+              request_param: after
+              response_path: "paging.next.after"
+            termination:
+              - empty_page
+          incremental:
+            enabled: true
+            cursor_field: lastmodifieddate
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: lastmodifieddate__gt
+              value: "${watermark}"
+
+      writeback:
+        protection_level: 2
+        conflict_resolution: last_writer_wins
+        supported_actions:
+          - update
+        operations:
+          lookup:
+            method: GET
+            path: /crm/v3/objects/contacts/${external_id}
+          update:
+            method: PATCH
+            path: /crm/v3/objects/contacts/${external_id}

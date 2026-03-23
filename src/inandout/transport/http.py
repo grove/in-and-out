@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncGenerator
 
+import anyio
 import httpx
 import jmespath
 import orjson
@@ -13,6 +14,11 @@ from inandout.config.connector import ConnectorConfig
 from inandout.config.ingestion import ListConfig
 from inandout.config.pagination import PaginationStrategy
 from inandout.transport.auth import build_auth_provider
+from inandout.transport.errors import (
+    ErrorClass,
+    classify_http_error,
+    retry_after_seconds,
+)
 
 
 def _extract_records(data: Any, record_selector: str | None) -> list[dict[str, Any]]:
@@ -50,10 +56,12 @@ class HttpTransportAdapter:
     def __init__(
         self,
         connector: ConnectorConfig,
+        max_retries: int = 5,
     ) -> None:
         self._connector = connector
         self._auth = build_auth_provider(connector.auth)
         self._limiter: AsyncLimiter | None = None
+        self._max_retries = max_retries
         rate_limit = connector.rate_limit
         if rate_limit and rate_limit.requests_per_second:
             self._limiter = AsyncLimiter(
@@ -82,15 +90,75 @@ class HttpTransportAdapter:
             await self._client.aclose()
             self._client = None
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    async def _raw_request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue a single raw request through the client (with rate limiting)."""
         assert self._client is not None, "Must be used as async context manager"
         if self._limiter:
             async with self._limiter:
-                resp = await self._client.request(method, path, **kwargs)
-        else:
-            resp = await self._client.request(method, path, **kwargs)
-        resp.raise_for_status()
-        return resp
+                return await self._client.request(method, path, **kwargs)
+        return await self._client.request(method, path, **kwargs)
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue a request with retry/backoff logic."""
+        from inandout.observability.metrics import http_errors_total
+
+        max_retries = self._max_retries
+        attempt = 0
+        last_exc: Exception | None = None
+
+        while attempt <= max_retries:
+            try:
+                resp = await self._raw_request(method, path, **kwargs)
+
+                if resp.status_code == 429:
+                    exc = httpx.HTTPStatusError("429", request=resp.request, response=resp)
+                    try:
+                        http_errors_total.labels(
+                            connector=self._connector.name,
+                            datatype="",
+                            status_code="429",
+                        ).inc()
+                    except Exception:
+                        pass
+                    wait = retry_after_seconds(exc) or (2 ** attempt)
+                    await anyio.sleep(min(wait, 60.0))
+                    attempt += 1
+                    last_exc = exc
+                    continue
+
+                resp.raise_for_status()
+                return resp
+
+            except httpx.HTTPStatusError as exc:
+                try:
+                    http_errors_total.labels(
+                        connector=self._connector.name,
+                        datatype="",
+                        status_code=str(exc.response.status_code),
+                    ).inc()
+                except Exception:
+                    pass
+                ec = classify_http_error(exc)
+                if ec == ErrorClass.transient and attempt < max_retries:
+                    wait = min(2 ** attempt, 60.0)
+                    await anyio.sleep(wait)
+                    attempt += 1
+                    last_exc = exc
+                    continue
+                raise
+
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as exc:
+                if attempt < max_retries:
+                    wait = min(2 ** attempt, 60.0)
+                    await anyio.sleep(wait)
+                    attempt += 1
+                    last_exc = exc
+                    continue
+                raise
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Retry loop exited unexpectedly")
 
     async def fetch_pages(
         self,

@@ -1,7 +1,6 @@
-"""Ingestion daemon — long-lived process managing polling loops and webhook receiver."""
+"""Writeback daemon — long-lived process polling delta tables and dispatching HTTP writes."""
 from __future__ import annotations
 
-import signal
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +13,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from inandout.config._duration import parse_duration
-from inandout.config.loader import load_connector, load_ingestion_tool_config
-from inandout.config.tool import IngestionToolConfig
-from inandout.ingestion.engine import IngestionEngine
+from inandout.config.loader import load_connector, load_writeback_tool_config
+from inandout.config.tool import WritebackToolConfig
 from inandout.postgres.pool import create_pool
+from inandout.writeback.engine import WritebackEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -42,33 +41,41 @@ def _build_health_app() -> Starlette:
 
 
 # ---------------------------------------------------------------------------
-# Polling loop for one connector/datatype
+# Writeback polling loop for one connector/datatype
 # ---------------------------------------------------------------------------
 
-async def _polling_loop(
-    engine: IngestionEngine,
+async def _writeback_polling_loop(
+    engine: WritebackEngine,
     connector_cfg: Any,
     datatype: str,
-    ingestion_cfg: Any,
+    writeback_cfg: Any,
+    delta_table: str,
     interval_secs: float,
 ) -> None:
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
-    log.info("polling_loop_started", interval_secs=interval_secs)
+    log.info("writeback_polling_loop_started", interval_secs=interval_secs, delta_table=delta_table)
     while True:
         try:
-            result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg)
-            log.info("poll_complete", status=result.status)
+            result = await engine.run_writeback_cycle(
+                connector_cfg, datatype, writeback_cfg, delta_table
+            )
+            log.info(
+                "writeback_poll_complete",
+                processed=result.processed,
+                skipped=result.skipped,
+                failed=result.failed,
+            )
         except Exception as exc:
-            log.error("poll_error", error=str(exc))
+            log.error("writeback_poll_error", error=str(exc))
         await anyio.sleep(interval_secs)
 
 
 # ---------------------------------------------------------------------------
-# Control table poller
+# Control table poller (stub)
 # ---------------------------------------------------------------------------
 
 async def _control_table_poller(pool: Any, poll_secs: float) -> None:
-    log = logger.bind(component="control_table_poller")
+    log = logger.bind(component="writeback_control_table_poller")
     log.info("control_table_poller_started")
     while True:
         # TODO: poll inout_ops_control for pending commands and execute them
@@ -79,10 +86,10 @@ async def _control_table_poller(pool: Any, poll_secs: float) -> None:
 # Main daemon entrypoint
 # ---------------------------------------------------------------------------
 
-async def run_ingestion_daemon(config_path: str | Path) -> None:
+async def run_writeback_daemon(config_path: str | Path) -> None:
     from inandout.observability import configure_logging, configure_metrics, configure_tracing
 
-    config: IngestionToolConfig = load_ingestion_tool_config(config_path)
+    config: WritebackToolConfig = load_writeback_tool_config(config_path)
 
     configure_logging(
         format=config.observability.logging.format,
@@ -95,7 +102,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         sample_rate=config.observability.tracing.sample_rate,
     )
 
-    log = logger.bind(component="ingestion_daemon")
+    log = logger.bind(component="writeback_daemon")
     log.info("daemon_starting", connectors_dir=config.connectors_dir)
 
     # Load all connector configs
@@ -111,11 +118,13 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                 log.error("connector_load_failed", path=str(yaml_path), error=str(exc))
 
     pool = await create_pool(config.database)
-    engine = IngestionEngine(pool)
+    engine = WritebackEngine(pool)
 
-    # Parse shutdown drain timeout
-    drain_secs = parse_duration(config.shutdown.drain_timeout)
     control_poll_secs = parse_duration(config.control_table.poll_interval)
+
+    # Determine default polling interval
+    batch_wait = config.defaults.batch.max_wait if config.defaults.batch else "5s"
+    default_interval_secs = parse_duration(batch_wait)
 
     # Build health server
     host, port_str = config.health_server.listen.rsplit(":", 1)
@@ -137,26 +146,22 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             # Control table poller
             tg.start_soon(_control_table_poller, pool, control_poll_secs)
 
-            # One polling loop per ingestion datatype
+            # One polling loop per writeback-capable connector/datatype
             for connector_file_cfg in connector_configs:
                 connector_cfg = connector_file_cfg.connector
                 for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
-                    if dtype_cfg.ingestion is None:
+                    if dtype_cfg.writeback is None:
                         continue
-                    schedule = dtype_cfg.ingestion.schedule
-                    interval_secs = parse_duration(
-                        schedule.interval or schedule.cron or "5m"
-                    ) if schedule.interval else parse_duration(
-                        config.defaults.scheduling.default_interval
-                        if config.defaults.scheduling else "5m"
-                    )
+                    # OSI-Mapping convention: _delta_{connector}_{datatype}
+                    delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
                     tg.start_soon(
-                        _polling_loop,
+                        _writeback_polling_loop,
                         engine,
                         connector_cfg,
                         dtype_name,
-                        dtype_cfg.ingestion,
-                        interval_secs,
+                        dtype_cfg.writeback,
+                        delta_table,
+                        default_interval_secs,
                     )
 
     finally:
