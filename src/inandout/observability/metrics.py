@@ -77,6 +77,13 @@ quality_violations_total: Counter = _counter(
     ["connector", "datatype", "rule", "namespace"],
 )
 
+# Three-way conflict detection counter
+conflicts_detected_total: Counter = _counter(
+    "inout_conflicts_detected_total",
+    "Total three-way merge conflicts detected during writeback",
+    ["connector", "datatype", "resolution", "namespace"],
+)
+
 
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""

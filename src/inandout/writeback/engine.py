@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from inandout.config.connector import ConnectorConfig
 from inandout.config.writeback import ConflictResolution, ProtectionLevel, WritebackConfig
+from inandout.observability.metrics import conflicts_detected_total
 from inandout.transport.http import HttpTransportAdapter
 from inandout.writeback.merge_hooks import merge_hook_registry
 
@@ -317,9 +318,30 @@ class WritebackEngine:
                 path = interpolate_path(ops.insert.path)
                 extra_headers = _make_extra_headers(payload)
                 if extra_headers:
-                    await transport._raw_request(ops.insert.method.upper(), path, json=payload, headers=extra_headers)
+                    insert_resp = await transport._raw_request(ops.insert.method.upper(), path, json=payload, headers=extra_headers)
                 else:
-                    await transport._request(ops.insert.method.upper(), path, json=payload)
+                    insert_resp = await transport._raw_request(ops.insert.method.upper(), path, json=payload)
+                # Capture internal_id from response body (id or connector.name + "_id" field)
+                try:
+                    resp_body: dict[str, Any] = {}
+                    try:
+                        resp_body = orjson.loads(insert_resp.content) if insert_resp.content else {}
+                    except Exception:
+                        pass
+                    internal_id: str | None = None
+                    for id_field in ("id", f"{result.connector}_id", f"{result.datatype}_id"):
+                        if id_field in resp_body:
+                            internal_id = str(resp_body[id_field])
+                            break
+                    if internal_id and external_id:
+                        await self._record_identity_map(
+                            connector=result.connector,
+                            datatype=result.datatype,
+                            external_id=external_id,
+                            internal_id=internal_id,
+                        )
+                except Exception:
+                    pass  # Identity map failure must not block writeback
                 # Record audit
                 last_written: dict[str, Any] = {}
                 diff = _compute_field_diff(last_written, payload)
@@ -392,6 +414,15 @@ class WritebackEngine:
                                 action=action,
                                 external_id=external_id,
                             )
+                            try:
+                                conflicts_detected_total.labels(
+                                    connector=connector.name,
+                                    datatype=result.datatype,
+                                    resolution="server_wins",
+                                    namespace="public",
+                                ).inc()
+                            except Exception:
+                                pass
                             result.skipped += 1
                             result.conflicts += 1
                             return
@@ -419,6 +450,15 @@ class WritebackEngine:
                                 external_id=external_id,
                                 conflicted_fields=conflicted_fields,
                             )
+                            try:
+                                conflicts_detected_total.labels(
+                                    connector=connector.name,
+                                    datatype=result.datatype,
+                                    resolution="merge_fields",
+                                    namespace="public",
+                                ).inc()
+                            except Exception:
+                                pass
                         final_payload = merged
 
                     elif conflict_resolution == ConflictResolution.custom_merge:
@@ -471,6 +511,15 @@ class WritebackEngine:
                                 action=action,
                                 external_id=external_id,
                             )
+                            try:
+                                conflicts_detected_total.labels(
+                                    connector=connector.name,
+                                    datatype=result.datatype,
+                                    resolution="412_precondition_failed",
+                                    namespace="public",
+                                ).inc()
+                            except Exception:
+                                pass
                             result.conflicts += 1
                             result.skipped += 1
                             return
@@ -483,6 +532,15 @@ class WritebackEngine:
                                 action=action,
                                 external_id=external_id,
                             )
+                            try:
+                                conflicts_detected_total.labels(
+                                    connector=connector.name,
+                                    datatype=result.datatype,
+                                    resolution="412_precondition_failed",
+                                    namespace="public",
+                                ).inc()
+                            except Exception:
+                                pass
                             result.conflicts += 1
                             result.skipped += 1
                             return
@@ -553,6 +611,32 @@ class WritebackEngine:
         except httpx.HTTPError as exc:
             logger.error("writeback_http_error", action=action, external_id=external_id, error=str(exc))
             result.failed += 1
+
+    async def _record_identity_map(
+        self,
+        connector: str,
+        datatype: str,
+        external_id: str,
+        internal_id: str,
+    ) -> None:
+        """Upsert a (connector, datatype, external_id) → internal_id mapping."""
+        try:
+            async with self._pool.connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO inout_ops_identity_map
+                        (connector, datatype, external_id, internal_id, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (connector, datatype, external_id) DO UPDATE
+                    SET internal_id = EXCLUDED.internal_id, updated_at = NOW()
+                    """,
+                    [connector, datatype, external_id, internal_id],
+                )
+                await conn.commit()
+        except psycopg.errors.UndefinedTable:
+            pass  # Migration not yet run — silently skip
+        except Exception as exc:
+            logger.warning("identity_map_write_failed", error=str(exc))
 
     async def _write_feedback(
         self,

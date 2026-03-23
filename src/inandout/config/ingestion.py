@@ -88,6 +88,7 @@ class ListConfig(BaseModel):
     graphql_query: str | None = None  # GraphQL query string
     graphql_variables: dict = {}  # static variables merged with runtime vars
     graphql_data_path: str | None = None  # dot-notation path e.g. "data.contacts.nodes"
+    detail_path: str | None = None  # e.g. "/contacts/${external_id}" — GET this to verify deletion
 
 
 class WebhookPayloadType(StrEnum):
@@ -123,3 +124,4 @@ class IngestionConfig(BaseModel):
     cdc: Any | None = None  # CdcSourceConfig | None — imported lazily to avoid circular imports
     max_concurrent_fetches: int = 1  # parallelism for fan-out fetch (1 = no parallelism)
     bulk_upsert_batch_size: int = 1  # 1 = single-record path; >1 = bulk batch path
+    verify_deletion: bool = True  # confirm each tombstone via detail_path GET before marking deleted

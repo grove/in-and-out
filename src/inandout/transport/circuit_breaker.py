@@ -82,6 +82,15 @@ class CircuitBreaker:
             if self._consecutive_failures >= self.failure_threshold:
                 self._trip_open()
 
+    def reset(self) -> None:
+        """Force the circuit breaker back to CLOSED state (used by control commands)."""
+        previous = self._state
+        self._state = CircuitState.closed
+        self._consecutive_failures = 0
+        self._opened_at = None
+        self._log.info("circuit_breaker_reset", previous=previous)
+        self._emit_metric()
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

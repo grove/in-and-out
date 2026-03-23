@@ -92,6 +92,7 @@ class WritebackConfig(BaseModel):
     join_sources: list[JoinSource] = []
     idempotency_key_header: str | None = None  # e.g. "Idempotency-Key"
     enable_crash_recovery: bool = True  # skip already-sent rows from audit log on restart
+    use_desired_state_table: bool = False  # read delta rows from inout_dst_* instead of _delta_*
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":

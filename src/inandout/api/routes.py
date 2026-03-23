@@ -1000,3 +1000,71 @@ async def get_record_lineage(
     except Exception as exc:
         logger.warning("api_lineage_error", connector=connector, datatype=datatype, error=str(exc))
         return []
+
+
+# ---------------------------------------------------------------------------
+# Identity map endpoint (Priority 5)
+# ---------------------------------------------------------------------------
+
+
+class IdentityMapRow(BaseModel):
+    connector: str
+    datatype: str
+    external_id: str
+    internal_id: str
+    created_at: str
+    updated_at: str
+
+
+@router.get(
+    "/identity-map/{connector}/{datatype}",
+    response_model=list[IdentityMapRow],
+)
+async def get_identity_map(
+    connector: str,
+    datatype: str,
+    external_id: str | None = Query(default=None, description="Filter by specific external_id"),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[IdentityMapRow]:
+    """Return identity map entries mapping external IDs to internal IDs."""
+    if _pool is None:
+        return []
+
+    try:
+        async with _pool.connection() as conn:
+            if external_id is not None:
+                rows = await (await conn.execute(
+                    """
+                    SELECT connector, datatype, external_id, internal_id, created_at, updated_at
+                    FROM inout_ops_identity_map
+                    WHERE connector = %s AND datatype = %s AND external_id = %s
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                    """,
+                    [connector, datatype, external_id, limit],
+                )).fetchall()
+            else:
+                rows = await (await conn.execute(
+                    """
+                    SELECT connector, datatype, external_id, internal_id, created_at, updated_at
+                    FROM inout_ops_identity_map
+                    WHERE connector = %s AND datatype = %s
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                    """,
+                    [connector, datatype, limit],
+                )).fetchall()
+        return [
+            IdentityMapRow(
+                connector=r[0],
+                datatype=r[1],
+                external_id=r[2],
+                internal_id=r[3],
+                created_at=str(r[4]),
+                updated_at=str(r[5]),
+            )
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.warning("api_identity_map_error", connector=connector, datatype=datatype, error=str(exc))
+        return []

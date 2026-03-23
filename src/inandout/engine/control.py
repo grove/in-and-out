@@ -99,6 +99,12 @@ class ControlDispatcher:
             return self._cmd_resume_connector(connector, datatype)
         elif command == "requeue_dead_letter":
             return await self._cmd_requeue_dead_letter(connector, datatype, payload, engine)
+        elif command == "reset-watermark":
+            return await self._cmd_force_full_sync(connector, datatype)
+        elif command == "reload-config":
+            return self._cmd_reload_config(connector, datatype, payload)
+        elif command == "reset-circuit-breaker":
+            return self._cmd_reset_circuit_breaker(connector, datatype)
         else:
             raise ValueError(f"Unknown command: {command!r}")
 
@@ -201,6 +207,49 @@ class ControlDispatcher:
                 logger.warning("requeue_row_failed", dl_id=dl_id, error=str(exc))
 
         return {"requeued": requeued, "errors": errors}
+
+    def _cmd_reload_config(
+        self,
+        connector: str | None,
+        datatype: str | None,
+        payload: dict,
+    ) -> dict:
+        """Signal that config should be reloaded on next poll cycle.
+
+        The actual reload is performed by the daemon loop — this command
+        just logs the intent. Hot-reload via plugin version watcher handles
+        the real work asynchronously.
+        """
+        scope = f"{connector or '*'}/{datatype or '*'}"
+        logger.info("reload_config_requested", scope=scope, payload=payload)
+        return {"reload_requested": scope}
+
+    def _cmd_reset_circuit_breaker(
+        self,
+        connector: str | None,
+        datatype: str | None,
+    ) -> dict:
+        """Force the circuit breaker for (connector, datatype) back to CLOSED."""
+        if not connector:
+            raise ValueError("reset-circuit-breaker requires 'connector'")
+
+        from inandout.transport.circuit_breaker import _registry, get_circuit_breaker
+
+        if datatype:
+            # Reset specific (connector, datatype) pair
+            cb = _registry.get((connector, datatype))
+            if cb is not None:
+                cb.reset()
+            scope = f"{connector}/{datatype}"
+        else:
+            # Reset all circuit breakers for this connector
+            to_reset = [cb for (c, _), cb in _registry.items() if c == connector]
+            for cb in to_reset:
+                cb.reset()
+            scope = f"{connector}/*"
+
+        logger.info("circuit_breaker_reset_via_control", scope=scope)
+        return {"reset": scope}
 
     async def _requeue_single(
         self,

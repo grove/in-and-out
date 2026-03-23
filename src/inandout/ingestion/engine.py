@@ -111,13 +111,25 @@ class IngestionEngine:
             log.info("sync_started", mode=mode, watermark=existing_wm)
 
             async with self._pool.connection() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO inout_ops_sync_run (id, connector, datatype, mode, status, started_at)
-                    VALUES (%s, %s, %s, %s, 'running', NOW())
-                    """,
-                    [run_id, connector.name, datatype, mode],
-                )
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO inout_ops_sync_run
+                            (id, connector, datatype, mode, status, started_at,
+                             high_water_mark_before)
+                        VALUES (%s, %s, %s, %s, 'running', NOW(), %s)
+                        """,
+                        [run_id, connector.name, datatype, mode, existing_wm],
+                    )
+                except Exception:
+                    # Fallback if high_water_mark_before column doesn't exist yet
+                    await conn.execute(
+                        """
+                        INSERT INTO inout_ops_sync_run (id, connector, datatype, mode, status, started_at)
+                        VALUES (%s, %s, %s, %s, 'running', NOW())
+                        """,
+                        [run_id, connector.name, datatype, mode],
+                    )
                 await conn.commit()
 
                 # Ensure the lock row exists, then attempt SELECT FOR UPDATE SKIP LOCKED.
@@ -198,28 +210,62 @@ class IngestionEngine:
                 finally:
                     # Update sync_run record — lock is released when the transaction commits/rolls back
                     status = result.status if result.status != "running" else "completed"
-                    await conn.execute(
-                        """
-                        UPDATE inout_ops_sync_run SET
-                            status           = %s,
-                            finished_at      = NOW(),
-                            records_fetched  = %s,
-                            records_inserted = %s,
-                            records_updated  = %s,
-                            records_errored  = %s,
-                            error_message    = %s
-                        WHERE id = %s
-                        """,
-                        [
-                            status,
-                            result.records_fetched,
-                            result.records_inserted,
-                            result.records_updated,
-                            result.records_errored,
-                            result.error_message,
-                            run_id,
-                        ],
-                    )
+                    # Fetch final watermark to record high_water_mark_after
+                    _final_wm: str | None = None
+                    try:
+                        async with self._read_conn_pool().connection() as _wm_conn:
+                            _final_wm = await get_watermark(_wm_conn, connector.name, datatype)
+                    except Exception:
+                        pass
+                    try:
+                        await conn.execute(
+                            """
+                            UPDATE inout_ops_sync_run SET
+                                status                 = %s,
+                                finished_at            = NOW(),
+                                records_fetched        = %s,
+                                records_inserted       = %s,
+                                records_updated        = %s,
+                                records_errored        = %s,
+                                error_message          = %s,
+                                high_water_mark_after  = %s
+                            WHERE id = %s
+                            """,
+                            [
+                                status,
+                                result.records_fetched,
+                                result.records_inserted,
+                                result.records_updated,
+                                result.records_errored,
+                                result.error_message,
+                                _final_wm,
+                                run_id,
+                            ],
+                        )
+                    except Exception:
+                        # Fallback if new columns don't exist yet (pre-migration)
+                        await conn.execute(
+                            """
+                            UPDATE inout_ops_sync_run SET
+                                status           = %s,
+                                finished_at      = NOW(),
+                                records_fetched  = %s,
+                                records_inserted = %s,
+                                records_updated  = %s,
+                                records_errored  = %s,
+                                error_message    = %s
+                            WHERE id = %s
+                            """,
+                            [
+                                status,
+                                result.records_fetched,
+                                result.records_inserted,
+                                result.records_updated,
+                                result.records_errored,
+                                result.error_message,
+                                run_id,
+                            ],
+                        )
                     # Upsert connector version on successful full sync
                     if status == "completed" and mode == "full":
                         try:
@@ -510,7 +556,9 @@ class IngestionEngine:
         # records (signals a partial or failed fetch rather than genuine deletions).
         if watermark is None and seen_ids:
             await self._tombstone_missing(
-                table, seen_ids, result, log, connector.name, datatype
+                table, seen_ids, result, log, connector.name, datatype,
+                connector=connector,
+                ingestion_cfg=ingestion_cfg,
             )
 
         # Schema drift detection: warn about (and optionally drop) orphan columns.
@@ -669,6 +717,8 @@ class IngestionEngine:
         log: Any,
         connector_name: str = "",
         datatype: str = "",
+        connector: Any = None,
+        ingestion_cfg: Any = None,
     ) -> None:
         """Soft-delete source records that were not present in the latest full sync."""
         async with self._pool.connection() as conn:
@@ -700,13 +750,49 @@ class IngestionEngine:
                 )
                 return
 
+            # Deletion verification: confirm each missing record is actually gone
+            # by GETting its detail_path before tombstoning (if configured).
+            verify = getattr(ingestion_cfg, "verify_deletion", False) if ingestion_cfg else False
+            detail_path = getattr(
+                getattr(ingestion_cfg, "list", None), "detail_path", None
+            ) if ingestion_cfg else None
+
+            confirmed_missing: set[str] = set()
+            if verify and detail_path and connector is not None:
+                async with HttpTransportAdapter(connector) as transport:
+                    for ext_id in missing_ids:
+                        path = detail_path.replace("${external_id}", ext_id)
+                        try:
+                            resp = await transport._raw_request("GET", path)
+                            if resp.status_code == 404:
+                                confirmed_missing.add(ext_id)
+                            else:
+                                log.info(
+                                    "deletion_verification_record_still_exists",
+                                    external_id=ext_id,
+                                    status=resp.status_code,
+                                )
+                        except Exception as exc:
+                            log.warning(
+                                "deletion_verification_error",
+                                external_id=ext_id,
+                                error=str(exc),
+                            )
+                            # On error, be conservative: do NOT tombstone
+            else:
+                # No verification configured — trust the absence in the full sync response
+                confirmed_missing = missing_ids
+
+            if not confirmed_missing:
+                return
+
             async with conn.transaction():
-                for ext_id in missing_ids:
+                for ext_id in confirmed_missing:
                     await conn.execute(
                         f"UPDATE {table} SET _deleted_at = NOW() WHERE external_id = %s AND _deleted_at IS NULL",
                         [ext_id],
                     )
-            result.records_deleted = len(missing_ids)
+            result.records_deleted = len(confirmed_missing)
 
             # Metrics for deletes
             if connector_name and datatype:
