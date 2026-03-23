@@ -30,9 +30,12 @@ class ControlDispatcher:
         self,
         pool: AsyncConnectionPool,
         paused_connectors: set[tuple[str, str]],
+        target_tool: str | None = None,
     ) -> None:
         self._pool = pool
         self._paused = paused_connectors
+        # When set, only dispatch commands addressed to this tool (or with no target_tool)
+        self._target_tool = target_tool
 
     # ------------------------------------------------------------------
     # Main entry point — called by the polling loop every N seconds
@@ -41,15 +44,28 @@ class ControlDispatcher:
     async def dispatch_pending(self, engine: Any | None = None) -> int:
         """Fetch and execute up to 20 pending commands. Returns count executed."""
         async with self._pool.connection() as conn:
-            rows = await (await conn.execute(
-                """
-                SELECT id, connector, datatype, command, payload
-                FROM inout_ops_control
-                WHERE status = 'pending'
-                ORDER BY issued_at
-                LIMIT 20
-                """
-            )).fetchall()
+            if self._target_tool is not None:
+                rows = await (await conn.execute(
+                    """
+                    SELECT id, connector, datatype, command, payload
+                    FROM inout_ops_control
+                    WHERE status = 'pending'
+                      AND (target_tool = %s OR target_tool IS NULL)
+                    ORDER BY issued_at
+                    LIMIT 20
+                    """,
+                    [self._target_tool],
+                )).fetchall()
+            else:
+                rows = await (await conn.execute(
+                    """
+                    SELECT id, connector, datatype, command, payload
+                    FROM inout_ops_control
+                    WHERE status = 'pending'
+                    ORDER BY issued_at
+                    LIMIT 20
+                    """
+                )).fetchall()
 
         if not rows:
             return 0

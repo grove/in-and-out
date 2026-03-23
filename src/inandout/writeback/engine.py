@@ -459,10 +459,12 @@ class WritebackEngine:
 
                         if not safe:
                             # Conflict detected — always update lwstate to current reality
+                            _conflict_etag = preflight_resp.headers.get(writeback_cfg.etag_header) or None
                             async with self._pool.connection() as lw_update_conn:
                                 await upsert_lwstate(
                                     lw_update_conn, connector.name, result.datatype,
-                                    external_id, current_state
+                                    external_id, current_state,
+                                    etag=_conflict_etag,
                                 )
                                 await lw_update_conn.commit()
 
@@ -780,13 +782,14 @@ class WritebackEngine:
                     and sent_payload is not None
                 ):
                     try:
-                        lwstate_data = dict(sent_payload)
-                        if _3way_etag:
-                            lwstate_data["_etag"] = _3way_etag
+                        # Store the actual payload (without synthetic _etag key) and pass
+                        # the ETag separately so it lands in its own column.
+                        lw_etag = _3way_etag or None
                         async with self._pool.connection() as lw_post_conn:
                             await upsert_lwstate(
                                 lw_post_conn, connector.name, result.datatype,
-                                external_id, lwstate_data
+                                external_id, sent_payload,
+                                etag=lw_etag,
                             )
                             await lw_post_conn.commit()
                     except Exception:
@@ -834,6 +837,125 @@ class WritebackEngine:
                 else:
                     await transport._request(ops.archive.method.upper(), path, json=payload)
                 result._audit_entries.append((external_id, action, payload, None))
+                result.processed += 1
+
+            elif action == "merge":
+                # T2 #34: merge — update the surviving record, delete losers, update identity map.
+                # Row shape expected from OSI-Mapping delta view:
+                #   external_id       — surviving cluster_id / external_id
+                #   data              — desired state for the survivor
+                #   _losing_ids       — list[str] of external_ids to be deleted (losers)
+                if ops.update is None:
+                    logger.warning("merge_no_update_op_configured", connector=connector.name, datatype=result.datatype)
+                    result.skipped += 1
+                    return
+
+                surviving_id = external_id
+                losing_ids: list[str] = row.get("_losing_ids") or []
+                payload = {k: v for k, v in row.items() if not k.startswith("_")}
+
+                # Allow a plugin hook to modify the merged payload before writing
+                hook = merge_hook_registry.get(connector.name, result.datatype)
+                if hook is not None:
+                    try:
+                        payload = await hook(payload, {}, {})
+                    except Exception as exc:
+                        logger.warning("merge_hook_failed", error=str(exc))
+
+                if dry_run:
+                    base_url = connector.connection.base_url.rstrip("/")
+                    update_path = interpolate_path(ops.update.path)
+                    _log_dry_run("merge:update", ops.update.method.upper(), f"{base_url}{update_path}", {}, payload)
+                    for loser_id in losing_ids:
+                        if ops.delete is not None:
+                            loser_path = ops.delete.path.replace("${external_id}", loser_id)
+                            _log_dry_run("merge:delete", ops.delete.method.upper(), f"{base_url}{loser_path}", {}, {})
+                    return
+
+                # 1. Update the survivor
+                update_path = interpolate_path(ops.update.path)
+                extra_headers = _make_extra_headers(payload)
+                if extra_headers:
+                    await transport._raw_request(ops.update.method.upper(), update_path, json=payload, headers=extra_headers)
+                else:
+                    await transport._request(ops.update.method.upper(), update_path, json=payload)
+
+                # 2. Delete the losers
+                if ops.delete is not None:
+                    for loser_id in losing_ids:
+                        loser_path = ops.delete.path.replace("${external_id}", loser_id)
+                        try:
+                            await transport._request(ops.delete.method.upper(), loser_path)
+                        except httpx.HTTPError as loser_exc:
+                            logger.warning(
+                                "merge_loser_delete_failed",
+                                loser_id=loser_id, error=str(loser_exc),
+                            )
+
+                # 3. Update identity map: point all loser cluster_ids to survivor's external_id
+                for loser_id in losing_ids:
+                    await self._record_identity_map(
+                        connector=result.connector,
+                        datatype=result.datatype,
+                        external_id=loser_id,
+                        internal_id=surviving_id,
+                    )
+
+                result._audit_entries.append((surviving_id, action, payload, None))
+                result.processed += 1
+
+            elif action == "split":
+                # T2 #34: split — create child records from a single source row.
+                # Row shape expected from OSI-Mapping delta view:
+                #   external_id   — source cluster_id being split
+                #   _split_rows   — list[dict], each the desired-state payload for a new child
+                if ops.insert is None:
+                    logger.warning("split_no_insert_op_configured", connector=connector.name, datatype=result.datatype)
+                    result.skipped += 1
+                    return
+
+                split_rows: list[dict[str, Any]] = row.get("_split_rows") or []
+                if not split_rows:
+                    logger.warning("split_no_rows", external_id=external_id)
+                    result.skipped += 1
+                    return
+
+                if dry_run:
+                    base_url = connector.connection.base_url.rstrip("/")
+                    for split_payload in split_rows:
+                        insert_path = interpolate_path(ops.insert.path)
+                        _log_dry_run("split:insert", ops.insert.method.upper(), f"{base_url}{insert_path}", {}, split_payload)
+                    return
+
+                created_ids: list[str] = []
+                for split_payload in split_rows:
+                    insert_path = interpolate_path(ops.insert.path)
+                    extra_headers = _make_extra_headers(split_payload)
+                    if extra_headers:
+                        resp = await transport._raw_request(ops.insert.method.upper(), insert_path, json=split_payload, headers=extra_headers)
+                    else:
+                        resp = await transport._raw_request(ops.insert.method.upper(), insert_path, json=split_payload)
+                    resp.raise_for_status()
+                    # Record identity for each created child
+                    try:
+                        resp_body: dict[str, Any] = orjson.loads(resp.content) if resp.content else {}
+                        returned_id = next(
+                            (str(resp_body[f]) for f in ("id", f"{result.datatype}_id", f"{result.connector}_id", "externalId") if f in resp_body),
+                            None,
+                        )
+                        if returned_id:
+                            created_ids.append(returned_id)
+                            await self._record_identity_map(
+                                connector=result.connector,
+                                datatype=result.datatype,
+                                external_id=external_id,
+                                internal_id=returned_id,
+                            )
+                    except Exception:
+                        pass
+
+                logger.info("split_complete", source_id=external_id, child_count=len(created_ids))
+                result._audit_entries.append((external_id, action, {"_split_rows": len(split_rows)}, None))
                 result.processed += 1
 
             else:

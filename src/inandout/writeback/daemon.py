@@ -186,7 +186,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     engine = WritebackEngine(pool)
 
     paused_connectors: set[tuple[str, str]] = set()
-    dispatcher = ControlDispatcher(pool, paused_connectors)
+    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="writeback")
 
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     batch_wait = config.defaults.batch.max_wait if config.defaults.batch else "5s"

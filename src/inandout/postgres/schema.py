@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import psycopg
 
-# Current migration count (migrations 001–019); checked at startup (B7)
-SCHEMA_VERSION: int = 19
+# Current migration count (migrations 001–020); checked at startup (B7)
+SCHEMA_VERSION: int = 20
 
 
 # Table naming convention per GOAL.md
@@ -192,7 +192,8 @@ CREATE TABLE IF NOT EXISTS inout_ops_sync_run (
     records_deleted  INT NOT NULL DEFAULT 0,
     records_errored  INT NOT NULL DEFAULT 0,
     error_message   TEXT,
-    CONSTRAINT valid_status CHECK (status IN ('running', 'completed', 'failed', 'skipped'))
+    error_detail    JSONB,
+    CONSTRAINT valid_status CHECK (status IN ('running', 'completed', 'failed', 'skipped', 'aborted'))
 );
 
 CREATE TABLE IF NOT EXISTS inout_ops_watermark (
@@ -207,6 +208,7 @@ CREATE TABLE IF NOT EXISTS inout_ops_watermark (
 
 CREATE TABLE IF NOT EXISTS inout_ops_control (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_tool     TEXT,
     connector       TEXT,
     datatype        TEXT,
     command         TEXT NOT NULL,

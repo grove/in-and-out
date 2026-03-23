@@ -44,7 +44,10 @@ def desired_state_table_ddl(connector: str, datatype: str, namespace: str = "pub
     schema_prefix = f"CREATE SCHEMA IF NOT EXISTS {namespace};\n" if namespace and namespace != "public" else ""
     return f"""{schema_prefix}CREATE TABLE IF NOT EXISTS {table} (
     external_id     TEXT NOT NULL PRIMARY KEY,
+    cluster_id      TEXT,
     data            JSONB NOT NULL,
+    base            JSONB,
+    base_version    TEXT,
     _action         TEXT NOT NULL DEFAULT 'update',
     _status         TEXT NOT NULL DEFAULT 'pending',
     _schema_version INTEGER NOT NULL DEFAULT 1,
@@ -58,7 +61,9 @@ def desired_state_table_ddl(connector: str, datatype: str, namespace: str = "pub
 CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_updated_at_idx
     ON {table} (_updated_at DESC);
 CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_status_idx
-    ON {table} (_status) WHERE _status = 'pending';""".strip()
+    ON {table} (_status) WHERE _status = 'pending';
+CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_cluster_id_idx
+    ON {table} (cluster_id) WHERE cluster_id IS NOT NULL;""".strip()
 
 
 def lwstate_table_ddl(connector: str, datatype: str, namespace: str = "public") -> str:
@@ -73,6 +78,7 @@ def lwstate_table_ddl(connector: str, datatype: str, namespace: str = "public") 
     return f"""{schema_prefix}CREATE TABLE IF NOT EXISTS {table} (
     external_id     TEXT NOT NULL PRIMARY KEY,
     data            JSONB NOT NULL,
+    _etag           TEXT,
     _written_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     _sync_run_id    UUID
 );""".strip()
@@ -98,13 +104,15 @@ async def ensure_desired_state_table(
     await conn.execute(desired_state_table_ddl(connector, datatype, namespace))
     # Idempotent — safe to call on existing tables
     await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
-    # Ensure _status and _processed_at exist on tables created before this version
-    await conn.execute(
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _status TEXT NOT NULL DEFAULT 'pending'"
-    )
-    await conn.execute(
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _processed_at TIMESTAMPTZ"
-    )
+    # Ensure columns added after initial DDL exist on older tables
+    for col_ddl in (
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _status TEXT NOT NULL DEFAULT 'pending'",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _processed_at TIMESTAMPTZ",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cluster_id TEXT",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS base JSONB",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS base_version TEXT",
+    ):
+        await conn.execute(col_ddl)
 
 
 async def ensure_lwstate_table(
@@ -120,6 +128,10 @@ async def ensure_lwstate_table(
     table = lwstate_table_name(connector, datatype, namespace)
     await conn.execute(lwstate_table_ddl(connector, datatype, namespace))
     await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
+    # Ensure _etag column exists on tables created before this version
+    await conn.execute(
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _etag TEXT"
+    )
 
 
 async def upsert_desired_state(
@@ -160,8 +172,17 @@ async def upsert_lwstate(
     data: dict,
     run_id: object = None,
     namespace: str = "public",
+    etag: str | None = None,
 ) -> None:
-    """Record what was last successfully written for an external_id."""
+    """Record what was last successfully written for an external_id.
+
+    Parameters
+    ----------
+    etag:
+        Optional ETag / version identifier returned by the target API for this
+        write.  Stored in the ``_etag`` column for use in subsequent
+        conditional writes (T2 #9).
+    """
     import orjson
 
     table = lwstate_table_name(connector, datatype, namespace)
@@ -169,14 +190,15 @@ async def upsert_lwstate(
     run_id_val = str(run_id) if run_id is not None else None
     await conn.execute(
         f"""
-        INSERT INTO {table} (external_id, data, _written_at, _sync_run_id)
-        VALUES (%s, %s, NOW(), %s)
+        INSERT INTO {table} (external_id, data, _etag, _written_at, _sync_run_id)
+        VALUES (%s, %s, %s, NOW(), %s)
         ON CONFLICT (external_id) DO UPDATE
         SET data = EXCLUDED.data,
+            _etag = EXCLUDED._etag,
             _written_at = NOW(),
             _sync_run_id = EXCLUDED._sync_run_id
         """,
-        [external_id, data_json, run_id_val],
+        [external_id, data_json, etag, run_id_val],
     )
 
 

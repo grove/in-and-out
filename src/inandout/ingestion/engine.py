@@ -215,9 +215,8 @@ class IngestionEngine:
                     log.error("sync_failed", error=str(exc))
                 finally:
                     # Update sync_run record — lock is released when the transaction commits/rolls back
-                    # Map "aborted" (drift protection) to "failed" for DB storage (constraint)
+                    # migration 020 adds 'aborted' to the CHECK constraint; fall back to 'failed' on older DBs
                     _raw_status = result.status if result.status != "running" else "completed"
-                    status = "failed" if _raw_status == "aborted" else _raw_status
                     # Fetch final watermark to record high_water_mark_after
                     _final_wm: str | None = None
                     try:
@@ -225,6 +224,17 @@ class IngestionEngine:
                             _final_wm = await get_watermark(_wm_conn, connector.name, datatype)
                     except Exception:
                         pass
+                    # Build structured error_detail from error_message
+                    import orjson as _orjson
+                    _error_detail_json: str | None = None
+                    if result.error_message:
+                        try:
+                            _error_detail_json = _orjson.dumps({
+                                "message": result.error_message,
+                                "status": _raw_status,
+                            }).decode()
+                        except Exception:
+                            pass
                     try:
                         await conn.execute(
                             """
@@ -236,44 +246,73 @@ class IngestionEngine:
                                 records_updated        = %s,
                                 records_errored        = %s,
                                 error_message          = %s,
+                                error_detail           = %s,
                                 high_water_mark_after  = %s
                             WHERE id = %s
                             """,
                             [
-                                status,
+                                _raw_status,
                                 result.records_fetched,
                                 result.records_inserted,
                                 result.records_updated,
                                 result.records_errored,
                                 result.error_message,
+                                _error_detail_json,
                                 _final_wm,
                                 run_id,
                             ],
                         )
                     except Exception:
-                        # Fallback if new columns don't exist yet (pre-migration)
-                        await conn.execute(
-                            """
-                            UPDATE inout_ops_sync_run SET
-                                status           = %s,
-                                finished_at      = NOW(),
-                                records_fetched  = %s,
-                                records_inserted = %s,
-                                records_updated  = %s,
-                                records_errored  = %s,
-                                error_message    = %s
-                            WHERE id = %s
-                            """,
-                            [
-                                status,
-                                result.records_fetched,
-                                result.records_inserted,
-                                result.records_updated,
-                                result.records_errored,
-                                result.error_message,
-                                run_id,
-                            ],
-                        )
+                        # Fallback for older DBs without error_detail or aborted status
+                        _fallback_status = "failed" if _raw_status == "aborted" else _raw_status
+                        try:
+                            await conn.execute(
+                                """
+                                UPDATE inout_ops_sync_run SET
+                                    status                 = %s,
+                                    finished_at            = NOW(),
+                                    records_fetched        = %s,
+                                    records_inserted       = %s,
+                                    records_updated        = %s,
+                                    records_errored        = %s,
+                                    error_message          = %s,
+                                    high_water_mark_after  = %s
+                                WHERE id = %s
+                                """,
+                                [
+                                    _fallback_status,
+                                    result.records_fetched,
+                                    result.records_inserted,
+                                    result.records_updated,
+                                    result.records_errored,
+                                    result.error_message,
+                                    _final_wm,
+                                    run_id,
+                                ],
+                            )
+                        except Exception:
+                            await conn.execute(
+                                """
+                                UPDATE inout_ops_sync_run SET
+                                    status           = %s,
+                                    finished_at      = NOW(),
+                                    records_fetched  = %s,
+                                    records_inserted = %s,
+                                    records_updated  = %s,
+                                    records_errored  = %s,
+                                    error_message    = %s
+                                WHERE id = %s
+                                """,
+                                [
+                                    _fallback_status,
+                                    result.records_fetched,
+                                    result.records_inserted,
+                                    result.records_updated,
+                                    result.records_errored,
+                                    result.error_message,
+                                    run_id,
+                                ],
+                            )
                     # Upsert connector version on successful full sync
                     if status == "completed" and mode == "full":
                         try:
