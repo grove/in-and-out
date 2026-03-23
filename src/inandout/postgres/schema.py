@@ -4,7 +4,7 @@ from __future__ import annotations
 import psycopg
 
 # Current migration count (migrations 001–020); checked at startup (B7)
-SCHEMA_VERSION: int = 20
+SCHEMA_VERSION: int = 21
 
 
 # Table naming convention per GOAL.md

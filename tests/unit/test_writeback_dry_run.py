@@ -24,7 +24,7 @@ def _make_writeback_cfg(dry_run=False, **kwargs):
     )
     return WritebackConfig(
         dry_run=dry_run,
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["insert", "update", "delete"],
         operations=ops,

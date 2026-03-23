@@ -134,7 +134,7 @@ async def test_payload_snapshot_stored_on_insert():
     )
 
     wb_cfg = WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["insert"],
         operations=OperationsConfig(

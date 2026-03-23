@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 logger = structlog.get_logger(__name__)
 
 # Current number of migration files (001 – 020)
-SCHEMA_VERSION: int = 20
+SCHEMA_VERSION: int = 21
 
 
 class SchemaVersionMismatch(Exception):

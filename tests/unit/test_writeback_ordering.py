@@ -38,7 +38,7 @@ def make_connector() -> ConnectorConfig:
         datatypes={
             "contacts": {
                 "writeback": {
-                    "protection_level": 3,  # fire_and_forget
+                    "protection_level": 3,  # post_write_verify
                     "conflict_resolution": "last_writer_wins",
                     "supported_actions": ["update"],
                     "operations": {
@@ -53,7 +53,7 @@ def make_connector() -> ConnectorConfig:
 
 def make_writeback_config() -> WritebackConfig:
     return WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(
@@ -226,7 +226,7 @@ def test_max_concurrent_writes_override_used_when_provided():
     engine = WritebackEngine(pool=pool)
 
     wb_cfg = WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(

@@ -27,7 +27,7 @@ def test_datatype_config_has_max_concurrent_writes():
     """DatatypeConfig should have max_concurrent_writes field defaulting to None."""
     cfg = DatatypeConfig(
         writeback=WritebackConfig(
-            protection_level=ProtectionLevel.fire_and_forget,
+            protection_level=ProtectionLevel.none,
             conflict_resolution=ConflictResolution.last_writer_wins,
             supported_actions=["update"],
             operations=OperationsConfig(
@@ -44,7 +44,7 @@ def test_datatype_config_max_concurrent_writes_set():
     cfg = DatatypeConfig(
         max_concurrent_writes=5,
         writeback=WritebackConfig(
-            protection_level=ProtectionLevel.fire_and_forget,
+            protection_level=ProtectionLevel.none,
             conflict_resolution=ConflictResolution.last_writer_wins,
             supported_actions=["update"],
             operations=OperationsConfig(
@@ -80,7 +80,7 @@ def test_datatype_override_takes_precedence():
     # The daemon passes dtype_cfg.max_concurrent_writes as the override
     # when calling engine.run_writeback_cycle
     wb_cfg = WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(
@@ -105,7 +105,7 @@ def test_datatype_override_takes_precedence():
 def test_no_override_uses_writeback_config_default():
     """When dtype_cfg.max_concurrent_writes is None, WritebackConfig default is used."""
     wb_cfg = WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(

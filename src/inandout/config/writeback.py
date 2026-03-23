@@ -15,9 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ProtectionLevel(IntEnum):
+    none = 0
     conditional_write_required = 1
     optimistic = 2
-    fire_and_forget = 3
+    post_write_verify = 3
 
 
 class ConflictResolution(StrEnum):

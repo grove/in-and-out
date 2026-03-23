@@ -15,7 +15,7 @@ def _make_writeback_config(enable_crash_recovery: bool = True):
         OperationConfig,
     )
     return WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["insert"],
         operations=OperationsConfig(

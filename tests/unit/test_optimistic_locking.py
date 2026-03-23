@@ -164,15 +164,15 @@ async def test_optimistic_update_412_conflict():
 
 
 # ---------------------------------------------------------------------------
-# ProtectionLevel.none (fire_and_forget): no lookup, no If-Match header
+# ProtectionLevel.none: no lookup, no If-Match header
 # ---------------------------------------------------------------------------
 
 @pytest.mark.anyio
 @respx.mock
-async def test_fire_and_forget_no_lookup():
-    """fire_and_forget: PATCH sent directly without prior GET or If-Match header."""
+async def test_protection_level_none_no_lookup():
+    """ProtectionLevel.none: PATCH sent directly without prior GET or If-Match header."""
     connector = make_connector()
-    wb_cfg = make_writeback_config(ProtectionLevel.fire_and_forget)
+    wb_cfg = make_writeback_config(ProtectionLevel.none)
 
     pool = MagicMock()
 

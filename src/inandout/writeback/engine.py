@@ -78,6 +78,8 @@ class WritebackResult:
     )
     # Tracks external IDs that resulted in a write failure (HTTP error or dead-letter)
     _failed_external_ids: set[str] = field(default_factory=set)
+    # Accumulates (external_id, action, error_message) for failed-row audit trail
+    _failed_entries: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 class WritebackEngine:
@@ -413,6 +415,14 @@ class WritebackEngine:
                 last_written: dict[str, Any] = {}
                 diff = _compute_field_diff(last_written, payload)
                 result._audit_entries.append((external_id, action, payload, diff))
+
+                # Level 3: post-write verification — GET and compare against what was sent
+                if writeback_cfg.protection_level == ProtectionLevel.post_write_verify:
+                    await self._post_write_verify(
+                        transport, connector, writeback_cfg, ops,
+                        action, external_id, payload, result,
+                    )
+
                 result.processed += 1
 
             elif action == "update":
@@ -502,6 +512,7 @@ class WritebackEngine:
                                 result.failed += 1
                                 result.conflicts += 1
                                 result._failed_external_ids.add(external_id)
+                                result._failed_entries.append((external_id, action, "conflict:dead_letter"))
                                 return
                             elif resolution == ConflictResolution.server_wins:
                                 logger.warning(
@@ -569,21 +580,28 @@ class WritebackEngine:
                 sent_diff: dict[str, Any] | None = None
 
                 if writeback_cfg.protection_level == ProtectionLevel.optimistic:
-                    # Fetch ETag via lookup GET
+                    # Use base_version from the desired-state row as the ETag when available
+                    # (avoids an extra GET round-trip when the MDM has already recorded it).
+                    # Fall back to a fresh lookup GET when base_version is absent.
+                    base_version: str = str(row.get("base_version") or row.get("_base_version") or "")
                     lookup_path = interpolate_path(ops.lookup.path)
-                    try:
-                        lookup_resp = await transport._raw_request(
-                            ops.lookup.method.upper(), lookup_path
-                        )
-                        etag = lookup_resp.headers.get(writeback_cfg.etag_header, "")
-                        remote_data: dict[str, Any] = {}
+                    if base_version:
+                        etag = base_version
+                        remote_data = {}  # skip GET — trust base_version as ETag
+                    else:
                         try:
-                            remote_data = orjson.loads(lookup_resp.content)
-                        except Exception:
+                            lookup_resp = await transport._raw_request(
+                                ops.lookup.method.upper(), lookup_path
+                            )
+                            etag = lookup_resp.headers.get(writeback_cfg.etag_header, "")
                             remote_data = {}
-                    except httpx.HTTPError:
-                        etag = ""
-                        remote_data = {}
+                            try:
+                                remote_data = orjson.loads(lookup_resp.content)
+                            except Exception:
+                                remote_data = {}
+                        except httpx.HTTPError:
+                            etag = ""
+                            remote_data = {}
 
                     # Apply conflict resolution strategy
                     conflict_resolution = writeback_cfg.conflict_resolution
@@ -738,8 +756,11 @@ class WritebackEngine:
                         raise
                 else:
                     extra_headers = _make_extra_headers(payload)
-                    if _3way_etag and writeback_cfg.etag_header:
-                        extra_headers[writeback_cfg.if_match_header] = _3way_etag
+                    # Prefer base_version from desired-state row as If-Match (avoids extra GET)
+                    _row_base_version = str(row.get("base_version") or row.get("_base_version") or "")
+                    _effective_etag = _row_base_version or _3way_etag
+                    if _effective_etag and writeback_cfg.etag_header:
+                        extra_headers[writeback_cfg.if_match_header] = _effective_etag
 
                     # B1: dry_run — log would-be write, skip actual HTTP call
                     if dry_run:
@@ -796,6 +817,18 @@ class WritebackEngine:
                         pass  # Non-critical
 
                 result._audit_entries.append((external_id, action, sent_payload, sent_diff))
+
+                # Level 3: post-write verification — GET and compare against what was sent
+                if (
+                    writeback_cfg.protection_level == ProtectionLevel.post_write_verify
+                    and sent_payload is not None
+                    and ops.lookup is not None
+                ):
+                    await self._post_write_verify(
+                        transport, connector, writeback_cfg, ops,
+                        action, external_id, sent_payload, result,
+                    )
+
                 result.processed += 1
 
             elif action == "delete":
@@ -966,6 +999,87 @@ class WritebackEngine:
             logger.error("writeback_http_error", action=action, external_id=external_id, error=str(exc))
             result.failed += 1
             result._failed_external_ids.add(external_id)
+            result._failed_entries.append((external_id, action, str(exc)))
+
+    async def _post_write_verify(
+        self,
+        transport: HttpTransportAdapter,
+        connector: ConnectorConfig,
+        writeback_cfg: WritebackConfig,
+        ops: Any,
+        action: str,
+        external_id: str,
+        sent_payload: dict[str, Any],
+        result: WritebackResult,
+    ) -> None:
+        """Level 3 protection: GET the record after a successful write and verify
+        the remote state matches what was sent.  Discrepancies are routed through
+        the configured conflict_resolution strategy (T2 #38).
+        """
+        if ops.lookup is None:
+            return
+        try:
+            lookup_path = ops.lookup.path.replace("${external_id}", external_id or "")
+            verify_resp = await transport._raw_request(
+                ops.lookup.method.upper(), lookup_path
+            )
+            remote: dict[str, Any] = {}
+            try:
+                remote = orjson.loads(verify_resp.content) if verify_resp.content else {}
+            except Exception:
+                return
+
+            # Compare only the fields we sent
+            mismatch_fields: list[str] = [
+                k for k, v in sent_payload.items()
+                if k in remote and remote[k] != v
+            ]
+            if not mismatch_fields:
+                return  # Verification passed
+
+            logger.warning(
+                "post_write_verification_mismatch",
+                connector=connector.name,
+                datatype=result.datatype,
+                external_id=external_id,
+                mismatch_fields=mismatch_fields,
+            )
+            try:
+                conflicts_detected_total.labels(
+                    connector=connector.name,
+                    datatype=result.datatype,
+                    resolution="post_write_verify",
+                    namespace="public",
+                ).inc()
+            except Exception:
+                pass
+
+            resolution = writeback_cfg.conflict_resolution
+            if resolution in (ConflictResolution.re_ingest_and_recompute,):
+                # Signal ingestion to re-fetch this record
+                try:
+                    async with self._pool.connection() as ctrl_conn:
+                        await ctrl_conn.execute(
+                            """
+                            INSERT INTO inout_ops_control
+                                (target_tool, connector, datatype, command, payload, status)
+                            VALUES ('ingestion', %s, %s, 'resync', %s, 'pending')
+                            """,
+                            [
+                                connector.name,
+                                result.datatype,
+                                orjson.dumps({"external_id": external_id}).decode(),
+                            ],
+                        )
+                        await ctrl_conn.commit()
+                except Exception:
+                    pass
+            elif resolution == ConflictResolution.dead_letter:
+                result.failed += 1
+                result.processed -= 1  # undo the processed increment
+                result._failed_external_ids.add(external_id)
+        except Exception as exc:
+            logger.warning("post_write_verify_failed", external_id=external_id, error=str(exc))
 
     async def _update_desired_state_statuses(
         self,
@@ -1002,20 +1116,53 @@ class WritebackEngine:
         external_id: str,
         internal_id: str,
     ) -> None:
-        """Upsert a (connector, datatype, external_id) → internal_id mapping."""
+        """Upsert a cluster_id → target_external_id mapping in inout_ops_identity_map.
+
+        Parameters
+        ----------
+        external_id:
+            The MDM cluster_id (the canonical cross-system identifier).
+        internal_id:
+            The ID assigned by the target system after a successful insert.
+            Stored in both ``internal_id`` (legacy) and ``target_external_id``
+            (spec-aligned name from migration 021).
+        """
         try:
             async with self._pool.connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO inout_ops_identity_map
-                        (connector, datatype, external_id, internal_id, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, NOW(), NOW())
+                        (connector, datatype, external_id, internal_id,
+                         cluster_id, target_external_id,
+                         created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
                     ON CONFLICT (connector, datatype, external_id) DO UPDATE
-                    SET internal_id = EXCLUDED.internal_id, updated_at = NOW()
+                    SET internal_id = EXCLUDED.internal_id,
+                        cluster_id = EXCLUDED.cluster_id,
+                        target_external_id = EXCLUDED.target_external_id,
+                        updated_at = NOW()
                     """,
-                    [connector, datatype, external_id, internal_id],
+                    [connector, datatype, external_id, internal_id,
+                     external_id, internal_id],
                 )
                 await conn.commit()
+        except psycopg.errors.UndefinedColumn:
+            # Migration 021 not yet applied — fall back to legacy columns only
+            try:
+                async with self._pool.connection() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO inout_ops_identity_map
+                            (connector, datatype, external_id, internal_id, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, NOW(), NOW())
+                        ON CONFLICT (connector, datatype, external_id) DO UPDATE
+                        SET internal_id = EXCLUDED.internal_id, updated_at = NOW()
+                        """,
+                        [connector, datatype, external_id, internal_id],
+                    )
+                    await conn.commit()
+            except Exception as exc:
+                logger.warning("identity_map_write_failed", error=str(exc))
         except psycopg.errors.UndefinedTable:
             pass  # Migration not yet run — silently skip
         except Exception as exc:
@@ -1027,8 +1174,13 @@ class WritebackEngine:
         result: WritebackResult,
         log: object,
     ) -> None:
-        """Write feedback to inout_ops_writeback_result log table."""
-        if not rows:
+        """Write per-row feedback to inout_ops_writeback_result.
+
+        Records both successful writes (status='ok') and failed writes
+        (status='failed') so operators can audit all outcomes and so
+        crash-recovery deduplication is complete.
+        """
+        if not rows and not result._failed_entries:
             return
         # Build audit map from accumulated entries
         audit_map: dict[tuple[str, str], tuple[dict[str, Any] | None, dict[str, Any] | None]] = {}
@@ -1037,6 +1189,7 @@ class WritebackEngine:
 
         try:
             async with self._pool.connection() as conn:
+                # Write successful rows
                 for row in rows:
                     action = row.get("_action", "")
                     external_id = row.get("external_id") or row.get("_cluster_id", "")
@@ -1077,6 +1230,48 @@ class WritebackEngine:
                                 external_id,
                             ],
                         )
+
+                # Write failed rows so operators can see all outcomes
+                for ext_id, act, error_msg in result._failed_entries:
+                    error_detail = orjson.dumps({"error": error_msg}).decode()
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO inout_ops_writeback_result
+                                (connector, datatype, delta_table, action, external_id, status,
+                                 payload_snapshot, processed_at)
+                            VALUES (%s, %s, %s, %s, %s, 'failed', %s, NOW())
+                            ON CONFLICT DO NOTHING
+                            """,
+                            [
+                                result.connector,
+                                result.datatype,
+                                result.delta_table,
+                                act,
+                                ext_id,
+                                error_detail,
+                            ],
+                        )
+                    except Exception:
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO inout_ops_writeback_result
+                                    (connector, datatype, delta_table, action, external_id, status, processed_at)
+                                VALUES (%s, %s, %s, %s, %s, 'failed', NOW())
+                                ON CONFLICT DO NOTHING
+                                """,
+                                [
+                                    result.connector,
+                                    result.datatype,
+                                    result.delta_table,
+                                    act,
+                                    ext_id,
+                                ],
+                            )
+                        except Exception:
+                            pass
+
                 await conn.commit()
         except psycopg.errors.UndefinedTable:
             logger.debug("writeback_result_table_not_found_skipping_feedback")

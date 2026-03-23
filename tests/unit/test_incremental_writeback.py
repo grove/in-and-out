@@ -18,7 +18,7 @@ from inandout.writeback.engine import WritebackEngine, WritebackResult
 
 def _make_writeback_cfg(diff_fields: bool = False) -> WritebackConfig:
     return WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         diff_fields=diff_fields,

@@ -56,7 +56,7 @@ def make_connector() -> ConnectorConfig:
 
 def make_writeback_config(idempotency_key_header: str | None) -> WritebackConfig:
     return WritebackConfig(
-        protection_level=ProtectionLevel.fire_and_forget,
+        protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["insert", "update"],
         operations=OperationsConfig(
