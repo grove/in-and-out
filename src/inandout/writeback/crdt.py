@@ -69,11 +69,14 @@ def gcounter_merge(
             result[k] = v
             continue
         remote_v = remote.get(k)
-        if isinstance(v, (int, float)) and isinstance(remote_v, (int, float)):
-            delta = v - remote_v
+        if isinstance(v, (int, float)):
+            # Treat a missing remote field as 0: the server doesn't have this
+            # counter yet, so the full local value is the correct delta.
+            effective_remote: float = float(remote_v) if isinstance(remote_v, (int, float)) else 0.0
+            delta = v - effective_remote
             if delta > 0:
                 result[k] = delta
-            # delta <= 0 means remote already has this value or higher — skip
+            # delta <= 0: remote already at this value or higher — omit
         else:
             result[k] = v
     return result

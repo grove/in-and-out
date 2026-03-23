@@ -112,11 +112,11 @@ def test_gcounter_merge_private_field_previously_dropped():
 
 
 def test_gcounter_merge_missing_remote_field():
-    """gcounter_merge treats missing remote fields as 0 for numeric delta."""
+    """gcounter_merge treats a missing remote numeric field as 0: delta = local - 0 = local."""
     local = {"new_counter": 7}
     remote = {}
     result = gcounter_merge(local, remote)
-    # remote_v is None, not a numeric — treated as non-numeric, forwarded as-is
+    # remote_v is None → effective_remote = 0 → delta = 7 - 0 = 7 → sent as-is
     assert result["new_counter"] == 7
 
 

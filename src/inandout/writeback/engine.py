@@ -484,7 +484,8 @@ class WritebackEngine:
                         )
                         current_state: dict[str, Any] = {}
                         try:
-                            current_state = orjson.loads(preflight_resp.content) if preflight_resp.content else {}
+                            if preflight_resp.is_success:
+                                current_state = orjson.loads(preflight_resp.content) if preflight_resp.content else {}
                         except Exception:
                             pass
 
@@ -607,7 +608,8 @@ class WritebackEngine:
                         )
                         remote_crdt_state: dict[str, Any] = {}
                         try:
-                            remote_crdt_state = orjson.loads(crdt_resp.content) if crdt_resp.content else {}
+                            if crdt_resp.is_success:
+                                remote_crdt_state = orjson.loads(crdt_resp.content) if crdt_resp.content else {}
                         except Exception:
                             pass
                         crdt_ts_field = getattr(writeback_cfg, "crdt_ts_field", "_updated_at")
@@ -663,10 +665,11 @@ class WritebackEngine:
                             lookup_resp = await transport._raw_request(
                                 ops.lookup.method.upper(), lookup_path
                             )
-                            etag = lookup_resp.headers.get(writeback_cfg.etag_header, "")
+                            etag = lookup_resp.headers.get(writeback_cfg.etag_header, "") if lookup_resp.is_success else ""
                             remote_data = {}
                             try:
-                                remote_data = orjson.loads(lookup_resp.content)
+                                if lookup_resp.is_success:
+                                    remote_data = orjson.loads(lookup_resp.content)
                             except Exception:
                                 remote_data = {}
                         except httpx.HTTPError:
@@ -839,7 +842,8 @@ class WritebackEngine:
                         return
 
                     if extra_headers:
-                        await transport._raw_request(ops.update.method.upper(), path, json=payload, headers=extra_headers)
+                        _upd_resp = await transport._raw_request(ops.update.method.upper(), path, json=payload, headers=extra_headers)
+                        _upd_resp.raise_for_status()
                     else:
                         await transport._request(ops.update.method.upper(), path, json=payload)
                     sent_payload = payload
@@ -915,7 +919,8 @@ class WritebackEngine:
                     return
 
                 if extra_headers:
-                    await transport._raw_request(ops.delete.method.upper(), path, headers=extra_headers)
+                    _del_resp = await transport._raw_request(ops.delete.method.upper(), path, headers=extra_headers)
+                    _del_resp.raise_for_status()
                 else:
                     await transport._request(ops.delete.method.upper(), path)
                 result._audit_entries.append((external_id, action, None, None))
@@ -936,7 +941,8 @@ class WritebackEngine:
                     return
 
                 if extra_headers:
-                    await transport._raw_request(ops.archive.method.upper(), path, json=payload, headers=extra_headers)
+                    _arch_resp = await transport._raw_request(ops.archive.method.upper(), path, json=payload, headers=extra_headers)
+                    _arch_resp.raise_for_status()
                 else:
                     await transport._request(ops.archive.method.upper(), path, json=payload)
                 result._audit_entries.append((external_id, action, payload, None))

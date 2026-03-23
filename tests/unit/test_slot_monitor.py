@@ -235,3 +235,104 @@ def test_replication_slot_lag_bytes_metric_has_slot_name_label():
     from inandout.observability.metrics import replication_slot_lag_bytes
     labels = list(replication_slot_lag_bytes._labelnames)
     assert "slot_name" in labels
+
+
+# ---------------------------------------------------------------------------
+# Drain / should_stop tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_monitor_exits_immediately_when_should_stop_true_at_start():
+    """monitor_replication_slot returns without polling when should_stop is already True."""
+    from inandout.writeback.slot_monitor import monitor_replication_slot
+    from inandout.config.tool import ReplicationSlotConfig
+    from unittest.mock import patch
+
+    config = ReplicationSlotConfig(
+        slot_name="test_slot",
+        warn_lag_bytes=100_000_000,
+        max_lag_bytes=1_000_000_000,
+        poll_interval_secs=0.01,
+    )
+
+    call_count = [0]
+
+    async def mock_get_slot_lag(pool, slot_name):
+        call_count[0] += 1
+        return (1_000, 0.1)
+
+    pool = MagicMock()
+
+    with patch("inandout.writeback.slot_monitor.get_slot_lag", side_effect=mock_get_slot_lag):
+        # should_stop returns True immediately — loop should exit before first poll
+        await monitor_replication_slot(pool, config, lambda: None, should_stop=lambda: True)
+
+    assert call_count[0] == 0, "should_stop=True at entry should prevent any polling"
+
+
+@pytest.mark.asyncio
+async def test_monitor_exits_after_one_poll_when_should_stop_true_after_sleep():
+    """monitor_replication_slot exits after the post-sleep check when drained."""
+    from inandout.writeback.slot_monitor import monitor_replication_slot
+    from inandout.config.tool import ReplicationSlotConfig
+    from unittest.mock import patch
+    import anyio
+
+    config = ReplicationSlotConfig(
+        slot_name="test_slot",
+        warn_lag_bytes=100_000_000,
+        max_lag_bytes=1_000_000_000,
+        poll_interval_secs=0.01,
+    )
+
+    call_count = [0]
+
+    async def mock_get_slot_lag(pool, slot_name):
+        call_count[0] += 1
+        return (1_000, 0.1)
+
+    pool = MagicMock()
+    # should_stop returns False for the first check, True after (simulates drain mid-sleep)
+    check_count = [0]
+
+    def should_stop() -> bool:
+        check_count[0] += 1
+        # First pre-loop check: False (allow one iteration)
+        # Post-sleep check: True (drain)
+        return check_count[0] > 1
+
+    with patch("inandout.writeback.slot_monitor.get_slot_lag", side_effect=mock_get_slot_lag):
+        await monitor_replication_slot(pool, config, lambda: None, should_stop=should_stop)
+
+    assert call_count[0] == 1, "should have completed exactly one poll iteration"
+
+
+@pytest.mark.asyncio
+async def test_monitor_no_should_stop_runs_until_timeout():
+    """monitor_replication_slot without should_stop runs indefinitely (use anyio timeout)."""
+    from inandout.writeback.slot_monitor import monitor_replication_slot
+    from inandout.config.tool import ReplicationSlotConfig
+    from unittest.mock import patch
+    import anyio
+
+    config = ReplicationSlotConfig(
+        slot_name="test_slot",
+        warn_lag_bytes=100_000_000,
+        max_lag_bytes=1_000_000_000,
+        poll_interval_secs=0.01,
+    )
+
+    call_count = [0]
+
+    async def mock_get_slot_lag(pool, slot_name):
+        call_count[0] += 1
+        return (1_000, 0.1)
+
+    pool = MagicMock()
+
+    with patch("inandout.writeback.slot_monitor.get_slot_lag", side_effect=mock_get_slot_lag):
+        with anyio.move_on_after(0.05):
+            await monitor_replication_slot(pool, config, lambda: None)
+
+    # Without a drain signal the loop ran multiple times
+    assert call_count[0] >= 2, "loop should have polled multiple times without should_stop"

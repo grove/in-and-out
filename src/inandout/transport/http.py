@@ -104,11 +104,24 @@ class HttpTransportAdapter:
         Returns the raw response for callers that need fine-grained status
         handling.  Transparently retries on 429 up to max_retries times so
         writeback operations are shielded from transient API rate-limit windows.
-        After all retries the final (possibly 429) response is returned.
+        Consults the connector's retry budget (if configured) before each
+        retry attempt.  After all retries the final response is returned.
         """
         from inandout.transport.errors import retry_after_seconds as _retry_after_secs
+        from inandout.transport.retry_budget import RetryBudgetExhaustedError, get_retry_budget
 
         assert self._client is not None, "Must be used as async context manager"
+
+        # Resolve retry budget once for this call
+        retry_budget = None
+        retry_budget_cfg = self._connector.connection.retry_budget
+        if retry_budget_cfg is not None:
+            retry_budget = get_retry_budget(
+                self._connector.name,
+                retry_budget_cfg.max_attempts,
+                retry_budget_cfg.window_secs,
+            )
+
         resp: httpx.Response
         for attempt in range(self._max_retries + 1):
             # Token-bucket rate limiting (our own implementation)
@@ -122,6 +135,14 @@ class HttpTransportAdapter:
 
             if resp.status_code != 429 or attempt >= self._max_retries:
                 return resp
+
+            # Check retry budget before sleeping and retrying
+            if retry_budget is not None:
+                allowed = await retry_budget.consume()
+                if not allowed:
+                    raise RetryBudgetExhaustedError(
+                        f"Retry budget exhausted for connector {self._connector.name!r}"
+                    )
 
             exc = httpx.HTTPStatusError("429", request=resp.request, response=resp)
             wait = _retry_after_secs(exc) or (2 ** attempt)
