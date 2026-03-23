@@ -14,6 +14,8 @@ from psycopg_pool import AsyncConnectionPool
 from inandout.config.connector import ConnectorConfig
 from inandout.config.ingestion import HistoryMode, IngestionConfig
 from inandout.observability.metrics import records_processed_total, sync_lag_seconds
+from inandout.plugins.hooks import apply_hooks
+from inandout.postgres.schema_drift import detect_schema_drift, prune_orphan_columns
 from inandout.postgres.schema import (
     dead_letter_table_name,
     ensure_dead_letter_table,
@@ -57,8 +59,9 @@ class SyncResult:
 
 
 class IngestionEngine:
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(self, pool: AsyncConnectionPool, namespace: str = "public") -> None:
         self._pool = pool
+        self._namespace = namespace
         self._debouncer = None
 
     async def run_sync(
@@ -181,18 +184,19 @@ class IngestionEngine:
         log: Any,
     ) -> None:
         history_mode = ingestion_cfg.history_mode
+        ns = self._namespace
 
         # Ensure source table and dead-letter table exist
         async with self._pool.connection() as conn:
-            await ensure_source_table(conn, connector.name, datatype)
-            await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype)
+            await ensure_source_table(conn, connector.name, datatype, ns)
+            await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype, ns)
             if history_mode == HistoryMode.append:
-                await ensure_source_history_table(conn, connector.name, datatype)
+                await ensure_source_history_table(conn, connector.name, datatype, ns)
             await conn.commit()
 
-        table = source_table_name(connector.name, datatype)
-        hist_table = source_history_table_name(connector.name, datatype)
-        dl_table = dead_letter_table_name("ingestion", connector.name, datatype)
+        table = source_table_name(connector.name, datatype, ns)
+        hist_table = source_history_table_name(connector.name, datatype, ns)
+        dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
         new_watermark: str | None = None
         seen_ids: set[str] = set()
 
@@ -205,6 +209,12 @@ class IngestionEngine:
                 async with self._pool.connection() as conn:
                     async with conn.transaction():
                         for record in page:
+                            # Apply plugin hooks: transform → filter → enrich
+                            record = await apply_hooks(record, connector.name, self._pool)
+                            if record is None:
+                                # filter hook dropped this record
+                                continue
+
                             raw_hash = _compute_raw_hash(record)
                             external_id = _extract_external_id(record, ingestion_cfg.primary_key)
                             if external_id is None:
@@ -276,6 +286,17 @@ class IngestionEngine:
             await self._tombstone_missing(
                 table, seen_ids, result, log, connector.name, datatype
             )
+
+        # Schema drift detection: warn about (and optionally drop) orphan columns.
+        if watermark is None and seen_ids:
+            async with self._pool.connection() as drift_conn:
+                orphans = await detect_schema_drift(drift_conn, table, seen_ids)
+                for col in orphans:
+                    log.warning("schema_drift_orphan_column", table=table, column=col)
+                if ingestion_cfg.prune_orphan_columns and orphans:
+                    dropped = await prune_orphan_columns(drift_conn, table, orphans)
+                    await drift_conn.commit()
+                    log.info("orphan_columns_pruned", count=dropped)
 
         result.status = "completed"
 

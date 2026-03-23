@@ -195,6 +195,7 @@ class IngestionToolConfig(BaseModel):
 
     database: DatabaseConfig
     connectors_dir: str = "./connectors"
+    namespace: str = "public"
     webhook_server: WebhookServerConfig = Field(default_factory=WebhookServerConfig)
     health_server: HealthServerConfig = Field(default_factory=HealthServerConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
@@ -215,6 +216,7 @@ class WritebackToolConfig(BaseModel):
 
     database: DatabaseConfig
     connectors_dir: str = "./connectors"
+    namespace: str = "public"
     change_detection: ChangeDetectionConfig = Field(default_factory=ChangeDetectionConfig)
     health_server: _WritebackHealthServerConfig = Field(default_factory=_WritebackHealthServerConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

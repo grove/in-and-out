@@ -71,6 +71,8 @@ class WritebackConfig(BaseModel):
     supported_actions: list[str] = Field(min_length=1)
     dependencies: list[DependencyConfig] = []
     operations: OperationsConfig
+    max_concurrent_writes: int = Field(default=10, ge=1)
+    batch_size: int = Field(default=50, ge=1)
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":

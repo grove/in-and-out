@@ -109,3 +109,4 @@ class IngestionConfig(BaseModel):
     schedule: ScheduleConfig
     list: ListConfig = Field(alias="list")
     webhook_events: WebhookEventsConfig | None = None
+    prune_orphan_columns: bool = False

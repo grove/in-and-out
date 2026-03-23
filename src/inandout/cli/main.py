@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -119,6 +120,179 @@ def ingest_validate(
         raise typer.Exit(code=1)
 
     console.print(f"\n[green]All {len(yaml_files)} connector(s) valid.[/green]")
+
+
+@ingest_app.command("validate-connector")
+def ingest_validate_connector(
+    connector: str = typer.Option(
+        ...,
+        "--connector",
+        help="Path to a single connector YAML file.",
+    ),
+) -> None:
+    """Validate a single connector YAML against the Pydantic schema."""
+    from inandout.config.loader import load_connector
+
+    connector_path = Path(connector)
+    table = Table(title="Connector Validation")
+    table.add_column("File", style="cyan")
+    table.add_column("Status", style="bold")
+    table.add_column("Details")
+
+    if not connector_path.exists():
+        table.add_row(connector_path.name, "[red]FAIL[/red]", "File not found")
+        console.print(table)
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = load_connector(connector_path)
+        conn = cfg.connector
+        datatypes = ", ".join(conn.datatypes.keys())
+        table.add_row(
+            connector_path.name,
+            "[green]OK[/green]",
+            f"{conn.name} — datatypes: {datatypes}",
+        )
+        console.print(table)
+    except Exception as exc:
+        table.add_row(connector_path.name, "[red]FAIL[/red]", str(exc))
+        console.print(table)
+        err_console.print(f"\nValidation failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+@ingest_app.command("dry-run")
+def ingest_dry_run(
+    connector: str = typer.Option(
+        ...,
+        "--connector",
+        help="Path to a connector YAML file.",
+    ),
+    datatype: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--datatype",
+        help="Specific datatype to test (default: all).",
+    ),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        help="Maximum number of records to preview per datatype.",
+    ),
+) -> None:
+    """Fetch ONE page from the real API and preview records without writing to DB."""
+    import anyio
+
+    from inandout.config.loader import load_connector
+
+    connector_path = Path(connector)
+    if not connector_path.exists():
+        err_console.print(f"Connector file not found: {connector_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = load_connector(connector_path)
+    except Exception as exc:
+        err_console.print(f"Invalid connector config: {exc}")
+        raise typer.Exit(code=1)
+
+    connector_cfg = cfg.connector
+
+    # Determine which datatypes to test
+    if datatype:
+        if datatype not in connector_cfg.datatypes:
+            err_console.print(f"Datatype '{datatype}' not found in connector.")
+            raise typer.Exit(code=1)
+        dtype_names = [datatype]
+    else:
+        dtype_names = [
+            name
+            for name, dc in connector_cfg.datatypes.items()
+            if dc.ingestion is not None
+        ]
+
+    async def _run_dry_run() -> list[dict]:
+        """Run the dry-run fetches and return preview rows."""
+        from inandout.plugins.hooks import apply_hooks
+        from inandout.transport.http import HttpTransportAdapter
+
+        previews: list[dict] = []
+
+        async with HttpTransportAdapter(connector_cfg) as transport:
+            for dtype_name in dtype_names:
+                dtype_cfg = connector_cfg.datatypes[dtype_name]
+                if dtype_cfg.ingestion is None:
+                    continue
+                ingestion_cfg = dtype_cfg.ingestion
+
+                # Fetch ONLY one page (no pagination follow-through)
+                page_count = 0
+                async for page in transport.fetch_pages(ingestion_cfg.list, watermark=None):
+                    records = page[:limit]
+                    for record in records:
+                        # Apply transform/filter hooks (dry-run mode — no pool)
+                        result = await apply_hooks(record, connector_cfg.name, pool=None)
+                        if result is None:
+                            action = "filtered"
+                            rec = record
+                        else:
+                            action = "insert"
+                            rec = result
+
+                        preview_fields = list(rec.keys())[:3]
+                        preview_vals = {k: rec[k] for k in preview_fields}
+
+                        from inandout.ingestion.engine import _extract_external_id
+                        ext_id = _extract_external_id(rec, ingestion_cfg.primary_key)
+
+                        previews.append({
+                            "dtype": dtype_name,
+                            "external_id": ext_id or "(unknown)",
+                            "action": action,
+                            "field_count": len(rec),
+                            "preview": str(preview_vals),
+                        })
+
+                    page_count += 1
+                    break  # Only one page
+
+        return previews
+
+    try:
+        previews = anyio.run(_run_dry_run)
+    except Exception as exc:
+        err_console.print(f"Dry-run failed: {exc}")
+        raise typer.Exit(code=1)
+
+    # Display results
+    for dtype_name in dtype_names:
+        dtype_previews = [p for p in previews if p["dtype"] == dtype_name]
+        dtype_cfg = connector_cfg.datatypes.get(dtype_name)
+        if dtype_cfg is None or dtype_cfg.ingestion is None:
+            continue
+
+        from inandout.postgres.schema import source_table_name
+        table_name = source_table_name(connector_cfg.name, dtype_name)
+
+        preview_table = Table(title=f"Dry-run: {connector_cfg.name} / {dtype_name}")
+        preview_table.add_column("external_id", style="cyan")
+        preview_table.add_column("action", style="bold")
+        preview_table.add_column("field_count")
+        preview_table.add_column("preview (first 3 fields)")
+
+        for p in dtype_previews:
+            color = "green" if p["action"] == "insert" else "yellow"
+            preview_table.add_row(
+                str(p["external_id"]),
+                f"[{color}]{p['action']}[/{color}]",
+                str(p["field_count"]),
+                p["preview"],
+            )
+
+        console.print(preview_table)
+        inserts = sum(1 for p in dtype_previews if p["action"] == "insert")
+        console.print(
+            f"[bold]Would insert {inserts} record(s) into [cyan]{table_name}[/cyan][/bold]"
+        )
 
 
 # ---------------------------------------------------------------------------

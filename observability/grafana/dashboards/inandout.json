@@ -1,0 +1,81 @@
+{
+  "title": "In-and-Out MDM Sync",
+  "uid": "inandout-main",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Records Processed (rate by connector + datatype)",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(records_processed_total[5m])",
+          "legendFormat": "{{connector}} / {{datatype}} ({{operation}})",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "Prometheus" }
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Sync Lag (seconds by connector + datatype)",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sync_lag_seconds",
+          "legendFormat": "{{connector}} / {{datatype}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "Prometheus" }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Circuit Breaker State (by connector + datatype)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "circuit_breaker_state",
+          "legendFormat": "{{connector}} / {{datatype}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "Prometheus" }
+    },
+    {
+      "id": 4,
+      "type": "gauge",
+      "title": "Dead Letter Depth (by connector + datatype)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "dead_letter_depth",
+          "legendFormat": "{{connector}} / {{datatype}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "Prometheus" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP Errors (rate by connector)",
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(http_errors_total[5m])",
+          "legendFormat": "{{connector}} ({{status_code}})",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "Prometheus" }
+    }
+  ]
+}

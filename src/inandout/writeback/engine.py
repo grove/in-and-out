@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 import httpx
 import orjson
 import psycopg
@@ -83,18 +84,32 @@ class WritebackEngine:
                 return result
 
             try:
-                rows = await self._fetch_delta_rows(delta_table, log, result)
+                rows = await self._fetch_delta_rows(
+                    delta_table, log, result, batch_size=writeback_cfg.batch_size
+                )
                 if rows is None:
                     return result
 
+                semaphore = anyio.Semaphore(writeback_cfg.max_concurrent_writes)
+
                 async with HttpTransportAdapter(connector) as transport:
-                    for row_data in rows:
-                        action = row_data.get("_action", "")
-                        external_id = row_data.get("external_id") or row_data.get("_cluster_id", "")
-                        await self._dispatch_row(
-                            transport, connector, writeback_cfg,
-                            action, external_id, row_data, log, result
-                        )
+                    async with anyio.create_task_group() as tg:
+                        for row_data in rows:
+                            action = row_data.get("_action", "")
+                            external_id = row_data.get("external_id") or row_data.get("_cluster_id", "")
+
+                            async def _dispatch_with_semaphore(
+                                _action: str = action,
+                                _external_id: str = external_id,
+                                _row: dict = row_data,
+                            ) -> None:
+                                async with semaphore:
+                                    await self._dispatch_row(
+                                        transport, connector, writeback_cfg,
+                                        _action, _external_id, _row, log, result
+                                    )
+
+                            tg.start_soon(_dispatch_with_semaphore)
 
                 await self._write_feedback(rows, result, log)
 
@@ -113,12 +128,13 @@ class WritebackEngine:
         delta_table: str,
         log: object,
         result: WritebackResult,
+        batch_size: int = 50,
     ) -> list[dict] | None:
-        """Fetch up to 50 non-noop rows from the delta table. Returns None if table doesn't exist."""
+        """Fetch up to *batch_size* non-noop rows from the delta table. Returns None if table doesn't exist."""
         try:
             async with self._pool.connection() as fetch_conn:
                 cur = await fetch_conn.execute(
-                    f"SELECT * FROM {delta_table} WHERE _action != 'noop' LIMIT 50"
+                    f"SELECT * FROM {delta_table} WHERE _action != 'noop' LIMIT {batch_size}"
                 )
                 col_names = [desc[0] for desc in cur.description or []]
                 rows_raw = await cur.fetchall()

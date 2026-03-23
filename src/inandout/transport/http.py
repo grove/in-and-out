@@ -19,6 +19,7 @@ from inandout.transport.errors import (
     classify_http_error,
     retry_after_seconds,
 )
+from inandout.transport.rate_limiter import TokenBucket, get_rate_limiter
 
 
 def _extract_records(data: Any, record_selector: str | None) -> list[dict[str, Any]]:
@@ -61,12 +62,19 @@ class HttpTransportAdapter:
         self._connector = connector
         self._auth = build_auth_provider(connector.auth)
         self._limiter: AsyncLimiter | None = None
+        self._token_bucket: TokenBucket | None = None
         self._max_retries = max_retries
         rate_limit = connector.rate_limit
         if rate_limit and rate_limit.requests_per_second:
             self._limiter = AsyncLimiter(
                 max_rate=rate_limit.requests_per_second,
                 time_period=1.0,
+            )
+            burst = float(rate_limit.burst) if rate_limit.burst else rate_limit.requests_per_second * 2
+            self._token_bucket = get_rate_limiter(
+                connector.name,
+                rate_per_second=rate_limit.requests_per_second,
+                burst=burst,
             )
         self._client: httpx.AsyncClient | None = None
 
@@ -93,6 +101,9 @@ class HttpTransportAdapter:
     async def _raw_request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Issue a single raw request through the client (with rate limiting)."""
         assert self._client is not None, "Must be used as async context manager"
+        # Token-bucket rate limiting (our own implementation)
+        if self._token_bucket is not None:
+            await self._token_bucket.acquire()
         if self._limiter:
             async with self._limiter:
                 return await self._client.request(method, path, **kwargs)
