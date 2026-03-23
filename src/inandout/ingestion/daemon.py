@@ -302,7 +302,12 @@ async def _housekeeping_loop(
 ) -> None:
     log = logger.bind(component="housekeeping_loop")
     while True:
+        if _draining:
+            log.info("housekeeping_loop_draining")
+            break
         await anyio.sleep(interval_secs)
+        if _draining:  # re-check after sleep so we don't run after drain
+            break
         try:
             await run_housekeeping(pool, config.housekeeping, connector_datatypes)
         except Exception as exc:

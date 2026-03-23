@@ -108,6 +108,10 @@ async def _writeback_loop_streaming(
     log.info("writeback_streaming_loop_started", delta_table=delta_table)
     try:
         async for payload in listen_for_deltas(pool):
+            # Drain check: stop processing new notifications once draining
+            if _draining:
+                log.info("writeback_streaming_loop_draining")
+                break
             # payload format: "connector:datatype"
             if payload and ":" in payload:
                 notified_connector, notified_datatype = payload.split(":", 1)
@@ -142,7 +146,12 @@ async def _housekeeping_loop(
     log = logger.bind(component="writeback_housekeeping_loop")
     log.info("writeback_housekeeping_loop_started", interval_secs=interval_secs)
     while True:
+        if _draining:
+            log.info("writeback_housekeeping_loop_draining")
+            break
         await anyio.sleep(interval_secs)
+        if _draining:  # re-check after sleep
+            break
         try:
             await run_housekeeping(pool, config.housekeeping, connector_datatypes)
         except Exception as exc:

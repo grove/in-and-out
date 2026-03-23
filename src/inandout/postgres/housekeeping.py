@@ -32,6 +32,8 @@ async def run_housekeeping(
     dead_letter_interval = _to_pg_interval(retention.dead_letter)
     history_interval = _to_pg_interval(retention.history_table)
     webhook_seq_interval = _to_pg_interval(getattr(retention, "webhook_route_seq", "7d"))
+    writeback_result_interval = _to_pg_interval(getattr(retention, "writeback_result", "30d"))
+    writeback_dl_interval = _to_pg_interval(getattr(retention, "writeback_dead_letter", "30d"))
 
     totals: dict[str, int] = {}
 
@@ -51,7 +53,16 @@ async def run_housekeeping(
         except Exception:
             pass  # Table may not exist on older DBs
 
-        # Purge dead-letter tables
+        # Purge writeback audit/result rows
+        try:
+            cur = await conn.execute(
+                f"DELETE FROM inout_ops_writeback_result WHERE processed_at < NOW() - INTERVAL '{writeback_result_interval}'"
+            )
+            totals["writeback_result"] = cur.rowcount or 0
+        except Exception:
+            pass  # Table may not exist on older DBs
+
+        # Purge dead-letter tables (ingestion)
         for connector, datatype in connector_datatypes:
             dl_table = f"inout_dl_ingestion_{connector}_{datatype}"
             try:
@@ -72,6 +83,17 @@ async def run_housekeeping(
                 totals[f"hist_{connector}_{datatype}"] = cur.rowcount or 0
             except Exception:
                 pass  # Table may not exist
+
+        # Purge writeback dead-letter tables
+        for connector, datatype in connector_datatypes:
+            wbdl_table = f"inout_dl_writeback_{connector}_{datatype}"
+            try:
+                cur = await conn.execute(
+                    f"DELETE FROM {wbdl_table} WHERE failed_at < NOW() - INTERVAL '{writeback_dl_interval}'"
+                )
+                totals[f"wbdl_{connector}_{datatype}"] = cur.rowcount or 0
+            except Exception:
+                pass  # Table may not exist yet
 
         await conn.commit()
 

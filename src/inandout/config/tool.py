@@ -182,6 +182,8 @@ class RetentionConfig(BaseModel):
     dead_letter: str = "30d"
     history_table: str = "365d"
     webhook_route_seq: str = "7d"  # TTL for inout_ops_webhook_route_seq rows
+    writeback_result: str = "30d"  # TTL for inout_ops_writeback_result rows
+    writeback_dead_letter: str = "30d"  # TTL for inout_dl_writeback_* rows
 
 
 class HousekeepingConfig(BaseModel):
