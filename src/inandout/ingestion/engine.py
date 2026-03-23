@@ -15,7 +15,12 @@ from inandout.config.connector import ConnectorConfig, DatatypeConfig
 from inandout.config.ingestion import HistoryMode, IngestionConfig
 from inandout.ingestion.field_mapper import apply_field_mappings
 from inandout.ingestion.quality import validate_record
-from inandout.observability.metrics import quality_violations_total, records_processed_total, sync_lag_seconds
+from inandout.observability.metrics import (
+    intra_sync_duplicates_total,
+    quality_violations_total,
+    records_processed_total,
+    sync_lag_seconds,
+)
 from inandout.plugins.hooks import apply_hooks
 from inandout.postgres.schema_drift import detect_schema_drift, prune_orphan_columns
 from inandout.postgres.schema import (
@@ -345,6 +350,7 @@ class IngestionEngine:
         dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
         new_watermark: str | None = None
         seen_ids: set[str] = set()
+        in_run_seen: set[str] = set()  # intra-sync deduplication tracker (per run)
         # Per-batch unique-value tracker for quality rules
         quality_seen: dict[str, set] = {}
 
@@ -380,6 +386,42 @@ class IngestionEngine:
         bulk_size = ingestion_cfg.bulk_upsert_batch_size
         use_bulk = bulk_size > 1
         page_number = 0
+        records_committed_so_far = 0
+
+        # Intra-sync checkpointing: check for existing checkpoint to resume from
+        checkpoint_n = ingestion_cfg.checkpoint_every_n_pages
+        resume_cursor: str | None = None
+        resume_page: int = 0
+        if checkpoint_n > 0:
+            try:
+                from inandout.postgres.checkpoint import load_checkpoint
+                # Look for any running sync_run for this connector/datatype with a checkpoint
+                async with self._pool.connection() as ck_conn:
+                    ck_run_row = await (await ck_conn.execute(
+                        """
+                        SELECT cp.run_id, cp.page_number, cp.cursor_value, cp.records_committed
+                        FROM inout_ops_sync_checkpoint cp
+                        JOIN inout_ops_sync_run sr ON sr.id = cp.run_id
+                        WHERE cp.connector = %s AND cp.datatype = %s
+                          AND sr.status = 'running'
+                        ORDER BY cp.checkpointed_at DESC
+                        LIMIT 1
+                        """,
+                        [connector.name, datatype],
+                    )).fetchone()
+                if ck_run_row is not None:
+                    _ck_run_id, resume_page, resume_cursor, records_committed_so_far = ck_run_row
+                    log.info(
+                        "sync_resuming_from_checkpoint",
+                        page_number=resume_page,
+                        cursor_value=resume_cursor,
+                        records_committed=records_committed_so_far,
+                    )
+                    # Use resume cursor as effective watermark for this sync
+                    if resume_cursor is not None:
+                        watermark = resume_cursor
+            except Exception:
+                pass  # Checkpoint load failure → start from scratch
 
         async with HttpTransportAdapter(connector) as transport:
             async for page in transport.fetch_pages(
@@ -455,6 +497,24 @@ class IngestionEngine:
                                 )
                                 continue
 
+                            # Intra-sync deduplication: skip if already processed in this run
+                            if external_id in in_run_seen:
+                                log.debug(
+                                    "intra_sync_duplicate_skipped",
+                                    external_id=external_id,
+                                    page=page_number,
+                                )
+                                try:
+                                    intra_sync_duplicates_total.labels(
+                                        connector=connector.name,
+                                        datatype=datatype,
+                                    ).inc()
+                                except Exception:
+                                    pass
+                                result.records_fetched -= 1  # don't double-count in fetched
+                                continue
+
+                            in_run_seen.add(external_id)
                             seen_ids.add(external_id)
 
                             if use_bulk:
@@ -550,6 +610,20 @@ class IngestionEngine:
                             await set_watermark(
                                 conn, connector.name, datatype, wm_type, effective_watermark, result.run_id
                             )
+
+                        # Track committed count for checkpointing
+                        records_committed_so_far += result.records_inserted + result.records_updated
+
+                # Save checkpoint every N pages (outside the per-page conn transaction)
+                if checkpoint_n > 0 and page_number % checkpoint_n == 0:
+                    try:
+                        from inandout.postgres.checkpoint import save_checkpoint
+                        await save_checkpoint(
+                            self._pool, result.run_id, connector.name, datatype,
+                            page_number, new_watermark, records_committed_so_far,
+                        )
+                    except Exception:
+                        pass  # Checkpoint failure must not block sync
 
         # Full-sync deletion detection: tombstone records not seen in this run.
         # Guarded by a circuit breaker: skip if deletion would affect > 50% of existing

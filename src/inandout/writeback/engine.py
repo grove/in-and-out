@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from inandout.config.connector import ConnectorConfig
 from inandout.config.writeback import ConflictResolution, ProtectionLevel, WritebackConfig
 from inandout.observability.metrics import conflicts_detected_total
+from inandout.postgres.desired_state import get_lwstate, upsert_lwstate
 from inandout.transport.http import HttpTransportAdapter
 from inandout.writeback.merge_hooks import merge_hook_registry
 
@@ -355,6 +356,127 @@ class WritebackEngine:
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.update.path)
 
+                # Three-way conflict detection (field-scoped)
+                # Only runs when use_desired_state_table=True AND lookup is configured
+                if (
+                    writeback_cfg.use_desired_state_table
+                    and ops.lookup is not None
+                    and external_id
+                ):
+                    try:
+                        lookup_path_3way = interpolate_path(ops.lookup.path)
+                        preflight_resp = await transport._raw_request(
+                            ops.lookup.method.upper(), lookup_path_3way
+                        )
+                        current_state: dict[str, Any] = {}
+                        try:
+                            current_state = orjson.loads(preflight_resp.content) if preflight_resp.content else {}
+                        except Exception:
+                            pass
+
+                        # Fetch last-written state from lwstate table
+                        async with self._pool.connection() as lw_conn_3way:
+                            last_written_3way = await get_lwstate(
+                                lw_conn_3way, connector.name, result.datatype, external_id
+                            )
+
+                        # Get base from row dict
+                        base_3way: dict[str, Any] = row.get("_base") or row.get("base") or {}
+
+                        # Field-scoped three-way comparison
+                        payload_fields = set(payload.keys())
+                        current_relevant = {k: v for k, v in current_state.items() if k in payload_fields}
+                        base_relevant = {k: v for k, v in (base_3way or {}).items() if k in payload_fields}
+                        lw_relevant = {k: v for k, v in (last_written_3way or {}).items() if k in payload_fields}
+
+                        safe = (current_relevant == base_relevant) or (current_relevant == lw_relevant)
+
+                        if not safe:
+                            # Conflict detected — always update lwstate to current reality
+                            async with self._pool.connection() as lw_update_conn:
+                                await upsert_lwstate(
+                                    lw_update_conn, connector.name, result.datatype,
+                                    external_id, current_state
+                                )
+                                await lw_update_conn.commit()
+
+                            try:
+                                conflicts_detected_total.labels(
+                                    connector=connector.name,
+                                    datatype=result.datatype,
+                                    resolution=writeback_cfg.conflict_resolution.value,
+                                    namespace="public",
+                                ).inc()
+                            except Exception:
+                                pass
+
+                            resolution = writeback_cfg.conflict_resolution
+                            if resolution == ConflictResolution.last_writer_wins:
+                                logger.warning(
+                                    "writeback_conflict_last_writer_wins",
+                                    action=action, external_id=external_id,
+                                )
+                                result.conflicts += 1
+                                # Fall through — proceed with write despite conflict
+                            elif resolution == ConflictResolution.skip_and_warn:
+                                logger.warning(
+                                    "writeback_conflict_skip",
+                                    action=action, external_id=external_id,
+                                )
+                                result.skipped += 1
+                                result.conflicts += 1
+                                return
+                            elif resolution == ConflictResolution.dead_letter:
+                                logger.warning(
+                                    "writeback_conflict_dead_letter",
+                                    action=action, external_id=external_id,
+                                )
+                                result.failed += 1
+                                result.conflicts += 1
+                                return
+                            elif resolution == ConflictResolution.server_wins:
+                                logger.warning(
+                                    "writeback_conflict_server_wins",
+                                    action=action, external_id=external_id,
+                                )
+                                result.skipped += 1
+                                result.conflicts += 1
+                                return
+                            elif resolution == ConflictResolution.re_ingest_and_recompute:
+                                logger.warning(
+                                    "writeback_conflict_re_ingest",
+                                    action=action, external_id=external_id,
+                                )
+                                try:
+                                    async with self._pool.connection() as ctrl_conn:
+                                        await ctrl_conn.execute(
+                                            """
+                                            INSERT INTO inout_ops_control
+                                                (connector, datatype, command, payload, status)
+                                            VALUES (%s, %s, 'resync', %s, 'pending')
+                                            """,
+                                            [
+                                                connector.name,
+                                                result.datatype,
+                                                orjson.dumps({"external_id": external_id}).decode(),
+                                            ],
+                                        )
+                                        await ctrl_conn.commit()
+                                except Exception:
+                                    pass
+                                result.skipped += 1
+                                result.conflicts += 1
+                                return
+                            # else: default last_writer_wins — continue
+
+                        # Safe or last_writer_wins: carry ETag from pre-flight if configured
+                        _3way_etag = preflight_resp.headers.get(writeback_cfg.etag_header, "")
+                    except Exception:
+                        _3way_etag = ""
+                        # On error, fall through to normal write
+                else:
+                    _3way_etag = ""
+
                 # Incremental writeback: only send changed fields
                 if writeback_cfg.diff_fields and external_id:
                     try:
@@ -547,6 +669,8 @@ class WritebackEngine:
                         raise
                 else:
                     extra_headers = _make_extra_headers(payload)
+                    if _3way_etag and writeback_cfg.etag_header:
+                        extra_headers[writeback_cfg.if_match_header] = _3way_etag
                     if extra_headers:
                         await transport._raw_request(ops.update.method.upper(), path, json=payload, headers=extra_headers)
                     else:
@@ -573,6 +697,26 @@ class WritebackEngine:
                             await lw_conn.commit()
                     except Exception:
                         pass  # Non-critical: don't fail writeback over _last_written update
+
+                # After successful write: update lwstate with payload + ETag from response
+                if (
+                    writeback_cfg.use_desired_state_table
+                    and ops.lookup is not None
+                    and external_id
+                    and sent_payload is not None
+                ):
+                    try:
+                        lwstate_data = dict(sent_payload)
+                        if _3way_etag:
+                            lwstate_data["_etag"] = _3way_etag
+                        async with self._pool.connection() as lw_post_conn:
+                            await upsert_lwstate(
+                                lw_post_conn, connector.name, result.datatype,
+                                external_id, lwstate_data
+                            )
+                            await lw_post_conn.commit()
+                    except Exception:
+                        pass  # Non-critical
 
                 result._audit_entries.append((external_id, action, sent_payload, sent_diff))
                 result.processed += 1

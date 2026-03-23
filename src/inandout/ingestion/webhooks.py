@@ -176,33 +176,106 @@ async def handle_webhook(
 
     ingestion_cfg = dtype_cfg.ingestion
 
+    # Fan-out route config for this datatype
+    matched_route = None
+    fan_out = webhook_cfg.fan_out
+    discriminator_value = str(payload.get(fan_out.discriminator, ""))
+    for route in fan_out.routes:
+        if route.match == discriminator_value or discriminator_value.startswith(route.match):
+            if route.datatype == datatype:
+                matched_route = route
+                break
+
     # If the payload is a notification (no data fields, just an event reference), do a
-    # full-state lookup via the standard ingestion engine.
+    # targeted single-record fetch (or fall back to full sync if no external_id).
     webhook_events_cfg = ingestion_cfg.webhook_events if hasattr(ingestion_cfg, "webhook_events") else None
     is_notification_only = (
-        webhook_events_cfg is not None
-        and getattr(webhook_events_cfg, "payload_type", "full") == "notification"
+        (webhook_events_cfg is not None
+         and getattr(webhook_events_cfg, "payload_type", "full") == "notification")
+        or (matched_route is not None and matched_route.notification_only)
     )
+
+    # Out-of-order check for full-payload webhooks
+    if not is_notification_only and webhook_events_cfg is not None:
+        oo_cfg = getattr(webhook_events_cfg, "out_of_order", None)
+        if oo_cfg is not None:
+            from inandout.config.ingestion import OutOfOrderStrategy
+            strategy = oo_cfg.strategy
+            if strategy != OutOfOrderStrategy.ignore:
+                ts_field = oo_cfg.timestamp_field if strategy == OutOfOrderStrategy.accept_latest_timestamp else oo_cfg.sequence_field
+                if ts_field:
+                    payload_ts = payload.get(ts_field)
+                    if payload_ts is not None:
+                        # Check stored value from the source table
+                        from inandout.postgres.schema import source_table_name
+                        src_table = source_table_name(connector.name, datatype)
+                        ext_id_for_oo = _extract_external_id(payload, ingestion_cfg.primary_key)
+                        if ext_id_for_oo is not None:
+                            try:
+                                async with engine._pool.connection() as oo_conn:
+                                    oo_row = await (await oo_conn.execute(
+                                        f"SELECT data->>%s FROM {src_table} WHERE external_id = %s",
+                                        [ts_field, ext_id_for_oo],
+                                    )).fetchone()
+                                stored_ts = oo_row[0] if oo_row else None
+                                if stored_ts is not None and str(payload_ts) <= str(stored_ts):
+                                    log.info(
+                                        "webhook_stale_event_discarded",
+                                        external_id=ext_id_for_oo,
+                                        payload_ts=str(payload_ts),
+                                        stored_ts=str(stored_ts),
+                                    )
+                                    return JSONResponse({"status": "stale_discarded"}, status_code=200)
+                            except Exception:
+                                pass  # On error, accept and process
 
     payload_hash = hashlib.sha256(body).hexdigest()
 
     if is_notification_only:
-        log.info("webhook_notification_triggering_full_lookup")
-        try:
-            result = await engine.run_sync(connector, datatype, ingestion_cfg)
-            log.info("webhook_lookup_complete", status=result.status, inserted=result.records_inserted)
-            await _log_webhook(
-                engine._pool, connector.name, datatype, None,
-                payload_hash, "sync_triggered", "processed"
-            )
-            return JSONResponse({"status": "triggered", "sync_status": result.status})
-        except Exception as exc:
-            log.error("webhook_lookup_failed", error=str(exc))
-            await _log_webhook(
-                engine._pool, connector.name, datatype, None,
-                payload_hash, "sync_triggered", "failed"
-            )
-            return JSONResponse({"error": "lookup failed"}, status_code=500)
+        # Attempt targeted single-record fetch first
+        ext_id_field = "id"
+        if matched_route is not None:
+            ext_id_field = matched_route.notification_external_id_field
+        ext_id_from_payload = payload.get(ext_id_field)
+
+        if ext_id_from_payload is not None:
+            external_id_str = str(ext_id_from_payload)
+            log.info("webhook_notification_triggering_single_record_fetch", external_id=external_id_str)
+            try:
+                if hasattr(engine, "run_sync_single_record"):
+                    result = await engine.run_sync_single_record(connector, datatype, ingestion_cfg, external_id_str)
+                else:
+                    result = await engine.run_sync(connector, datatype, ingestion_cfg)
+                log.info("webhook_single_record_fetch_complete", status=result.status)
+                await _log_webhook(
+                    engine._pool, connector.name, datatype, external_id_str,
+                    payload_hash, "single_record_fetch", "processed"
+                )
+                return JSONResponse({"status": "triggered", "sync_status": result.status})
+            except Exception as exc:
+                log.error("webhook_single_record_fetch_failed", error=str(exc))
+                await _log_webhook(
+                    engine._pool, connector.name, datatype, None,
+                    payload_hash, "single_record_fetch", "failed"
+                )
+                return JSONResponse({"error": "fetch failed"}, status_code=500)
+        else:
+            log.warning("webhook_notification_missing_id_full_sync")
+            try:
+                result = await engine.run_sync(connector, datatype, ingestion_cfg)
+                log.info("webhook_lookup_complete", status=result.status, inserted=result.records_inserted)
+                await _log_webhook(
+                    engine._pool, connector.name, datatype, None,
+                    payload_hash, "sync_triggered", "processed"
+                )
+                return JSONResponse({"status": "triggered", "sync_status": result.status})
+            except Exception as exc:
+                log.error("webhook_lookup_failed", error=str(exc))
+                await _log_webhook(
+                    engine._pool, connector.name, datatype, None,
+                    payload_hash, "sync_triggered", "failed"
+                )
+                return JSONResponse({"error": "lookup failed"}, status_code=500)
 
     # Full-payload webhook: upsert the record directly.
     external_id = _extract_external_id(payload, ingestion_cfg.primary_key)

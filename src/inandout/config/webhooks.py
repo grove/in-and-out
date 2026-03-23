@@ -30,6 +30,8 @@ class FanOutRoute(BaseModel):
 
     match: str
     datatype: str
+    notification_only: bool = False                      # payload is a notification, not full state
+    notification_external_id_field: str = "id"           # field to extract external_id from payload
 
 
 class UnmatchedAction(StrEnum):

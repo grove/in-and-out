@@ -85,6 +85,21 @@ conflicts_detected_total: Counter = _counter(
 )
 
 
+# Intra-sync deduplication counter
+intra_sync_duplicates_total: Counter = _counter(
+    "inout_intra_sync_duplicates_total",
+    "Total intra-sync duplicate records skipped (same external_id seen twice in same run)",
+    ["connector", "datatype"],
+)
+
+# Replication slot lag gauge
+replication_slot_lag_bytes: Gauge = _gauge(
+    "inout_replication_slot_lag_bytes",
+    "Replication slot lag in bytes",
+    ["slot_name"],
+)
+
+
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""
     pass

@@ -12,6 +12,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from inandout.config.pagination import PaginationConfig
 
+
+class OutOfOrderStrategy(StrEnum):
+    accept_latest_timestamp = "accept_latest_timestamp"
+    accept_highest_sequence = "accept_highest_sequence"
+    ignore = "ignore"
+
+
+class OutOfOrderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: OutOfOrderStrategy = OutOfOrderStrategy.accept_latest_timestamp
+    timestamp_field: str = "updated_at"   # field in payload to compare
+    sequence_field: str | None = None     # field for sequence number comparison
+
 if TYPE_CHECKING:
     from inandout.ingestion.cdc import CdcSourceConfig
 
@@ -109,6 +123,7 @@ class WebhookEventsConfig(BaseModel):
     payload_type: WebhookPayloadType
     ordering: dict[str, Any]
     debounce: dict[str, Any] | None = None
+    out_of_order: OutOfOrderConfig = Field(default_factory=OutOfOrderConfig)
 
 
 class IngestionConfig(BaseModel):
@@ -125,3 +140,4 @@ class IngestionConfig(BaseModel):
     max_concurrent_fetches: int = 1  # parallelism for fan-out fetch (1 = no parallelism)
     bulk_upsert_batch_size: int = 1  # 1 = single-record path; >1 = bulk batch path
     verify_deletion: bool = True  # confirm each tombstone via detail_path GET before marking deleted
+    checkpoint_every_n_pages: int = 0  # 0 = disabled; >0 = save checkpoint every N pages
