@@ -46,14 +46,19 @@ def desired_state_table_ddl(connector: str, datatype: str, namespace: str = "pub
     external_id     TEXT NOT NULL PRIMARY KEY,
     data            JSONB NOT NULL,
     _action         TEXT NOT NULL DEFAULT 'update',
+    _status         TEXT NOT NULL DEFAULT 'pending',
     _schema_version INTEGER NOT NULL DEFAULT 1,
     _created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     _updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    _processed_at   TIMESTAMPTZ,
     _sync_run_id    UUID,
-    CONSTRAINT valid_action CHECK (_action IN ('insert', 'update', 'delete', 'upsert'))
+    CONSTRAINT valid_action CHECK (_action IN ('insert', 'update', 'delete', 'upsert', 'archive', 'noop', 'merge', 'split')),
+    CONSTRAINT valid_status CHECK (_status IN ('pending', 'processed', 'failed', 'skipped'))
 );
 CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_updated_at_idx
-    ON {table} (_updated_at DESC);""".strip()
+    ON {table} (_updated_at DESC);
+CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_status_idx
+    ON {table} (_status) WHERE _status = 'pending';""".strip()
 
 
 def lwstate_table_ddl(connector: str, datatype: str, namespace: str = "public") -> str:
@@ -93,6 +98,13 @@ async def ensure_desired_state_table(
     await conn.execute(desired_state_table_ddl(connector, datatype, namespace))
     # Idempotent — safe to call on existing tables
     await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
+    # Ensure _status and _processed_at exist on tables created before this version
+    await conn.execute(
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _status TEXT NOT NULL DEFAULT 'pending'"
+    )
+    await conn.execute(
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _processed_at TIMESTAMPTZ"
+    )
 
 
 async def ensure_lwstate_table(
@@ -166,6 +178,36 @@ async def upsert_lwstate(
         """,
         [external_id, data_json, run_id_val],
     )
+
+
+async def update_desired_state_status(
+    pool: object,
+    connector: str,
+    datatype: str,
+    external_id: str,
+    status: str,
+    namespace: str = "public",
+) -> None:
+    """Mark a desired-state row as processed, failed, or skipped after a write attempt.
+
+    OSI-Mapping reads _status to distinguish rows that have been actioned from
+    those still pending. Errors are swallowed — status update failure must never
+    mask the write result.
+    """
+    table = desired_state_table_name(connector, datatype, namespace)
+    try:
+        async with pool.connection() as conn:  # type: ignore[attr-defined]
+            await conn.execute(
+                f"""
+                UPDATE {table}
+                SET _status = %s, _processed_at = NOW()
+                WHERE external_id = %s
+                """,
+                [status, external_id],
+            )
+            await conn.commit()
+    except Exception:
+        pass  # Never block writeback due to status-update failure
 
 
 async def get_lwstate(

@@ -206,27 +206,72 @@ async def handle_webhook(
                 if ts_field:
                     payload_ts = payload.get(ts_field)
                     if payload_ts is not None:
-                        # Check stored value from the source table
-                        src_table = source_table_name(connector.name, datatype)
                         ext_id_for_oo = _extract_external_id(payload, ingestion_cfg.primary_key)
                         if ext_id_for_oo is not None:
+                            # For fan-out events, track sequence per-route to prevent
+                            # cross-route ordering corruption (T1 #35).
+                            route_key = matched_route.match if matched_route is not None else "__direct__"
                             try:
                                 async with engine._pool.connection() as oo_conn:
-                                    oo_row = await (await oo_conn.execute(
-                                        f"SELECT data->>%s FROM {src_table} WHERE external_id = %s",
-                                        [ts_field, ext_id_for_oo],
-                                    )).fetchone()
-                                stored_ts = oo_row[0] if oo_row else None
-                                if stored_ts is not None and str(payload_ts) <= str(stored_ts):
-                                    log.info(
-                                        "webhook_stale_event_discarded",
-                                        external_id=ext_id_for_oo,
-                                        payload_ts=str(payload_ts),
-                                        stored_ts=str(stored_ts),
-                                    )
-                                    return JSONResponse({"status": "stale_discarded"}, status_code=200)
+                                    # Try per-route sequence table first (migration 019)
+                                    use_route_seq = False
+                                    try:
+                                        oo_row = await (await oo_conn.execute(
+                                            """
+                                            SELECT last_seq
+                                            FROM inout_ops_webhook_route_seq
+                                            WHERE connector = %s
+                                              AND datatype = %s
+                                              AND route = %s
+                                              AND external_id = %s
+                                            """,
+                                            [connector.name, datatype, route_key, ext_id_for_oo],
+                                        )).fetchone()
+                                        use_route_seq = True
+                                    except Exception:
+                                        # Table not yet created; fall back to source table check
+                                        oo_row = None
+                                        use_route_seq = False
+
+                                    if not use_route_seq:
+                                        # Fallback: read last value from source table (non-fan-out path)
+                                        src_table = source_table_name(connector.name, datatype)
+                                        oo_row = await (await oo_conn.execute(
+                                            f"SELECT data->>%s FROM {src_table} WHERE external_id = %s",
+                                            [ts_field, ext_id_for_oo],
+                                        )).fetchone()
+
+                                    stored_seq = oo_row[0] if oo_row else None
+                                    if stored_seq is not None and str(payload_ts) <= str(stored_seq):
+                                        log.info(
+                                            "webhook_stale_event_discarded",
+                                            external_id=ext_id_for_oo,
+                                            route=route_key,
+                                            payload_seq=str(payload_ts),
+                                            stored_seq=str(stored_seq),
+                                        )
+                                        return JSONResponse({"status": "stale_discarded"}, status_code=200)
+
+                                    # Update per-route sequence so future events from this route
+                                    # are compared against the value we just accepted.
+                                    if use_route_seq:
+                                        try:
+                                            await oo_conn.execute(
+                                                """
+                                                INSERT INTO inout_ops_webhook_route_seq
+                                                    (connector, datatype, route, external_id, last_seq, updated_at)
+                                                VALUES (%s, %s, %s, %s, %s, NOW())
+                                                ON CONFLICT (connector, datatype, route, external_id) DO UPDATE
+                                                SET last_seq = EXCLUDED.last_seq,
+                                                    updated_at = NOW()
+                                                """,
+                                                [connector.name, datatype, route_key, ext_id_for_oo, str(payload_ts)],
+                                            )
+                                            await oo_conn.commit()
+                                        except Exception:
+                                            pass  # Sequence update failure must not block processing
                             except Exception:
-                                pass  # On error, accept and process
+                                pass  # On error, accept and process (fail-open)
 
     payload_hash = hashlib.sha256(body).hexdigest()
 

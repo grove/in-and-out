@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from inandout.config.connector import ConnectorConfig
 from inandout.config.writeback import ConflictResolution, ProtectionLevel, WritebackConfig
 from inandout.observability.metrics import conflicts_detected_total
-from inandout.postgres.desired_state import get_lwstate, upsert_lwstate
+from inandout.postgres.desired_state import get_lwstate, update_desired_state_status, upsert_lwstate
 from inandout.transport.http import HttpTransportAdapter
 from inandout.writeback.merge_hooks import merge_hook_registry
 
@@ -76,6 +76,8 @@ class WritebackResult:
     _audit_entries: list[tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]] = field(
         default_factory=list
     )
+    # Tracks external IDs that resulted in a write failure (HTTP error or dead-letter)
+    _failed_external_ids: set[str] = field(default_factory=set)
 
 
 class WritebackEngine:
@@ -191,6 +193,10 @@ class WritebackEngine:
                             tg.start_soon(_dispatch_group, group_rows)
 
                 await self._write_feedback(rows, result, log)
+                if writeback_cfg.use_desired_state_table:
+                    await self._update_desired_state_statuses(
+                        rows, result, connector.name, datatype
+                    )
 
             except Exception as exc:
                 result.error_message = str(exc)
@@ -368,24 +374,38 @@ class WritebackEngine:
                     insert_resp = await transport._raw_request(ops.insert.method.upper(), path, json=payload, headers=extra_headers)
                 else:
                     insert_resp = await transport._raw_request(ops.insert.method.upper(), path, json=payload)
-                # Capture internal_id from response body (id or connector.name + "_id" field)
+                insert_resp.raise_for_status()
+                # Extract the target-system's assigned ID from a successful response body
+                # and upsert inout_ops_identity_map: cluster_id → target external_id
                 try:
                     resp_body: dict[str, Any] = {}
                     try:
                         resp_body = orjson.loads(insert_resp.content) if insert_resp.content else {}
                     except Exception:
                         pass
-                    internal_id: str | None = None
-                    for id_field in ("id", f"{result.connector}_id", f"{result.datatype}_id"):
+                    # Candidate field names for the target-system-assigned ID
+                    id_candidates = (
+                        "id",
+                        f"{result.datatype}_id",
+                        f"{result.connector}_id",
+                        "externalId",
+                        "external_id",
+                    )
+                    returned_id: str | None = None
+                    for id_field in id_candidates:
                         if id_field in resp_body:
-                            internal_id = str(resp_body[id_field])
+                            returned_id = str(resp_body[id_field])
                             break
-                    if internal_id and external_id:
+                    # Use the MDM cluster_id as the canonical key when available
+                    cluster_id = str(
+                        row.get("cluster_id") or row.get("_cluster_id") or external_id
+                    )
+                    if returned_id and cluster_id:
                         await self._record_identity_map(
                             connector=result.connector,
                             datatype=result.datatype,
-                            external_id=external_id,
-                            internal_id=internal_id,
+                            external_id=cluster_id,
+                            internal_id=returned_id,
                         )
                 except Exception:
                     pass  # Identity map failure must not block writeback
@@ -479,6 +499,7 @@ class WritebackEngine:
                                 )
                                 result.failed += 1
                                 result.conflicts += 1
+                                result._failed_external_ids.add(external_id)
                                 return
                             elif resolution == ConflictResolution.server_wins:
                                 logger.warning(
@@ -822,6 +843,35 @@ class WritebackEngine:
         except httpx.HTTPError as exc:
             logger.error("writeback_http_error", action=action, external_id=external_id, error=str(exc))
             result.failed += 1
+            result._failed_external_ids.add(external_id)
+
+    async def _update_desired_state_statuses(
+        self,
+        rows: list[dict],
+        result: WritebackResult,
+        connector: str,
+        datatype: str,
+    ) -> None:
+        """Batch-update _status on inout_dst_* rows after a writeback cycle.
+
+        OSI-Mapping reads _status to distinguish pending rows from those that
+        have been actioned.  Errors are swallowed — never block writeback.
+        """
+        # Build index of successfully processed external_ids from _audit_entries
+        succeeded: set[str] = {str(ext_id) for ext_id, *_ in result._audit_entries}
+        failed: set[str] = result._failed_external_ids
+
+        for row in rows:
+            ext_id = str(row.get("external_id") or row.get("_cluster_id") or "")
+            if not ext_id:
+                continue
+            if ext_id in succeeded:
+                status = "processed"
+            elif ext_id in failed:
+                status = "failed"
+            else:
+                status = "skipped"
+            await update_desired_state_status(self._pool, connector, datatype, ext_id, status)
 
     async def _record_identity_map(
         self,

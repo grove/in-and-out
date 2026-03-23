@@ -17,6 +17,7 @@ from inandout.config.loader import load_connector, load_writeback_tool_config
 from inandout.config.tool import WritebackToolConfig
 from inandout.engine.control import ControlDispatcher
 from inandout.postgres.pool import create_pool
+from inandout.postgres.version_check import SchemaVersionMismatch, check_schema_version
 from inandout.writeback.engine import WritebackEngine
 
 logger = structlog.get_logger(__name__)
@@ -172,6 +173,16 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                 log.error("connector_load_failed", path=str(yaml_path), error=str(exc))
 
     pool = await create_pool(config.database)
+
+    # Refuse to start if schema version doesn't match (B7)
+    try:
+        await check_schema_version(pool)
+        log.info("schema_version_ok")
+    except (SchemaVersionMismatch, RuntimeError) as exc:
+        log.error("schema_version_mismatch", error=str(exc))
+        await pool.close()
+        raise SystemExit(1) from exc
+
     engine = WritebackEngine(pool)
 
     paused_connectors: set[tuple[str, str]] = set()

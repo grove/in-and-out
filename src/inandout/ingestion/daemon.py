@@ -25,6 +25,7 @@ from inandout.ingestion.webhooks import handle_webhook
 from inandout.observability.metrics import REGISTRY
 from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
+from inandout.postgres.version_check import SchemaVersionMismatch, check_schema_version
 from inandout.secrets import configure_backend
 
 
@@ -141,6 +142,57 @@ def _next_interval_secs(schedule: Any, default_interval_secs: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Connector health persistence helpers
+# ---------------------------------------------------------------------------
+
+async def _mark_connector_unavailable(pool: Any, connector: str, datatype: str, reason: str) -> None:
+    """Persist connector-unavailable status to inout_ops_connector_health (T1 #44)."""
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO inout_ops_connector_health
+                    (connector, datatype, status, marked_unhealthy_at, reason, updated_at)
+                VALUES (%s, %s, 'unavailable', NOW(), %s, NOW())
+                ON CONFLICT (connector, datatype) DO UPDATE
+                SET status = 'unavailable',
+                    marked_unhealthy_at = COALESCE(
+                        inout_ops_connector_health.marked_unhealthy_at, NOW()
+                    ),
+                    reason = EXCLUDED.reason,
+                    updated_at = NOW()
+                """,
+                [connector, datatype, reason],
+            )
+            await conn.commit()
+    except Exception:
+        pass  # Health table may not exist yet — never mask the polling error
+
+
+async def _mark_connector_healthy(pool: Any, connector: str, datatype: str) -> None:
+    """Clear unavailable status in inout_ops_connector_health (T1 #44)."""
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO inout_ops_connector_health
+                    (connector, datatype, status, last_healthy_at, marked_unhealthy_at, reason, updated_at)
+                VALUES (%s, %s, 'healthy', NOW(), NULL, NULL, NOW())
+                ON CONFLICT (connector, datatype) DO UPDATE
+                SET status = 'healthy',
+                    last_healthy_at = NOW(),
+                    marked_unhealthy_at = NULL,
+                    reason = NULL,
+                    updated_at = NOW()
+                """,
+                [connector, datatype],
+            )
+            await conn.commit()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Polling loop for one connector/datatype
 # ---------------------------------------------------------------------------
 
@@ -153,7 +205,7 @@ async def _polling_loop(
     paused_connectors: set[tuple[str, str]],
     dtype_cfg: Any = None,
 ) -> None:
-    from inandout.transport.circuit_breaker import get_circuit_breaker
+    from inandout.transport.circuit_breaker import CircuitState, get_circuit_breaker
 
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     schedule = ingestion_cfg.schedule
@@ -178,12 +230,24 @@ async def _polling_loop(
             result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg, dtype_cfg=dtype_cfg)
             if result.status in ("completed", "skipped"):
                 cb.record_success()
+                if cb.state == CircuitState.closed:
+                    await _mark_connector_healthy(engine._pool, connector_cfg.name, datatype)
             elif result.status == "failed":
                 cb.record_failure()
+                if cb.state == CircuitState.open:
+                    await _mark_connector_unavailable(
+                        engine._pool, connector_cfg.name, datatype,
+                        reason=result.error_message or "consecutive failures exceeded threshold",
+                    )
             log.info("poll_complete", status=result.status)
         except Exception as exc:
             cb.record_failure()
             log.error("poll_error", error=str(exc))
+            if cb.state == CircuitState.open:
+                await _mark_connector_unavailable(
+                    engine._pool, connector_cfg.name, datatype,
+                    reason=str(exc),
+                )
 
         sleep_secs = _next_interval_secs(schedule, interval_secs)
         await anyio.sleep(sleep_secs)
@@ -395,6 +459,15 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     log.info("daemon_starting", connectors_dir=config.connectors_dir)
 
     pool = await create_pool(config.database)
+
+    # Refuse to start if schema version doesn't match (B7)
+    try:
+        await check_schema_version(pool)
+        log.info("schema_version_ok")
+    except (SchemaVersionMismatch, RuntimeError) as exc:
+        log.error("schema_version_mismatch", error=str(exc))
+        await pool.close()
+        raise SystemExit(1) from exc
 
     # Create read pool if configured
     from inandout.postgres.pool import create_read_pool

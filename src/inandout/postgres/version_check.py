@@ -10,8 +10,8 @@ from psycopg_pool import AsyncConnectionPool
 
 logger = structlog.get_logger(__name__)
 
-# Current number of migration files (001 – 018)
-SCHEMA_VERSION: int = 18
+# Current number of migration files (001 – 019)
+SCHEMA_VERSION: int = 19
 
 
 class SchemaVersionMismatch(Exception):

@@ -68,14 +68,14 @@ async def test_missing_alembic_table_raises_runtime_error() -> None:
 
 
 def test_schema_version_constant() -> None:
-    """SCHEMA_VERSION constant should be set to 18."""
-    assert SCHEMA_VERSION == 18
+    """SCHEMA_VERSION constant should be set to 19."""
+    assert SCHEMA_VERSION == 19
 
 
 def test_schema_version_mismatch_message_helpful() -> None:
     """SchemaVersionMismatch message should be clear and actionable."""
-    exc = SchemaVersionMismatch(current="005_20260323", expected=18)
+    exc = SchemaVersionMismatch(current="005_20260323", expected=19)
     msg = str(exc)
     assert "005_20260323" in msg
-    assert "18" in msg
+    assert "19" in msg
     assert "inandout db upgrade" in msg
