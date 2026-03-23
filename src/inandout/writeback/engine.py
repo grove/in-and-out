@@ -52,6 +52,7 @@ class WritebackEngine:
             delta_table=delta_table,
         )
 
+        # Single long-lived connection holds the advisory lock for the entire cycle.
         async with self._pool.connection() as conn:
             lock_key = _advisory_lock_key(connector.name, datatype)
             row = await (await conn.execute(
@@ -62,27 +63,27 @@ class WritebackEngine:
                 result.skipped = 1
                 return result
 
-        try:
-            rows = await self._fetch_delta_rows(conn, delta_table, log, result)
-            if rows is None:
-                return result
+            try:
+                rows = await self._fetch_delta_rows(delta_table, log, result)
+                if rows is None:
+                    return result
 
-            async with HttpTransportAdapter(connector) as transport:
-                for row in rows:
-                    action = row.get("_action", "")
-                    external_id = row.get("external_id") or row.get("_cluster_id", "")
-                    await self._dispatch_row(
-                        transport, connector, writeback_cfg,
-                        action, external_id, row, log, result
-                    )
+                async with HttpTransportAdapter(connector) as transport:
+                    for row_data in rows:
+                        action = row_data.get("_action", "")
+                        external_id = row_data.get("external_id") or row_data.get("_cluster_id", "")
+                        await self._dispatch_row(
+                            transport, connector, writeback_cfg,
+                            action, external_id, row_data, log, result
+                        )
 
-            await self._write_feedback(rows, result, log)
+                await self._write_feedback(rows, result, log)
 
-        except Exception as exc:
-            result.error_message = str(exc)
-            log.error("writeback_cycle_failed", error=str(exc))
-        finally:
-            async with self._pool.connection() as conn:
+            except Exception as exc:
+                result.error_message = str(exc)
+                log.error("writeback_cycle_failed", error=str(exc))
+            finally:
+                # Release the lock on the same connection that acquired it.
                 await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
                 await conn.commit()
 
@@ -90,7 +91,6 @@ class WritebackEngine:
 
     async def _fetch_delta_rows(
         self,
-        conn: psycopg.AsyncConnection,
         delta_table: str,
         log: object,
         result: WritebackResult,
@@ -98,18 +98,14 @@ class WritebackEngine:
         """Fetch up to 50 non-noop rows from the delta table. Returns None if table doesn't exist."""
         try:
             async with self._pool.connection() as fetch_conn:
-                rows_raw = await (await fetch_conn.execute(
-                    f"SELECT * FROM {delta_table} WHERE _action != 'noop' LIMIT 50"
-                )).fetchall()
-                if not rows_raw:
-                    return []
-                # Get column names
                 cur = await fetch_conn.execute(
                     f"SELECT * FROM {delta_table} WHERE _action != 'noop' LIMIT 50"
                 )
                 col_names = [desc[0] for desc in cur.description or []]
-                rows = [dict(zip(col_names, row)) for row in rows_raw]
-                return rows
+                rows_raw = await cur.fetchall()
+                if not rows_raw:
+                    return []
+                return [dict(zip(col_names, row)) for row in rows_raw]
         except psycopg.errors.UndefinedTable:
             logger.warning("delta_table_not_found", delta_table=delta_table)
             result.skipped = 1
@@ -182,7 +178,7 @@ class WritebackEngine:
         result: WritebackResult,
         log: object,
     ) -> None:
-        """Write feedback to inout_ops_writeback_result log table if it exists."""
+        """Write feedback to inout_ops_writeback_result log table."""
         if not rows:
             return
         try:

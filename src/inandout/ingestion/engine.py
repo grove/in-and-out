@@ -41,6 +41,7 @@ class SyncResult:
         self.records_inserted = 0
         self.records_updated = 0
         self.records_errored = 0
+        self.records_deleted = 0
         self.error_message: str | None = None
         self.status = "running"
 
@@ -58,21 +59,22 @@ class IngestionEngine:
         run_id = uuid.uuid4()
         log = logger.bind(connector=connector.name, datatype=datatype, run_id=str(run_id))
 
-        # Determine mode
+        # Use a single long-lived connection to hold the advisory lock for the entire sync.
+        # PostgreSQL advisory locks are session-scoped (connection-scoped): acquiring and
+        # releasing on different connections would leave the lock permanently held or make
+        # the unlock a silent no-op. Keeping one connection open guarantees correctness.
         async with self._pool.connection() as conn:
             existing_wm = await get_watermark(conn, connector.name, datatype)
-        is_incremental = (
-            existing_wm is not None
-            and ingestion_cfg.list.incremental is not None
-            and ingestion_cfg.list.incremental.enabled
-        )
-        mode = "incremental" if is_incremental else "full"
-        result = SyncResult(run_id, connector.name, datatype, mode)
+            is_incremental = (
+                existing_wm is not None
+                and ingestion_cfg.list.incremental is not None
+                and ingestion_cfg.list.incremental.enabled
+            )
+            mode = "incremental" if is_incremental else "full"
+            result = SyncResult(run_id, connector.name, datatype, mode)
 
-        log.info("sync_started", mode=mode, watermark=existing_wm)
+            log.info("sync_started", mode=mode, watermark=existing_wm)
 
-        async with self._pool.connection() as conn:
-            # Create sync run record
             await conn.execute(
                 """
                 INSERT INTO inout_ops_sync_run (id, connector, datatype, mode, status, started_at)
@@ -82,7 +84,7 @@ class IngestionEngine:
             )
             await conn.commit()
 
-            # Acquire advisory lock (non-blocking)
+            # Acquire advisory lock (non-blocking) on this connection.
             lock_key = _advisory_lock_key(connector.name, datatype)
             row = await (await conn.execute(
                 "SELECT pg_try_advisory_lock(%s)", [lock_key]
@@ -97,14 +99,16 @@ class IngestionEngine:
                 result.status = "skipped"
                 return result
 
-        try:
-            await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log)
-        except Exception as exc:
-            result.status = "failed"
-            result.error_message = str(exc)
-            log.error("sync_failed", error=str(exc))
-        finally:
-            async with self._pool.connection() as conn:
+            try:
+                await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log)
+            except Exception as exc:
+                result.status = "failed"
+                result.error_message = str(exc)
+                log.error("sync_failed", error=str(exc))
+            finally:
+                # Update sync_run record and release the lock on the SAME connection
+                # that acquired it, so the unlock is not a no-op.
+                status = result.status if result.status != "running" else "completed"
                 await conn.execute(
                     """
                     UPDATE inout_ops_sync_run SET
@@ -118,7 +122,7 @@ class IngestionEngine:
                     WHERE id = %s
                     """,
                     [
-                        result.status if result.status != "running" else "completed",
+                        status,
                         result.records_fetched,
                         result.records_inserted,
                         result.records_updated,
@@ -138,6 +142,7 @@ class IngestionEngine:
             fetched=result.records_fetched,
             inserted=result.records_inserted,
             updated=result.records_updated,
+            deleted=result.records_deleted,
         )
         return result
 
@@ -157,6 +162,7 @@ class IngestionEngine:
 
         table = source_table_name(connector.name, datatype)
         new_watermark: str | None = None
+        seen_ids: set[str] = set()
 
         async with HttpTransportAdapter(connector) as transport:
             async for page in transport.fetch_pages(ingestion_cfg.list, watermark=watermark):
@@ -174,6 +180,7 @@ class IngestionEngine:
                                 log.warning("missing_external_id", record_keys=list(record.keys()))
                                 continue
 
+                            seen_ids.add(external_id)
                             inserted, updated = await _upsert_record(
                                 conn, table, external_id, record, raw_hash, result.run_id
                             )
@@ -197,7 +204,59 @@ class IngestionEngine:
                                 conn, connector.name, datatype, wm_type, new_watermark, result.run_id
                             )
 
+        # Full-sync deletion detection: tombstone records not seen in this run.
+        # Guarded by a circuit breaker: skip if deletion would affect > 50% of existing
+        # records (signals a partial or failed fetch rather than genuine deletions).
+        if watermark is None and seen_ids:
+            await self._tombstone_missing(table, seen_ids, result, log)
+
         result.status = "completed"
+
+    async def _tombstone_missing(
+        self,
+        table: str,
+        seen_ids: set[str],
+        result: SyncResult,
+        log: Any,
+    ) -> None:
+        """Soft-delete source records that were not present in the latest full sync."""
+        async with self._pool.connection() as conn:
+            total_row = await (await conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE _deleted_at IS NULL"
+            )).fetchone()
+            total_existing = total_row[0] if total_row else 0
+
+            if total_existing == 0:
+                return
+
+            # Build the set of IDs to tombstone
+            rows = await (await conn.execute(
+                f"SELECT external_id FROM {table} WHERE _deleted_at IS NULL"
+            )).fetchall()
+            existing_ids = {r[0] for r in rows}
+            missing_ids = existing_ids - seen_ids
+
+            if not missing_ids:
+                return
+
+            deletion_ratio = len(missing_ids) / total_existing
+            if deletion_ratio > 0.5:
+                log.warning(
+                    "tombstone_circuit_breaker_tripped",
+                    missing=len(missing_ids),
+                    total=total_existing,
+                    ratio=round(deletion_ratio, 3),
+                )
+                return
+
+            async with conn.transaction():
+                for ext_id in missing_ids:
+                    await conn.execute(
+                        f"UPDATE {table} SET _deleted_at = NOW() WHERE external_id = %s AND _deleted_at IS NULL",
+                        [ext_id],
+                    )
+            result.records_deleted = len(missing_ids)
+            log.info("tombstone_pass_complete", deleted=len(missing_ids))
 
 
 def _extract_external_id(record: dict[str, Any], primary_key: Any) -> str | None:
@@ -243,11 +302,17 @@ async def _upsert_record(
         await conn.execute(
             f"""
             UPDATE {table}
-            SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s
+            SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s,
+                _deleted_at=NULL
             WHERE external_id=%s
             """,
             [data, data, run_id, raw_hash, external_id],
         )
         return 0, 1
     else:
-        return 0, 0  # no-op: same hash
+        # No-op: same hash. Clear tombstone if record reappeared.
+        await conn.execute(
+            f"UPDATE {table} SET _deleted_at=NULL WHERE external_id=%s AND _deleted_at IS NOT NULL",
+            [external_id],
+        )
+        return 0, 0

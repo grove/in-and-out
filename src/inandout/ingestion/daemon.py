@@ -17,6 +17,7 @@ from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_ingestion_tool_config
 from inandout.config.tool import IngestionToolConfig
 from inandout.ingestion.engine import IngestionEngine
+from inandout.ingestion.webhooks import handle_webhook
 from inandout.postgres.pool import create_pool
 
 logger = structlog.get_logger(__name__)
@@ -34,11 +35,34 @@ async def _ready(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ready", "connectors": []})
 
 
-def _build_health_app() -> Starlette:
-    return Starlette(routes=[
+def _build_app(
+    engine: IngestionEngine,
+    connector_configs: list,
+) -> Starlette:
+    """Build the Starlette app with health endpoints and per-connector webhook routes."""
+    from starlette.routing import Route
+
+    routes = [
         Route("/health", _health),
         Route("/ready", _ready),
-    ])
+    ]
+
+    # Register one POST route per connector that has a webhook config
+    for connector_file_cfg in connector_configs:
+        connector_cfg = connector_file_cfg.connector
+        webhook_cfg = getattr(connector_cfg, "webhook", None)
+        if webhook_cfg is None:
+            continue
+
+        # Capture loop variables in closure
+        def _make_handler(c_cfg: Any, w_cfg: Any) -> Any:
+            async def _webhook_handler(request: Request) -> Any:
+                return await handle_webhook(request, c_cfg, w_cfg, engine)
+            return _webhook_handler
+
+        routes.append(Route(webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"]))
+
+    return Starlette(routes=routes)
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +141,10 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     drain_secs = parse_duration(config.shutdown.drain_timeout)
     control_poll_secs = parse_duration(config.control_table.poll_interval)
 
-    # Build health server
+    # Build app (health + webhook routes)
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_health_app(), host=host, port=int(port_str), log_level="warning"
+        _build_app(engine, connector_configs), host=host, port=int(port_str), log_level="warning"
     )
     health_server = uvicorn.Server(health_server_config)
 
