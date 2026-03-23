@@ -65,6 +65,13 @@ app.add_typer(webhook_app, name="webhook")
 app.add_typer(api_app, name="api")
 app.add_typer(dead_letter_app, name="dead-letter")
 
+control_app = typer.Typer(
+    name="control",
+    help="Runtime control table commands — issue operator commands to running daemons.",
+    no_args_is_help=True,
+)
+app.add_typer(control_app, name="control")
+
 console = Console()
 err_console = Console(stderr=True, style="bold red")
 
@@ -1558,6 +1565,144 @@ def connector_publish(
     except Exception as exc:
         err_console.print(f"Publish failed: {exc}")
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# control send / list commands (Step 6 — runtime control table CLI)
+# ---------------------------------------------------------------------------
+
+_VALID_COMMANDS = {
+    "force_full_sync", "pause_connector", "resume_connector",
+    "requeue_dead_letter", "reset-watermark", "reload-config",
+    "reset-circuit-breaker", "resync", "trigger-writeback", "validate", "drain",
+}
+
+
+@control_app.command("send")
+def control_send(
+    command: str = typer.Option(..., "--command", "-c", help="Control command name."),
+    connector: Optional[str] = typer.Option(None, "--connector", help="Target connector name."),  # noqa: UP007
+    datatype: Optional[str] = typer.Option(None, "--datatype", help="Target datatype."),  # noqa: UP007
+    payload: Optional[str] = typer.Option(None, "--payload", help="JSON payload for the command."),  # noqa: UP007
+    target_tool: Optional[str] = typer.Option(None, "--target-tool", help="ingestion | writeback (optional)."),  # noqa: UP007
+    dsn: Optional[str] = typer.Option(None, "--dsn", envvar="INOUT_DATABASE_URL", help="PostgreSQL DSN."),  # noqa: UP007
+    issued_by: str = typer.Option("cli", "--issued-by", help="Operator identifier for audit trail."),
+) -> None:
+    """Insert a command into inout_ops_control and print the assigned row ID.
+
+    Supported commands: force_full_sync, pause_connector, resume_connector,
+    requeue_dead_letter, reset-watermark, reload-config, reset-circuit-breaker,
+    resync, trigger-writeback, validate, drain.
+    """
+    if command not in _VALID_COMMANDS:
+        err_console.print(
+            f"Unknown command: {command!r}. Valid commands: {', '.join(sorted(_VALID_COMMANDS))}"
+        )
+        raise typer.Exit(code=1)
+
+    import json
+    import anyio
+    import psycopg
+
+    payload_dict: dict = {}
+    if payload:
+        try:
+            payload_dict = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            err_console.print(f"Invalid --payload JSON: {exc}")
+            raise typer.Exit(code=1)
+
+    async def _run() -> None:
+        effective_dsn = dsn
+        if effective_dsn is None:
+            import os
+            effective_dsn = os.environ.get("INOUT_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        if not effective_dsn:
+            err_console.print("No database DSN. Set INOUT_DATABASE_URL or pass --dsn.")
+            raise typer.Exit(code=1)
+
+        import orjson
+        import uuid as _uuid
+
+        async with await psycopg.AsyncConnection.connect(effective_dsn) as conn:
+            payload_json = orjson.dumps(payload_dict).decode() if payload_dict else None
+            row = await (await conn.execute(
+                """
+                INSERT INTO inout_ops_control
+                    (id, connector, datatype, command, payload, target_tool, status, issued_by, issued_at)
+                VALUES
+                    (%s, %s, %s, %s, %s::jsonb, %s, 'pending', %s, NOW())
+                RETURNING id, status, issued_at
+                """,
+                [
+                    str(_uuid.uuid4()), connector, datatype, command,
+                    payload_json, target_tool, issued_by,
+                ],
+            )).fetchone()
+            await conn.commit()
+
+        if row:
+            console.print(
+                f"[green]Control command queued[/green]  "
+                f"id=[bold]{row[0]}[/bold]  status={row[1]}  issued_at={row[2]}"
+            )
+        else:
+            err_console.print("Failed to queue command (no row returned).")
+            raise typer.Exit(code=1)
+
+    anyio.run(_run)
+
+
+@control_app.command("list")
+def control_list(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status (pending|acknowledged|completed|failed)."),  # noqa: UP007
+    connector: Optional[str] = typer.Option(None, "--connector", help="Filter by connector name."),  # noqa: UP007
+    limit: int = typer.Option(20, "--limit", help="Maximum rows to return."),
+    dsn: Optional[str] = typer.Option(None, "--dsn", envvar="INOUT_DATABASE_URL", help="PostgreSQL DSN."),  # noqa: UP007
+) -> None:
+    """List recent entries in inout_ops_control."""
+    import anyio
+    import psycopg
+
+    async def _run() -> None:
+        effective_dsn = dsn
+        if effective_dsn is None:
+            import os
+            effective_dsn = os.environ.get("INOUT_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        if not effective_dsn:
+            err_console.print("No database DSN. Set INOUT_DATABASE_URL or pass --dsn.")
+            raise typer.Exit(code=1)
+
+        clauses = ["1=1"]
+        params: list = []
+        if status:
+            clauses.append("status = %s")
+            params.append(status)
+        if connector:
+            clauses.append("connector = %s")
+            params.append(connector)
+        params.append(limit)
+
+        async with await psycopg.AsyncConnection.connect(effective_dsn) as conn:
+            rows = await (await conn.execute(
+                f"""
+                SELECT id, connector, datatype, command, status, issued_by, issued_at, completed_at
+                FROM inout_ops_control
+                WHERE {' AND '.join(clauses)}
+                ORDER BY issued_at DESC
+                LIMIT %s
+                """,
+                params,
+            )).fetchall()
+
+        table = Table(title="Control Commands")
+        for col in ("id", "connector", "datatype", "command", "status", "issued_by", "issued_at", "completed_at"):
+            table.add_column(col)
+        for row in rows:
+            table.add_row(*[str(v) if v is not None else "" for v in row])
+        console.print(table)
+
+    anyio.run(_run)
 
 
 if __name__ == "__main__":

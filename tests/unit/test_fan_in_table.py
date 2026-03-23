@@ -177,7 +177,7 @@ async def test_upsert_record_shared_table_update_path():
     mock_conn = AsyncMock()
     mock_cursor = AsyncMock()
     # First call (SELECT): returns existing row with different hash
-    existing_row = ("old_hash_xyz",)
+    existing_row = ("old_hash_xyz", None)  # (hash, _deleted_at)
     mock_cursor.fetchone = AsyncMock(side_effect=[existing_row])
 
     call_count = 0
@@ -187,7 +187,7 @@ async def test_upsert_record_shared_table_update_path():
         call_count += 1
         executed_sqls.append(sql)
         if call_count == 1:
-            # SELECT call returns old hash
+            # SELECT call returns old hash (not tombstoned)
             cur = AsyncMock()
             cur.fetchone = AsyncMock(return_value=existing_row)
             return cur

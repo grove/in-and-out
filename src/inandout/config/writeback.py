@@ -119,6 +119,8 @@ class WritebackConfig(BaseModel):
     # T2 #6: CRDT-based conflict resolution strategy ('lww_register' | 'g_counter' | None)
     crdt_type: str | None = None
     crdt_ts_field: str = "_updated_at"  # field carrying the timestamp for lww_register
+    # T2 #31: delete safety guard — abort the batch when delete-action count exceeds this limit
+    max_deletes_per_batch: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_crdt_ts_field_requires_lww(self) -> "WritebackConfig":

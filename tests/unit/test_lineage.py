@@ -30,7 +30,10 @@ async def test_upsert_record_stores_lineage():
         executed_params.append(params or [])
         if "SELECT _raw_hash" in sql:
             return mock_cursor
-        return MagicMock()
+        mock_result = MagicMock()
+        if "INSERT INTO" in sql:
+            mock_result.rowcount = 1  # simulate a real insert (no concurrent conflict)
+        return mock_result
 
     mock_conn.execute = AsyncMock(side_effect=_execute_side_effect)
 
@@ -70,7 +73,7 @@ async def test_upsert_record_stores_lineage_on_update():
     executed_sqls: list[str] = []
 
     mock_cursor_select = MagicMock()
-    mock_cursor_select.fetchone = AsyncMock(return_value=("oldhash",))  # Existing row with different hash
+    mock_cursor_select.fetchone = AsyncMock(return_value=("oldhash", None))  # Existing row with different hash, not tombstoned
 
     mock_conn = AsyncMock()
 
@@ -121,7 +124,10 @@ async def test_upsert_record_without_lineage():
     async def _execute_side_effect(sql, params=None):
         if "SELECT _raw_hash" in sql:
             return mock_cursor
-        return MagicMock()
+        mock_result = MagicMock()
+        if "INSERT INTO" in sql:
+            mock_result.rowcount = 1
+        return mock_result
 
     mock_conn.execute = AsyncMock(side_effect=_execute_side_effect)
 

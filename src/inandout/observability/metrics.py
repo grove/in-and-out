@@ -100,11 +100,11 @@ replication_slot_lag_bytes: Gauge = _gauge(
 )
 
 
-# Soft-delete resurrection counter (A6)
+# Soft-delete resurrection counter (A6/T1 #41)
 records_resurrected_total: Counter = _counter(
     "inout_records_resurrected_total",
     "Total records resurrected from soft-delete tombstone state",
-    ["connector", "datatype"],
+    ["table"],
 )
 
 # Source unavailability counter (A8)

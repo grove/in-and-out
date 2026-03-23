@@ -20,6 +20,7 @@ from inandout.observability.metrics import (
     pagination_drift_events_total,
     quality_violations_total,
     records_processed_total,
+    records_resurrected_total,
     sync_lag_seconds,
 )
 from inandout.plugins.hooks import apply_hooks
@@ -1260,7 +1261,7 @@ async def _upsert_record(
     if connector_col is not None:
         # Fan-in shared table path: conflict key is (external_id, _connector)
         row = await (await conn.execute(
-            f"SELECT _raw_hash FROM {table} WHERE external_id = %s AND _connector = %s",
+            f"SELECT _raw_hash, _deleted_at FROM {table} WHERE external_id = %s AND _connector = %s",
             [external_id, connector_col],
         )).fetchone()
 
@@ -1280,6 +1281,7 @@ async def _upsert_record(
             )
             return 1, 0
         elif row[0] != raw_hash:
+            was_tombstoned = row[1] is not None
             await conn.execute(
                 f"""
                 UPDATE {table}
@@ -1289,30 +1291,47 @@ async def _upsert_record(
                 """,
                 [data, data, run_id, raw_hash, lineage_json, external_id, connector_col],
             )
+            if was_tombstoned:
+                _emit_resurrection(table, external_id)
             return 0, 1
         else:
+            was_tombstoned = row[1] is not None
             await conn.execute(
                 f"UPDATE {table} SET _deleted_at=NULL "
                 f"WHERE external_id=%s AND _connector=%s AND _deleted_at IS NOT NULL",
                 [external_id, connector_col],
             )
+            if was_tombstoned:
+                _emit_resurrection(table, external_id)
             return 0, 0
 
     # Standard single-connector path
     row = await (await conn.execute(
-        f"SELECT _raw_hash FROM {table} WHERE external_id = %s", [external_id]
+        f"SELECT _raw_hash, _deleted_at FROM {table} WHERE external_id = %s", [external_id]
     )).fetchone()
 
     if row is None:
-        await conn.execute(
+        # ON CONFLICT DO NOTHING makes the INSERT safe under concurrent webhook+poll overlap.
+        cur = await conn.execute(
             f"""
             INSERT INTO {table} (external_id, data, raw, _ingested_at, _sync_run_id, _raw_hash, _lineage)
             VALUES (%s, %s, %s, NOW(), %s, %s, %s)
+            ON CONFLICT (external_id) DO NOTHING
             """,
             [external_id, data, data, run_id, raw_hash, lineage_json],
         )
-        return 1, 0
-    elif row[0] != raw_hash:
+        if cur.rowcount == 1:
+            return 1, 0
+        # Concurrent insert happened; fall through to treat as an update
+        row = await (await conn.execute(
+            f"SELECT _raw_hash, _deleted_at FROM {table} WHERE external_id = %s", [external_id]
+        )).fetchone()
+        if row is None or row[0] == raw_hash:
+            return 0, 0
+        # Concurrent insert has a different hash — update with our payload
+
+    if row[0] != raw_hash:
+        was_tombstoned = row[1] is not None
         await conn.execute(
             f"""
             UPDATE {table}
@@ -1322,14 +1341,28 @@ async def _upsert_record(
             """,
             [data, data, run_id, raw_hash, lineage_json, external_id],
         )
+        if was_tombstoned:
+            _emit_resurrection(table, external_id)
         return 0, 1
     else:
         # No-op: same hash. Clear tombstone if record reappeared.
+        was_tombstoned = row[1] is not None
         await conn.execute(
             f"UPDATE {table} SET _deleted_at=NULL WHERE external_id=%s AND _deleted_at IS NOT NULL",
             [external_id],
         )
+        if was_tombstoned:
+            _emit_resurrection(table, external_id)
         return 0, 0
+
+
+def _emit_resurrection(table: str, external_id: str) -> None:
+    """Emit resurrection metric and log event (T1 #41)."""
+    logger.info("record_resurrected", table=table, external_id=external_id)
+    try:
+        records_resurrected_total.labels(table=table).inc()
+    except Exception:
+        pass
 
 
 async def _write_history_record(

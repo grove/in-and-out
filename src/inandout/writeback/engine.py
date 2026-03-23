@@ -174,6 +174,21 @@ class WritebackEngine:
 
                 semaphore = anyio.Semaphore(effective_max_writes)
 
+                # T2 #31: delete safety guard — abort deletes when batch exceeds limit
+                max_deletes = getattr(writeback_cfg, "max_deletes_per_batch", None)
+                if max_deletes is not None and rows:
+                    delete_count = sum(1 for r in rows if r.get("_action") == "delete")
+                    if delete_count > max_deletes:
+                        log.warning(
+                            "writeback_delete_safety_guard_tripped",
+                            delete_count=delete_count,
+                            max_deletes_per_batch=max_deletes,
+                            connector=connector.name,
+                            datatype=datatype,
+                        )
+                        rows = [r for r in rows if r.get("_action") != "delete"]
+                        result.skipped += delete_count
+
                 async with HttpTransportAdapter(connector) as transport:
                     # Group rows by external_id to preserve per-id ordering
                     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -355,6 +370,26 @@ class WritebackEngine:
         result: WritebackResult,
     ) -> None:
         """Dispatch one delta row via HTTP."""
+        # T2 #25: check writeback circuit breaker before dispatching
+        from inandout.transport.circuit_breaker import get_circuit_breaker, CircuitState
+        _cb_cfg = getattr(connector, "circuit_breaker", None) or {}
+        _cb = get_circuit_breaker(
+            connector.name,
+            result.datatype,
+            failure_threshold=int(_cb_cfg.get("failure_threshold", 5)),
+            recovery_timeout=float(_cb_cfg.get("recovery_timeout", 60.0)),
+        )
+        if not _cb.allow_request():
+            log.warning(
+                "writeback_circuit_breaker_open_skip",
+                connector=connector.name,
+                datatype=result.datatype,
+                external_id=external_id,
+                state=_cb.state,
+            )
+            result.skipped += 1
+            return
+
         # Fan-in join enrichment before dispatching
         if writeback_cfg.join_sources:
             from inandout.writeback.fan_in import enrich_with_join_sources
@@ -396,6 +431,7 @@ class WritebackEngine:
             result.skipped += 1
 
         try:
+            _http_write_ok = False  # T2 #25: set True when an HTTP write completes
             if action == "insert":
                 if ops.insert is None:
                     result.skipped += 1
@@ -461,6 +497,7 @@ class WritebackEngine:
                         action, external_id, payload, result,
                     )
 
+                _http_write_ok = True
                 result.processed += 1
 
             elif action == "update":
@@ -903,6 +940,7 @@ class WritebackEngine:
                         action, external_id, sent_payload, result,
                     )
 
+                _http_write_ok = True
                 result.processed += 1
 
             elif action == "delete":
@@ -924,6 +962,7 @@ class WritebackEngine:
                 else:
                     await transport._request(ops.delete.method.upper(), path)
                 result._audit_entries.append((external_id, action, None, None))
+                _http_write_ok = True
                 result.processed += 1
 
             elif action == "archive":
@@ -946,6 +985,7 @@ class WritebackEngine:
                 else:
                     await transport._request(ops.archive.method.upper(), path, json=payload)
                 result._audit_entries.append((external_id, action, payload, None))
+                _http_write_ok = True
                 result.processed += 1
 
             elif action == "merge":
@@ -1012,6 +1052,7 @@ class WritebackEngine:
                     )
 
                 result._audit_entries.append((surviving_id, action, payload, None))
+                _http_write_ok = True
                 result.processed += 1
 
             elif action == "split":
@@ -1066,6 +1107,7 @@ class WritebackEngine:
 
                 logger.info("split_complete", source_id=external_id, child_count=len(created_ids))
                 result._audit_entries.append((external_id, action, {"_split_rows": len(split_rows)}, None))
+                _http_write_ok = True
                 result.processed += 1
 
             else:
@@ -1074,9 +1116,14 @@ class WritebackEngine:
 
         except httpx.HTTPError as exc:
             logger.error("writeback_http_error", action=action, external_id=external_id, error=str(exc))
+            _cb.record_failure()
             result.failed += 1
             result._failed_external_ids.add(external_id)
             result._failed_entries.append((external_id, action, str(exc)))
+        else:
+            # No HTTP exception — if an actual write was made, record success
+            if _http_write_ok:
+                _cb.record_success()
 
     async def _post_write_verify(
         self,
