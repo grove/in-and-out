@@ -70,6 +70,13 @@ sync_sla_violated: Gauge = _gauge(
     ["connector", "datatype"],
 )
 
+# Data quality violations counter
+quality_violations_total: Counter = _counter(
+    "inout_quality_violations_total",
+    "Total data quality rule violations by connector, datatype, and rule",
+    ["connector", "datatype", "rule"],
+)
+
 
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""

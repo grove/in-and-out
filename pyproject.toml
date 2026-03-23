@@ -137,6 +137,9 @@ plugins = ["pydantic.mypy"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--tb=short"
+markers = [
+    "acceptance: marks tests as acceptance tests requiring real external APIs (deselect with '-m not acceptance')",
+]
 
 [tool.coverage.run]
 source = ["src/inandout"]

@@ -14,7 +14,8 @@ from psycopg_pool import AsyncConnectionPool
 from inandout.config.connector import ConnectorConfig, DatatypeConfig
 from inandout.config.ingestion import HistoryMode, IngestionConfig
 from inandout.ingestion.field_mapper import apply_field_mappings
-from inandout.observability.metrics import records_processed_total, sync_lag_seconds
+from inandout.ingestion.quality import validate_record
+from inandout.observability.metrics import quality_violations_total, records_processed_total, sync_lag_seconds
 from inandout.plugins.hooks import apply_hooks
 from inandout.postgres.schema_drift import detect_schema_drift, prune_orphan_columns
 from inandout.postgres.schema import (
@@ -278,6 +279,8 @@ class IngestionEngine:
         dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
         new_watermark: str | None = None
         seen_ids: set[str] = set()
+        # Per-batch unique-value tracker for quality rules
+        quality_seen: dict[str, set] = {}
 
         async with HttpTransportAdapter(connector) as transport:
             async for page in transport.fetch_pages(ingestion_cfg.list, watermark=watermark):
@@ -300,6 +303,28 @@ class IngestionEngine:
                             if record is None:
                                 # filter hook dropped this record
                                 continue
+
+                            # Data quality validation
+                            if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
+                                violations = validate_record(record, dtype_cfg.quality_rules, quality_seen)
+                                if violations:
+                                    result.records_errored += 1
+                                    for v in violations:
+                                        try:
+                                            quality_violations_total.labels(
+                                                connector=connector.name,
+                                                datatype=datatype,
+                                                rule=v.rule,
+                                            ).inc()
+                                        except Exception:
+                                            pass
+                                    external_id_for_dl = _extract_external_id(record, ingestion_cfg.primary_key)
+                                    await _write_dead_letter(
+                                        conn, dl_table, external_id_for_dl, record,
+                                        str([str(v) for v in violations]),
+                                        "quality_violation", result.run_id,
+                                    )
+                                    continue
 
                             raw_hash = _compute_raw_hash(record)
                             external_id = _extract_external_id(record, ingestion_cfg.primary_key)

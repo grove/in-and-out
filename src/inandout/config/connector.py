@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from inandout.config.auth import AuthConfig
 from inandout.config.field_mapping import FieldMapping
 from inandout.config.ingestion import IngestionConfig
+from inandout.config.quality import QualityRule
 from inandout.config.webhooks import WebhookConfig
 from inandout.config.writeback import WritebackConfig
 
@@ -113,11 +114,19 @@ class TimeoutConfig(BaseModel):
     write: str | None = None
 
 
+class RetryBudgetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_attempts: int = 1000
+    window_secs: float = 3600.0  # 1 hour rolling window
+
+
 class ConnectionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: str
     timeout: TimeoutConfig | None = None
+    retry_budget: RetryBudgetConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +180,7 @@ class DatatypeConfig(BaseModel):
     writeback: WritebackConfig | None = None
     field_mappings: list[FieldMapping] = []
     strict_field_mapping: bool = False
+    quality_rules: QualityRule | None = None
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":

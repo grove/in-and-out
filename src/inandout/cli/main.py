@@ -45,11 +45,18 @@ webhook_app = typer.Typer(
     no_args_is_help=True,
 )
 
+api_app = typer.Typer(
+    name="api",
+    help="API specification and client SDK generation commands.",
+    no_args_is_help=True,
+)
+
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(writeback_app, name="writeback")
 app.add_typer(db_app, name="db")
 app.add_typer(connector_app, name="connector")
 app.add_typer(webhook_app, name="webhook")
+app.add_typer(api_app, name="api")
 
 console = Console()
 err_console = Console(stderr=True, style="bold red")
@@ -692,6 +699,113 @@ def connector_status(
     except Exception as exc:
         err_console.print(f"Failed to fetch connector status: {exc}")
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# api sub-commands (Step 54)
+# ---------------------------------------------------------------------------
+
+
+@api_app.command("spec")
+def api_spec(
+    output: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--output", "-o",
+        help="Path to write OpenAPI JSON (default: stdout).",
+    ),
+) -> None:
+    """Dump the OpenAPI spec as JSON to file or stdout."""
+    import json
+
+    from fastapi import FastAPI
+    from inandout.api import build_api_router
+
+    # Build a minimal FastAPI app without a real pool
+    spec_app = FastAPI(title="in-and-out management API", version="0.1.0")
+    router = build_api_router(pool=None)
+    spec_app.include_router(router, prefix="/api")
+
+    spec = spec_app.openapi()
+    spec_json = json.dumps(spec, indent=2)
+
+    if output:
+        out_path = Path(output)
+        out_path.write_text(spec_json)
+        console.print(f"[green]OpenAPI spec written to[/green] {out_path}")
+    else:
+        typer.echo(spec_json)
+
+
+@api_app.command("generate-sdk")
+def api_generate_sdk(
+    lang: str = typer.Option(
+        ...,
+        "--lang",
+        help="Target language: python|typescript|go",
+    ),
+    output: str = typer.Option(
+        ...,
+        "--output",
+        help="Output directory for generated SDK.",
+    ),
+    config: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--config",
+        help="Path to openapi-generator config file.",
+    ),
+) -> None:
+    """Generate a client SDK from the OpenAPI spec using openapi-generator-cli."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    from fastapi import FastAPI
+    from inandout.api import build_api_router
+
+    # Check for openapi-generator-cli
+    generator = shutil.which("openapi-generator-cli")
+    if generator is None:
+        err_console.print(
+            "openapi-generator-cli not found on PATH.\n"
+            "Install it via: npm install -g @openapitools/openapi-generator-cli\n"
+            "Or: brew install openapi-generator"
+        )
+        raise typer.Exit(code=1)
+
+    # Build spec
+    spec_app = FastAPI(title="in-and-out management API", version="0.1.0")
+    router = build_api_router(pool=None)
+    spec_app.include_router(router, prefix="/api")
+    spec = spec_app.openapi()
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+        json.dump(spec, tmp, indent=2)
+        tmp_path = tmp.name
+
+    try:
+        cmd = [
+            generator,
+            "generate",
+            "-i", tmp_path,
+            "-g", f"{lang}-experimental",
+            "-o", output,
+        ]
+        if config:
+            cmd.extend(["-c", config])
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            err_console.print(f"SDK generation failed:\n{result.stderr}")
+            raise typer.Exit(code=1)
+
+        console.print(f"[green]SDK generated successfully[/green] → {output}")
+    finally:
+        import os
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

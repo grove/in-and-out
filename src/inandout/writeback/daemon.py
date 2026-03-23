@@ -71,6 +71,42 @@ async def _writeback_polling_loop(
         await anyio.sleep(interval_secs)
 
 
+async def _writeback_loop_streaming(
+    engine: WritebackEngine,
+    pool: Any,
+    connector_cfg: Any,
+    datatype: str,
+    writeback_cfg: Any,
+    delta_table: str,
+) -> None:
+    """Streaming writeback mode: run a cycle on each LISTEN/NOTIFY notification."""
+    from inandout.writeback.notify import listen_for_deltas
+
+    log = logger.bind(connector=connector_cfg.name, datatype=datatype)
+    log.info("writeback_streaming_loop_started", delta_table=delta_table)
+    try:
+        async for payload in listen_for_deltas(pool):
+            # payload format: "connector:datatype"
+            if payload and ":" in payload:
+                notified_connector, notified_datatype = payload.split(":", 1)
+                if notified_connector != connector_cfg.name or notified_datatype != datatype:
+                    continue
+            try:
+                result = await engine.run_writeback_cycle(
+                    connector_cfg, datatype, writeback_cfg, delta_table
+                )
+                log.info(
+                    "writeback_notify_cycle_complete",
+                    processed=result.processed,
+                    skipped=result.skipped,
+                    failed=result.failed,
+                )
+            except Exception as exc:
+                log.error("writeback_notify_cycle_error", error=str(exc))
+    except Exception as exc:
+        log.error("writeback_streaming_loop_error", error=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Control table poller
 # ---------------------------------------------------------------------------
@@ -154,15 +190,26 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                     if dtype_cfg.writeback is None:
                         continue
                     delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
-                    tg.start_soon(
-                        _writeback_polling_loop,
-                        engine,
-                        connector_cfg,
-                        dtype_name,
-                        dtype_cfg.writeback,
-                        delta_table,
-                        default_interval_secs,
-                    )
+                    if dtype_cfg.writeback.streaming:
+                        tg.start_soon(
+                            _writeback_loop_streaming,
+                            engine,
+                            pool,
+                            connector_cfg,
+                            dtype_name,
+                            dtype_cfg.writeback,
+                            delta_table,
+                        )
+                    else:
+                        tg.start_soon(
+                            _writeback_polling_loop,
+                            engine,
+                            connector_cfg,
+                            dtype_name,
+                            dtype_cfg.writeback,
+                            delta_table,
+                            default_interval_secs,
+                        )
     finally:
         log.info("daemon_stopping")
         await pool.close()

@@ -63,6 +63,15 @@ class OperationsConfig(BaseModel):
     upsert: OperationConfig | None = None
 
 
+class JoinSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    connector: str
+    datatype: str
+    join_key: str  # column in both this source and the primary delta table
+    fields: list[str]  # columns to pull from this source into the payload
+
+
 class WritebackConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -76,6 +85,8 @@ class WritebackConfig(BaseModel):
     etag_header: str = "ETag"
     if_match_header: str = "If-Match"
     diff_fields: bool = False
+    streaming: bool = False
+    join_sources: list[JoinSource] = []
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":

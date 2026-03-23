@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from inandout.alerting.config import AlertingConfig
 from inandout.config._duration import parse_duration
 
 
@@ -206,6 +207,7 @@ class IngestionToolConfig(BaseModel):
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     schema_registry_dir: str | None = None
+    alerting: AlertingConfig = Field(default_factory=AlertingConfig)
 
 
 class _WritebackHealthServerConfig(BaseModel):

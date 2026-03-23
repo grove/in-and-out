@@ -159,6 +159,11 @@ class WritebackEngine:
         result: WritebackResult,
     ) -> None:
         """Dispatch one delta row via HTTP."""
+        # Fan-in join enrichment before dispatching
+        if writeback_cfg.join_sources:
+            from inandout.writeback.fan_in import enrich_with_join_sources
+            row = await enrich_with_join_sources(self._pool, row, writeback_cfg.join_sources)
+
         ops = writeback_cfg.operations
 
         def interpolate_path(path: str) -> str:

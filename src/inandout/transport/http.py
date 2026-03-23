@@ -112,10 +112,21 @@ class HttpTransportAdapter:
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Issue a request with retry/backoff logic."""
         from inandout.observability.metrics import http_errors_total
+        from inandout.transport.retry_budget import RetryBudgetExhaustedError, get_retry_budget
 
         max_retries = self._max_retries
         attempt = 0
         last_exc: Exception | None = None
+
+        # Resolve retry budget if configured
+        retry_budget = None
+        retry_budget_cfg = self._connector.connection.retry_budget
+        if retry_budget_cfg is not None:
+            retry_budget = get_retry_budget(
+                self._connector.name,
+                retry_budget_cfg.max_attempts,
+                retry_budget_cfg.window_secs,
+            )
 
         while attempt <= max_retries:
             try:
@@ -131,6 +142,13 @@ class HttpTransportAdapter:
                         ).inc()
                     except Exception:
                         pass
+                    # Check budget before retrying
+                    if retry_budget is not None and attempt > 0:
+                        allowed = await retry_budget.consume()
+                        if not allowed:
+                            raise RetryBudgetExhaustedError(
+                                f"Retry budget exhausted for connector {self._connector.name!r}"
+                            )
                     wait = retry_after_seconds(exc) or (2 ** attempt)
                     await anyio.sleep(min(wait, 60.0))
                     attempt += 1
@@ -139,6 +157,9 @@ class HttpTransportAdapter:
 
                 resp.raise_for_status()
                 return resp
+
+            except RetryBudgetExhaustedError:
+                raise
 
             except httpx.HTTPStatusError as exc:
                 try:
@@ -151,6 +172,13 @@ class HttpTransportAdapter:
                     pass
                 ec = classify_http_error(exc)
                 if ec == ErrorClass.transient and attempt < max_retries:
+                    # Check budget before retrying
+                    if retry_budget is not None:
+                        allowed = await retry_budget.consume()
+                        if not allowed:
+                            raise RetryBudgetExhaustedError(
+                                f"Retry budget exhausted for connector {self._connector.name!r}"
+                            )
                     wait = min(2 ** attempt, 60.0)
                     await anyio.sleep(wait)
                     attempt += 1
@@ -160,6 +188,13 @@ class HttpTransportAdapter:
 
             except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as exc:
                 if attempt < max_retries:
+                    # Check budget before retrying
+                    if retry_budget is not None:
+                        allowed = await retry_budget.consume()
+                        if not allowed:
+                            raise RetryBudgetExhaustedError(
+                                f"Retry budget exhausted for connector {self._connector.name!r}"
+                            )
                     wait = min(2 ** attempt, 60.0)
                     await anyio.sleep(wait)
                     attempt += 1
