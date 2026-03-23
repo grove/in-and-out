@@ -234,6 +234,7 @@ class IngestionToolConfig(BaseModel):
     event_output: Any = Field(default_factory=lambda: None)  # EventOutputConfig | None
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     federation: FederationConfig = Field(default_factory=FederationConfig)
+    drain_timeout_secs: float = 30.0  # B8: max time to drain in-flight ops on SIGTERM
 
 
 class _WritebackHealthServerConfig(BaseModel):
@@ -268,3 +269,4 @@ class WritebackToolConfig(BaseModel):
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     replication_slot: ReplicationSlotConfig = Field(default_factory=ReplicationSlotConfig)
+    drain_timeout_secs: float = 30.0  # B8: max time to drain in-flight ops on SIGTERM

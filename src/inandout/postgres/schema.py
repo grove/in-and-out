@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import psycopg
 
+# Current migration count (migrations 001–018); checked at startup (B7)
+SCHEMA_VERSION: int = 18
+
 
 # Table naming convention per GOAL.md
 def source_table_name(connector: str, datatype: str, namespace: str = "public") -> str:

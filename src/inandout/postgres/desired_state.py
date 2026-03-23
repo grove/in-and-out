@@ -84,8 +84,15 @@ async def ensure_desired_state_table(
     datatype: str,
     namespace: str = "public",
 ) -> None:
-    """Create the desired-state table if it doesn't exist."""
+    """Create the desired-state table if it doesn't exist.
+
+    Also sets REPLICA IDENTITY FULL so logical replication change events carry
+    full before/after row values (T2 #22).
+    """
+    table = desired_state_table_name(connector, datatype, namespace)
     await conn.execute(desired_state_table_ddl(connector, datatype, namespace))
+    # Idempotent — safe to call on existing tables
+    await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
 
 
 async def ensure_lwstate_table(
@@ -94,8 +101,13 @@ async def ensure_lwstate_table(
     datatype: str,
     namespace: str = "public",
 ) -> None:
-    """Create the last-written-state table if it doesn't exist."""
+    """Create the last-written-state table if it doesn't exist.
+
+    Also sets REPLICA IDENTITY FULL (T2 #22).
+    """
+    table = lwstate_table_name(connector, datatype, namespace)
     await conn.execute(lwstate_table_ddl(connector, datatype, namespace))
+    await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
 
 
 async def upsert_desired_state(

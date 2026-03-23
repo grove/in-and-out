@@ -82,6 +82,18 @@ class JoinSource(BaseModel):
     fields: list[str]  # columns to pull from this source into the payload
 
 
+class BatchResponseConfig(BaseModel):
+    """Config for parsing partial-success batch API responses (T2 #29)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success_path: str | None = None        # dot-notation path to array of results in response body
+    record_id_path: str = "id"             # path to external_id within each result object
+    status_path: str = "status"            # path to per-record status
+    success_statuses: list[str] = ["ok", "success", "200"]
+    error_path: str | None = None          # path to per-record error message
+
+
 class WritebackConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -101,6 +113,7 @@ class WritebackConfig(BaseModel):
     idempotency_key_header: str | None = None  # e.g. "Idempotency-Key"
     enable_crash_recovery: bool = True  # skip already-sent rows from audit log on restart
     use_desired_state_table: bool = False  # read delta rows from inout_dst_* instead of _delta_*
+    batch_response: BatchResponseConfig | None = None  # B4: partial-success batch response parsing
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":
