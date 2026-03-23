@@ -49,6 +49,7 @@ def source_table_ddl(connector: str, datatype: str, namespace: str = "public") -
     _schema_version INTEGER NOT NULL DEFAULT 1,
     _source_version TEXT,
     _last_written   JSONB,
+    _lineage        JSONB,
     PRIMARY KEY (external_id)
 );
 CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_ingested_at_idx ON {table} (_ingested_at);""".strip()
@@ -108,6 +109,11 @@ async def ensure_source_table(
 ) -> None:
     """Create the source table for a connector/datatype pair if it doesn't exist."""
     await conn.execute(source_table_ddl(connector, datatype, namespace))
+    # Ensure _lineage column exists on older tables (ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
+    table = source_table_name(connector, datatype, namespace)
+    await conn.execute(
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _lineage JSONB"
+    )
 
 
 async def ensure_source_history_table(

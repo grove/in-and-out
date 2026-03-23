@@ -278,6 +278,11 @@ def ingest_dry_run(
         "--limit",
         help="Maximum number of records to preview per datatype.",
     ),
+    env: str = typer.Option(
+        "production",
+        "--env",
+        help="Environment to run against: production (default) or staging.",
+    ),
 ) -> None:
     """Fetch ONE page from the real API and preview records without writing to DB."""
     import anyio
@@ -312,12 +317,25 @@ def ingest_dry_run(
 
     async def _run_dry_run() -> list[dict]:
         """Run the dry-run fetches and return preview rows."""
+        from inandout.ingestion.dry_run import _patch_base_url
         from inandout.plugins.hooks import apply_hooks
         from inandout.transport.http import HttpTransportAdapter
 
         previews: list[dict] = []
 
-        async with HttpTransportAdapter(connector_cfg) as transport:
+        # Resolve connector config for the target environment
+        fetch_connector_cfg = connector_cfg
+        if env == "staging":
+            if connector_cfg.connection.staging_base_url is None:
+                raise ValueError(
+                    f"Connector '{connector_cfg.name}' has no staging_base_url configured. "
+                    "Set connection.staging_base_url in the connector YAML."
+                )
+            fetch_connector_cfg = _patch_base_url(
+                connector_cfg, connector_cfg.connection.staging_base_url
+            )
+
+        async with HttpTransportAdapter(fetch_connector_cfg) as transport:
             for dtype_name in dtype_names:
                 dtype_cfg = connector_cfg.datatypes[dtype_name]
                 if dtype_cfg.ingestion is None:
@@ -373,7 +391,8 @@ def ingest_dry_run(
         from inandout.postgres.schema import source_table_name
         table_name = source_table_name(connector_cfg.name, dtype_name)
 
-        preview_table = Table(title=f"Dry-run: {connector_cfg.name} / {dtype_name}")
+        env_label = f" [{env}]" if env != "production" else ""
+        preview_table = Table(title=f"Dry-run: {connector_cfg.name} / {dtype_name}{env_label}")
         preview_table.add_column("external_id", style="cyan")
         preview_table.add_column("action", style="bold")
         preview_table.add_column("field_count")
@@ -1287,6 +1306,243 @@ def migrate_connector(
     for m in migrations:
         table.add_row("  Migration", f"{m.from_version} → {m.to_version}: {m.description}")
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# diff command (Step 82)
+# ---------------------------------------------------------------------------
+
+
+@app.command("diff")
+def diff_runs(
+    connector: str = typer.Option(..., "--connector", help="Connector name."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name."),
+    run_a: str = typer.Option(..., "--run-a", help="UUID of the first (older) sync run."),
+    run_b: str = typer.Option(..., "--run-b", help="UUID of the second (newer) sync run."),
+    config: str = typer.Option(
+        "config/ingestion.yaml",
+        "--config", "-c",
+        help="Path to ingestion tool config YAML.",
+    ),
+    format: str = typer.Option(
+        "table",
+        "--format",
+        help="Output format: table|json",
+    ),
+) -> None:
+    """Compare records between two sync runs and show what changed."""
+    import anyio
+    import json as _json
+    from inandout.config.loader import load_ingestion_tool_config
+    from inandout.diff.engine import diff_sync_runs
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_ingestion_tool_config(cfg_path)
+
+    async def _run() -> None:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            diff = await diff_sync_runs(pool, connector, datatype, run_a, run_b)
+        finally:
+            await pool.close()
+
+        if format == "json":
+            import dataclasses
+            typer.echo(_json.dumps(dataclasses.asdict(diff), indent=2))
+            return
+
+        summary = Table(title=f"Sync Run Diff: {connector}/{datatype}")
+        summary.add_column("Metric", style="cyan")
+        summary.add_column("Count", style="bold")
+        summary.add_row("Added", str(len(diff.added)))
+        summary.add_row("Removed", str(len(diff.removed)))
+        summary.add_row("Changed", str(len(diff.changed)))
+        summary.add_row("Unchanged", str(diff.unchanged_count))
+        console.print(summary)
+
+        if diff.added:
+            console.print(f"\n[green]Added ({len(diff.added)}):[/green] {', '.join(diff.added[:10])}")
+        if diff.removed:
+            console.print(f"[red]Removed ({len(diff.removed)}):[/red] {', '.join(diff.removed[:10])}")
+        if diff.changed:
+            changed_table = Table(title="Changed records")
+            changed_table.add_column("External ID", style="cyan")
+            changed_table.add_column("Fields Changed")
+            for entry in diff.changed[:20]:
+                changed_table.add_row(
+                    str(entry["external_id"]),
+                    ", ".join(entry["fields_changed"]),
+                )
+            console.print(changed_table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Diff failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# connector test command (Step 83)
+# ---------------------------------------------------------------------------
+
+
+@connector_app.command("test")
+def connector_test(
+    connector: str = typer.Option(..., "--connector", help="Path to connector YAML file."),
+    output: str = typer.Option(
+        "text",
+        "--output",
+        help="Output format: text|junit",
+    ),
+    output_file: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--output-file",
+        help="Path to write output (default: stdout).",
+    ),
+) -> None:
+    """Run automated connector tests against a connector YAML."""
+    import anyio
+    from inandout.testing.runner import run_connector_tests, format_junit_xml, format_text_report
+
+    connector_path = Path(connector)
+    if not connector_path.exists():
+        err_console.print(f"Connector file not found: {connector_path}")
+        raise typer.Exit(code=1)
+
+    async def _run() -> None:
+        suite = await run_connector_tests(connector_path)
+        if output == "junit":
+            xml_str = format_junit_xml(suite)
+            if output_file:
+                Path(output_file).write_text(xml_str, encoding="utf-8")
+                console.print(f"[green]JUnit XML written to {output_file}[/green]")
+            else:
+                typer.echo(xml_str)
+        else:
+            report = format_text_report(suite)
+            if output_file:
+                Path(output_file).write_text(report, encoding="utf-8")
+            console.print(report)
+
+        if suite.failed > 0:
+            raise typer.Exit(code=1)
+
+    try:
+        anyio.run(_run)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        err_console.print(f"Connector test failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# connector publish command (Step 87)
+# ---------------------------------------------------------------------------
+
+
+@connector_app.command("publish")
+def connector_publish(
+    connector: str = typer.Option(..., "--connector", help="Path to connector YAML file."),
+    hooks: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--hooks",
+        help="Path to connector hooks Python file.",
+    ),
+    index_url: str = typer.Option(
+        "https://connectors.inandout.io",
+        "--index-url",
+        help="Connector marketplace URL.",
+    ),
+    token: str = typer.Option(
+        ...,
+        "--token",
+        help="Authentication token for the marketplace.",
+        envvar="INANDOUT_PUBLISH_TOKEN",
+    ),
+    description: str = typer.Option(
+        "",
+        "--description",
+        help="Short description for the connector.",
+    ),
+    version: str = typer.Option(
+        "1.0.0",
+        "--version",
+        help="Version string for the submission.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Publish a connector to the marketplace."""
+    import anyio
+    from inandout.registry.publish import (
+        validate_for_publish,
+        build_submission,
+        submit_connector,
+    )
+
+    connector_path = Path(connector)
+    hooks_path = Path(hooks) if hooks else None
+
+    if not connector_path.exists():
+        err_console.print(f"Connector file not found: {connector_path}")
+        raise typer.Exit(code=1)
+
+    if hooks_path and not hooks_path.exists():
+        err_console.print(f"Hooks file not found: {hooks_path}")
+        raise typer.Exit(code=1)
+
+    async def _run() -> None:
+        # Validate
+        console.print("[cyan]Validating connector...[/cyan]")
+        errors = await validate_for_publish(connector_path)
+        if errors:
+            err_console.print("[bold red]Validation failed:[/bold red]")
+            for e in errors:
+                err_console.print(f"  • {e}")
+            raise typer.Exit(code=1)
+
+        console.print("[green]Validation passed.[/green]")
+
+        # Build submission
+        submission = build_submission(connector_path, hooks_path, description, version)
+
+        # Preview
+        table = Table(title="Submission Preview")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value")
+        table.add_row("Name", submission.name)
+        table.add_row("Version", submission.version)
+        table.add_row("Description", submission.description)
+        table.add_row("YAML lines", str(len(submission.yaml_content.splitlines())))
+        if submission.hooks_content:
+            table.add_row("Hooks lines", str(len(submission.hooks_content.splitlines())))
+        console.print(table)
+
+        if not yes:
+            confirmed = typer.confirm("Submit this connector to the marketplace?")
+            if not confirmed:
+                console.print("[yellow]Submission cancelled.[/yellow]")
+                raise typer.Exit(code=0)
+
+        # Submit
+        console.print("[cyan]Submitting...[/cyan]")
+        result = await submit_connector(submission, index_url, token)
+        console.print(f"[green]Submission accepted![/green] Tracking ID: {result.get('id', 'N/A')}")
+        console.print(f"Status: {result.get('status', 'unknown')}")
+
+    try:
+        anyio.run(_run)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        err_console.print(f"Publish failed: {exc}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

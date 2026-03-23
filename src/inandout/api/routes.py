@@ -790,3 +790,213 @@ async def list_sla_status() -> list[SlaStatus]:
     except Exception as exc:
         logger.warning("api_sla_error", error=str(exc))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Sync run diff endpoint (Step 82)
+# ---------------------------------------------------------------------------
+
+
+class SyncRunDiffResponse(BaseModel):
+    run_a: str
+    run_b: str
+    added: list[str]
+    removed: list[str]
+    changed: list[Any]
+    unchanged_count: int
+
+
+@router.get(
+    "/diff/{connector}/{datatype}",
+    response_model=SyncRunDiffResponse,
+)
+async def get_sync_run_diff(
+    connector: str,
+    datatype: str,
+    run_a: str = Query(..., description="UUID of the first (older) sync run"),
+    run_b: str = Query(..., description="UUID of the second (newer) sync run"),
+) -> SyncRunDiffResponse:
+    """Compare records between two sync runs for a connector/datatype."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Database pool not available")
+
+    try:
+        from inandout.diff.engine import diff_sync_runs
+        diff = await diff_sync_runs(_pool, connector, datatype, run_a, run_b)
+        return SyncRunDiffResponse(
+            run_a=diff.run_a,
+            run_b=diff.run_b,
+            added=diff.added,
+            removed=diff.removed,
+            changed=diff.changed,
+            unchanged_count=diff.unchanged_count,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("api_diff_error", connector=connector, datatype=datatype, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Federation status endpoint (Step 85)
+# ---------------------------------------------------------------------------
+
+
+class FederationInstanceStatus(BaseModel):
+    instance_id: str
+    namespace: str
+    health_score: float | None = None
+    last_sync_at: str | None = None
+    circuit_breaker_state: str | None = None
+    dead_letter_depth: int = 0
+    reported_at: str
+    stale: bool = False
+
+
+class FederationGroupStatus(BaseModel):
+    connector: str
+    datatype: str
+    instances: list[FederationInstanceStatus]
+
+
+@router.get("/federation/status", response_model=list[FederationGroupStatus])
+async def get_federation_status(
+    stale_threshold_secs: float = Query(default=300.0, description="Seconds before an instance is considered stale"),
+) -> list[FederationGroupStatus]:
+    """Return federation status grouped by (connector, datatype)."""
+    if _pool is None:
+        return []
+
+    try:
+        async with _pool.connection() as conn:
+            rows = await (await conn.execute(
+                """
+                SELECT instance_id, namespace, connector, datatype,
+                       health_score, last_sync_at, circuit_breaker_state,
+                       dead_letter_depth, reported_at
+                FROM inout_ops_federation
+                ORDER BY connector, datatype, instance_id
+                """
+            )).fetchall()
+
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        # Group by (connector, datatype)
+        groups: dict[tuple[str, str], list[FederationInstanceStatus]] = {}
+        for row in rows:
+            (inst_id, ns, conn_name, dtype, health, last_sync,
+             cb_state, dl_depth, reported_at) = row
+
+            reported_at_str = str(reported_at) if reported_at else ""
+            # Compute stale
+            stale = False
+            if reported_at is not None:
+                ra = reported_at
+                if hasattr(ra, "tzinfo") and ra.tzinfo is None:
+                    ra = ra.replace(tzinfo=datetime.timezone.utc)
+                stale = (now - ra).total_seconds() > stale_threshold_secs
+
+            inst = FederationInstanceStatus(
+                instance_id=str(inst_id),
+                namespace=str(ns or "public"),
+                health_score=float(health) if health is not None else None,
+                last_sync_at=str(last_sync) if last_sync else None,
+                circuit_breaker_state=str(cb_state) if cb_state else None,
+                dead_letter_depth=int(dl_depth or 0),
+                reported_at=reported_at_str,
+                stale=stale,
+            )
+            key = (str(conn_name), str(dtype))
+            groups.setdefault(key, []).append(inst)
+
+        return [
+            FederationGroupStatus(connector=k[0], datatype=k[1], instances=v)
+            for k, v in sorted(groups.items())
+        ]
+    except Exception as exc:
+        logger.warning("api_federation_status_error", error=str(exc))
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Lineage endpoint (Step 86)
+# ---------------------------------------------------------------------------
+
+
+class LineageEntry(BaseModel):
+    run_id: str | None = None
+    fetched_at: str | None = None
+    api_path: str | None = None
+    watermark_at_fetch: str | None = None
+    page_number: int | None = None
+    source: str = "source_table"
+
+
+@router.get(
+    "/lineage/{connector}/{datatype}/{external_id}",
+    response_model=list[LineageEntry],
+)
+async def get_record_lineage(
+    connector: str,
+    datatype: str,
+    external_id: str,
+) -> list[LineageEntry]:
+    """Return lineage history for a specific record, newest first."""
+    if _pool is None:
+        return []
+
+    from inandout.postgres.schema import source_table_name, source_history_table_name
+
+    entries: list[LineageEntry] = []
+
+    try:
+        source_table = source_table_name(connector, datatype)
+        hist_table = source_history_table_name(connector, datatype)
+
+        async with _pool.connection() as conn:
+            # Check source table for current lineage
+            try:
+                row = await (await conn.execute(
+                    f"SELECT _lineage, _ingested_at FROM {source_table} WHERE external_id = %s",
+                    [external_id],
+                )).fetchone()
+                if row and row[0] is not None:
+                    lineage = row[0] if isinstance(row[0], dict) else {}
+                    entries.append(LineageEntry(
+                        run_id=lineage.get("run_id"),
+                        fetched_at=lineage.get("fetched_at"),
+                        api_path=lineage.get("api_path"),
+                        watermark_at_fetch=lineage.get("watermark_at_fetch"),
+                        page_number=lineage.get("page_number"),
+                        source="source_table",
+                    ))
+            except Exception:
+                pass
+
+            # Check history table for historical lineage
+            try:
+                hist_rows = await (await conn.execute(
+                    f"""
+                    SELECT _sync_run_id, _ingested_at
+                    FROM {hist_table}
+                    WHERE external_id = %s
+                    ORDER BY _ingested_at DESC
+                    """,
+                    [external_id],
+                )).fetchall()
+                for hr in hist_rows:
+                    run_id_val = str(hr[0]) if hr[0] else None
+                    entries.append(LineageEntry(
+                        run_id=run_id_val,
+                        fetched_at=str(hr[1]) if hr[1] else None,
+                        source="history_table",
+                    ))
+            except Exception:
+                pass
+
+        return entries
+    except Exception as exc:
+        logger.warning("api_lineage_error", connector=connector, datatype=datatype, error=str(exc))
+        return []

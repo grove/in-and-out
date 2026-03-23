@@ -141,6 +141,7 @@ plugins = ["pydantic.mypy"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--tb=short"
+norecursedirs = ["src", ".git", ".tox", "dist", "build", "*.egg-info"]
 markers = [
     "acceptance: marks tests as acceptance tests requiring real external APIs (deselect with '-m not acceptance')",
 ]

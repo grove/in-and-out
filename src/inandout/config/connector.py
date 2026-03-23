@@ -125,6 +125,7 @@ class ConnectionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: str
+    staging_base_url: str | None = None
     timeout: TimeoutConfig | None = None
     retry_budget: RetryBudgetConfig | None = None
 

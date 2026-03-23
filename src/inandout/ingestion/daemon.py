@@ -493,7 +493,92 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     except Exception as exc:
         log.warning("plugin_hook_discovery_failed", error=str(exc))
 
+    # Prepare federation reporter if enabled
+    federation_reporter = None
+    if config.federation.enabled:
+        from inandout.federation.reporter import FederationReporter, _default_instance_id
+        instance_id = _default_instance_id()
+        federation_reporter = FederationReporter(pool, instance_id, config.namespace)
+        log.info("federation_enabled", instance_id=instance_id)
+
     log.info("daemon_started")
+
+    async def _plugin_reload_loop() -> None:
+        """Poll plugin versions and re-register on changes."""
+        from inandout.plugins.version_watcher import watch_plugin_versions
+        from inandout.plugins.discovery import discover_and_register_hooks
+
+        async def _on_plugin_change(pkg_name: str, old_version: str, new_version: str) -> None:
+            log.info(
+                "plugin_package_updated",
+                package=pkg_name,
+                old_version=old_version,
+                new_version=new_version,
+            )
+            try:
+                n = discover_and_register_hooks()
+                log.info("plugin_hooks_reregistered", count=n, trigger=pkg_name)
+            except Exception as exc:
+                log.warning("plugin_hooks_reregister_failed", error=str(exc))
+
+        try:
+            await watch_plugin_versions(_on_plugin_change)
+        except Exception as exc:
+            log.warning("plugin_reload_loop_exited", error=str(exc))
+
+    async def _federation_loop() -> None:
+        """Periodically report health data to the federation table."""
+        if federation_reporter is None:
+            return
+
+        from inandout.transport.circuit_breaker import get_circuit_breaker, CircuitState
+
+        while True:
+            await anyio.sleep(config.federation.report_interval_secs)
+            for connector_file_cfg in connector_configs:
+                connector_cfg = connector_file_cfg.connector
+                for dtype_name in connector_cfg.datatypes:
+                    try:
+                        cb = get_circuit_breaker(connector_cfg.name, dtype_name)
+                        if cb.state == CircuitState.open:
+                            cb_score = 0.0
+                        elif cb.state == CircuitState.half_open:
+                            cb_score = 0.5
+                        else:
+                            cb_score = 1.0
+
+                        # Get last sync info
+                        last_sync_at = None
+                        try:
+                            async with pool.connection() as conn:
+                                row = await (await conn.execute(
+                                    """
+                                    SELECT finished_at FROM inout_ops_sync_run
+                                    WHERE connector = %s AND datatype = %s
+                                    ORDER BY started_at DESC LIMIT 1
+                                    """,
+                                    [connector_cfg.name, dtype_name],
+                                )).fetchone()
+                                if row:
+                                    last_sync_at = row[0]
+                        except Exception:
+                            pass
+
+                        await federation_reporter.report(
+                            connector=connector_cfg.name,
+                            datatype=dtype_name,
+                            health_score=cb_score,
+                            last_sync_at=last_sync_at,
+                            circuit_state=str(cb.state),
+                            dl_depth=0,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "federation_report_error",
+                            connector=connector_cfg.name,
+                            datatype=dtype_name,
+                            error=str(exc),
+                        )
 
     try:
         async with anyio.create_task_group() as tg:
@@ -508,6 +593,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                 housekeeping_interval_secs,
             )
             tg.start_soon(_sla_check_loop, pool, connector_configs)
+            tg.start_soon(_plugin_reload_loop)
+            if config.federation.enabled:
+                tg.start_soon(_federation_loop)
             await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
     finally:
         log.info("daemon_stopping")

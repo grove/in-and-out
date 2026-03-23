@@ -333,17 +333,29 @@ class IngestionEngine:
 
         bulk_size = ingestion_cfg.bulk_upsert_batch_size
         use_bulk = bulk_size > 1
+        page_number = 0
 
         async with HttpTransportAdapter(connector) as transport:
             async for page in transport.fetch_pages(
                 ingestion_cfg.list, watermark=watermark, window_end=window_end
             ):
+                page_number += 1
                 result.records_fetched += len(page)
                 if not page:
                     continue
 
                 # Pre-process records: field mapping + hooks + quality checks
                 processed_records: list[tuple[str, dict, str]] = []  # (external_id, record, raw_hash)
+
+                # Build lineage for this page
+                import datetime as _dt
+                _current_lineage: dict[str, Any] = {
+                    "run_id": str(result.run_id),
+                    "fetched_at": _dt.datetime.utcnow().isoformat(),
+                    "api_path": ingestion_cfg.list.path,
+                    "watermark_at_fetch": str(watermark) if watermark else None,
+                    "page_number": page_number,
+                }
 
                 async with self._pool.connection() as conn:
                     async with conn.transaction():
@@ -413,7 +425,8 @@ class IngestionEngine:
                                 # Single-record path (default)
                                 raw_hash = _compute_raw_hash(record)
                                 inserted, updated = await _upsert_record(
-                                    conn, table, external_id, record, raw_hash, result.run_id
+                                    conn, table, external_id, record, raw_hash, result.run_id,
+                                    lineage=_current_lineage,
                                 )
                                 result.records_inserted += inserted
                                 result.records_updated += updated
@@ -732,9 +745,11 @@ async def _upsert_record(
     raw: dict[str, Any],
     raw_hash: str,
     run_id: uuid.UUID,
+    lineage: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
     """Upsert a record. Returns (inserted, updated)."""
     data = orjson.dumps(raw).decode()
+    lineage_json = orjson.dumps(lineage).decode() if lineage is not None else None
     row = await (await conn.execute(
         f"SELECT _raw_hash FROM {table} WHERE external_id = %s", [external_id]
     )).fetchone()
@@ -742,10 +757,10 @@ async def _upsert_record(
     if row is None:
         await conn.execute(
             f"""
-            INSERT INTO {table} (external_id, data, raw, _ingested_at, _sync_run_id, _raw_hash)
-            VALUES (%s, %s, %s, NOW(), %s, %s)
+            INSERT INTO {table} (external_id, data, raw, _ingested_at, _sync_run_id, _raw_hash, _lineage)
+            VALUES (%s, %s, %s, NOW(), %s, %s, %s)
             """,
-            [external_id, data, data, run_id, raw_hash],
+            [external_id, data, data, run_id, raw_hash, lineage_json],
         )
         return 1, 0
     elif row[0] != raw_hash:
@@ -753,10 +768,10 @@ async def _upsert_record(
             f"""
             UPDATE {table}
             SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s,
-                _deleted_at=NULL
+                _deleted_at=NULL, _lineage=%s
             WHERE external_id=%s
             """,
-            [data, data, run_id, raw_hash, external_id],
+            [data, data, run_id, raw_hash, lineage_json, external_id],
         )
         return 0, 1
     else:

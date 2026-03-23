@@ -201,6 +201,14 @@ class ChangeDetectionConfig(BaseModel):
     poll_interval: str = "5s"
 
 
+class FederationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    report_interval_secs: float = 30.0
+    stale_threshold_secs: float = 300.0
+
+
 class IngestionToolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -220,6 +228,7 @@ class IngestionToolConfig(BaseModel):
     alerting: AlertingConfig = Field(default_factory=AlertingConfig)
     event_output: Any = Field(default_factory=lambda: None)  # EventOutputConfig | None
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
+    federation: FederationConfig = Field(default_factory=FederationConfig)
 
 
 class _WritebackHealthServerConfig(BaseModel):
