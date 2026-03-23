@@ -100,6 +100,21 @@ replication_slot_lag_bytes: Gauge = _gauge(
 )
 
 
+# Soft-delete resurrection counter (A6)
+records_resurrected_total: Counter = _counter(
+    "inout_records_resurrected_total",
+    "Total records resurrected from soft-delete tombstone state",
+    ["connector", "datatype"],
+)
+
+# Source unavailability counter (A8)
+source_unavailable_total: Counter = _counter(
+    "inout_source_unavailable_total",
+    "Total times a connector/datatype was marked source-unavailable after exhausting retries",
+    ["connector", "datatype"],
+)
+
+
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""
     pass

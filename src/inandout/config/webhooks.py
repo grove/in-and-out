@@ -47,9 +47,26 @@ class FanOutConfig(BaseModel):
     unmatched: UnmatchedAction
 
 
+class WebhookRegistrationConfig(BaseModel):
+    """Config for active webhook lifecycle management (T1 #7)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    register_path: str                             # POST to register webhook
+    deregister_path: str | None = None             # DELETE to remove, ${webhook_id} interpolated
+    renew_path: str | None = None                  # PUT/PATCH to renew
+    renew_interval: str = "7d"                     # how often to renew
+    health_check_path: str | None = None           # GET to verify still active
+    id_response_path: str = "id"                   # dot-notation path to extract webhook ID
+    callback_url_runtime_param: str = "callback_url"  # runtime param name for our URL
+
+
 class WebhookConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     path: str
     signature: SignatureConfig
     fan_out: FanOutConfig
+    registration: WebhookRegistrationConfig | None = None  # A1: lifecycle management
+    event_id_field: str | None = None              # A5: dedup — field holding event ID
+    dedup_ttl: str = "24h"                         # A5: how long to remember seen event IDs

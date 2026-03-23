@@ -103,6 +103,14 @@ class ListConfig(BaseModel):
     graphql_variables: dict = {}  # static variables merged with runtime vars
     graphql_data_path: str | None = None  # dot-notation path e.g. "data.contacts.nodes"
     detail_path: str | None = None  # e.g. "/contacts/${external_id}" — GET this to verify deletion
+    # A2: ID-first / parameterized-sources strategy
+    fetch_strategy: Literal["list", "id_list"] = "list"
+    id_field: str = "id"              # field in list response items that holds the ID
+    detail_concurrency: int = 5       # max concurrent detail GETs
+    # A4: declarative field/property selection
+    properties: list[str] = []                                           # fields to request (empty = request all)
+    properties_param: str = "properties"                                  # query/body param name
+    properties_format: Literal["comma", "array", "json_array"] = "comma"  # encoding format
 
 
 class WebhookPayloadType(StrEnum):

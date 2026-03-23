@@ -172,6 +172,27 @@ class GenerationProfile(StrEnum):
 # ---------------------------------------------------------------------------
 
 
+class LinkedObject(BaseModel):
+    """A child datatype whose records are fetched from IDs embedded in a parent record (T1 #16)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str           # field in parent record holding child IDs (e.g. "line_item_ids")
+    datatype: str        # target datatype to ingest children into
+    detail_path: str     # path for child GET, ${id} interpolated
+    concurrency: int = 3
+
+
+class TimestampFieldConfig(BaseModel):
+    """Per-field timestamp normalisation config (T1 #45)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str
+    format: Literal["iso8601", "unix_seconds", "unix_millis", "rfc2822", "auto"] = "auto"
+    target_field: str | None = None  # if set, write normalised value here instead of overwriting
+
+
 class DatatypeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -183,6 +204,9 @@ class DatatypeConfig(BaseModel):
     strict_field_mapping: bool = False
     quality_rules: QualityRule | None = None
     max_concurrent_writes: int | None = None  # datatype-level override for writeback parallelism
+    linked_objects: list[LinkedObject] = []     # A3: linked/nested object resolution
+    timestamp_fields: list[TimestampFieldConfig] = []  # A7: timestamp normalisation
+    pii_fields: list[str] = []                  # B6: fields containing PII
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":
