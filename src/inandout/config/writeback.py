@@ -97,6 +97,7 @@ class BatchResponseConfig(BaseModel):
 class WritebackConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    dry_run: bool = False  # B1: if True, skip HTTP writes and populate dry_run_log
     protection_level: ProtectionLevel
     conflict_resolution: ConflictResolution
     supported_actions: list[str] = Field(min_length=1)

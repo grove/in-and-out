@@ -107,6 +107,10 @@ class ControlDispatcher:
             return self._cmd_reset_circuit_breaker(connector, datatype)
         elif command == "resync":
             return await self._cmd_resync(connector, datatype, payload, engine)
+        elif command == "trigger-writeback":
+            return await self._cmd_trigger_writeback(connector, datatype, payload, engine)
+        elif command == "validate":
+            return await self._cmd_validate_writeback(connector, datatype, payload, engine)
         else:
             raise ValueError(f"Unknown command: {command!r}")
 
@@ -384,6 +388,118 @@ class ControlDispatcher:
                     """,
                     [dl_id],
                 )
+
+    async def _cmd_trigger_writeback(
+        self,
+        connector: str | None,
+        datatype: str | None,
+        payload: dict,
+        engine: Any | None,
+    ) -> dict:
+        """B2: Trigger one writeback cycle immediately for (connector, datatype)."""
+        if not connector or not datatype:
+            raise ValueError("trigger-writeback requires 'connector' and 'datatype'")
+
+        # engine here may be a WritebackEngine — look for run_writeback_cycle method
+        if engine is None or not hasattr(engine, "run_writeback_cycle"):
+            # Try to import and use WritebackEngine from the pool
+            return {"status": "skipped", "reason": "no_writeback_engine_available"}
+
+        delta_table = payload.get("delta_table", f"_delta_{connector}_{datatype}")
+
+        # We need writeback_cfg — look it up from connected configs if available
+        writeback_cfg = payload.get("_writeback_cfg")  # may be injected by daemon
+        if writeback_cfg is None:
+            return {"status": "skipped", "reason": "writeback_cfg_not_found"}
+
+        try:
+            from inandout.config.connector import ConnectorConfig
+            result = await engine.run_writeback_cycle(
+                payload.get("_connector_cfg"), datatype, writeback_cfg, delta_table
+            )
+            logger.info(
+                "trigger_writeback_completed",
+                connector=connector,
+                datatype=datatype,
+                processed=result.processed,
+                skipped=result.skipped,
+            )
+            return {"status": "completed", "processed": result.processed, "skipped": result.skipped}
+        except Exception as exc:
+            logger.error("trigger_writeback_failed", connector=connector, datatype=datatype, error=str(exc))
+            return {"status": "failed", "error": str(exc)}
+
+    async def _cmd_validate_writeback(
+        self,
+        connector: str | None,
+        datatype: str | None,
+        payload: dict,
+        engine: Any | None,
+    ) -> dict:
+        """B3: Validate writeback connectivity, auth, field mappings, and ETag support."""
+        if not connector:
+            raise ValueError("validate requires 'connector'")
+
+        result: dict = {
+            "connectivity": "unknown",
+            "auth": "unknown",
+            "field_mappings": "unknown",
+            "etag_support": False,
+            "protection_level": "unknown",
+            "errors": [],
+        }
+
+        # Look up connector config from payload or registry
+        base_url = payload.get("base_url", "")
+        if not base_url:
+            result["errors"].append("base_url not provided in payload")
+            return result
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                # Connectivity check
+                try:
+                    resp = await client.get("/")
+                    result["connectivity"] = "ok"
+                    # Auth check
+                    if resp.status_code == 401:
+                        result["auth"] = "failed"
+                        result["errors"].append(f"401 Unauthorized from {base_url}")
+                    else:
+                        result["auth"] = "ok"
+                except Exception as conn_exc:
+                    result["connectivity"] = "failed"
+                    result["errors"].append(f"connection failed: {conn_exc}")
+
+                # ETag support check via HEAD request
+                if result["connectivity"] == "ok":
+                    try:
+                        head_resp = await client.head("/", headers={"If-None-Match": "*"})
+                        etag = head_resp.headers.get("ETag") or head_resp.headers.get("etag")
+                        result["etag_support"] = bool(etag)
+                        result["protection_level"] = "full" if etag else "practical"
+                    except Exception:
+                        result["etag_support"] = False
+                        result["protection_level"] = "practical"
+
+        except Exception as outer_exc:
+            result["errors"].append(f"validate_error: {outer_exc}")
+
+        # Field mapping validation from payload
+        operations = payload.get("operations", {})
+        field_errors = []
+        for op_name, op_cfg in operations.items():
+            if isinstance(op_cfg, dict):
+                path = op_cfg.get("path", "")
+                if not path:
+                    field_errors.append(f"operation.{op_name}.path is empty")
+        result["field_mappings"] = "ok" if not field_errors else f"errors: {field_errors}"
+        if field_errors:
+            result["errors"].extend(field_errors)
+
+        logger.info("writeback_validate_complete", connector=connector, datatype=datatype, result=result)
+        return result
 
     # ------------------------------------------------------------------
     # Status helpers

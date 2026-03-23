@@ -255,6 +255,7 @@ class ReplicationSlotConfig(BaseModel):
 class WritebackToolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    scheduling_enabled: bool = True  # B2: if False, no polling loops are started
     database: DatabaseConfig
     connectors_dir: str = "./connectors"
     namespace: str = "public"

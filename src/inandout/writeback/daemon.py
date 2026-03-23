@@ -192,6 +192,11 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
             return
         await monitor_replication_slot(pool, config.replication_slot, _on_slot_fallback)
 
+    # B2: check if scheduling is enabled
+    scheduling_enabled = getattr(config, "scheduling_enabled", True)
+    if not scheduling_enabled:
+        log.warning("writeback_scheduler_disabled", reason="scheduling_enabled=False")
+
     log.info("daemon_started")
 
     try:
@@ -201,34 +206,36 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
             if config.replication_slot.slot_name:
                 tg.start_soon(_slot_monitor_loop)
 
-            for connector_file_cfg in connector_configs:
-                connector_cfg = connector_file_cfg.connector
-                for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
-                    if dtype_cfg.writeback is None:
-                        continue
-                    delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
-                    if dtype_cfg.writeback.streaming:
-                        tg.start_soon(
-                            _writeback_loop_streaming,
-                            engine,
-                            pool,
-                            connector_cfg,
-                            dtype_name,
-                            dtype_cfg.writeback,
-                            delta_table,
-                        )
-                    else:
-                        dtype_max_writes = getattr(dtype_cfg, "max_concurrent_writes", None)
-                        tg.start_soon(
-                            _writeback_polling_loop,
-                            engine,
-                            connector_cfg,
-                            dtype_name,
-                            dtype_cfg.writeback,
-                            delta_table,
-                            default_interval_secs,
-                            dtype_max_writes,
-                        )
+            # B2: only start polling loops when scheduling is enabled
+            if scheduling_enabled:
+                for connector_file_cfg in connector_configs:
+                    connector_cfg = connector_file_cfg.connector
+                    for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
+                        if dtype_cfg.writeback is None:
+                            continue
+                        delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
+                        if dtype_cfg.writeback.streaming:
+                            tg.start_soon(
+                                _writeback_loop_streaming,
+                                engine,
+                                pool,
+                                connector_cfg,
+                                dtype_name,
+                                dtype_cfg.writeback,
+                                delta_table,
+                            )
+                        else:
+                            dtype_max_writes = getattr(dtype_cfg, "max_concurrent_writes", None)
+                            tg.start_soon(
+                                _writeback_polling_loop,
+                                engine,
+                                connector_cfg,
+                                dtype_name,
+                                dtype_cfg.writeback,
+                                delta_table,
+                                default_interval_secs,
+                                dtype_max_writes,
+                            )
     finally:
         log.info("daemon_stopping")
         await pool.close()

@@ -70,6 +70,8 @@ class WritebackResult:
     failed: int = 0
     conflicts: int = 0
     error_message: str | None = None
+    # B1: populated when dry_run=True
+    dry_run_log: list[dict[str, Any]] = field(default_factory=list)
     # Accumulates (external_id, action, payload, diff) for audit trail
     _audit_entries: list[tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]] = field(
         default_factory=list
@@ -313,6 +315,7 @@ class WritebackEngine:
             row = await enrich_with_join_sources(self._pool, row, writeback_cfg.join_sources)
 
         ops = writeback_cfg.operations
+        dry_run = getattr(writeback_cfg, "dry_run", False)
 
         def interpolate_path(path: str) -> str:
             return path.replace("${external_id}", external_id or "")
@@ -327,6 +330,25 @@ class WritebackEngine:
                 headers[writeback_cfg.idempotency_key_header] = idempotency_key
             return headers
 
+        def _log_dry_run(
+            op_action: str,
+            method: str,
+            url: str,
+            headers: dict,
+            body: dict,
+            conflict_detected: bool = False,
+        ) -> None:
+            """Append to dry_run_log and increment skipped counter."""
+            result.dry_run_log.append({
+                "action": op_action,
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "body": body,
+                "conflict_detected": conflict_detected,
+            })
+            result.skipped += 1
+
         try:
             if action == "insert":
                 if ops.insert is None:
@@ -335,6 +357,13 @@ class WritebackEngine:
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.insert.path)
                 extra_headers = _make_extra_headers(payload)
+
+                # B1: dry_run — log the would-be write, skip actual HTTP call
+                if dry_run:
+                    base_url = connector.connection.base_url.rstrip("/")
+                    _log_dry_run(action, ops.insert.method.upper(), f"{base_url}{path}", extra_headers, payload)
+                    return
+
                 if extra_headers:
                     insert_resp = await transport._raw_request(ops.insert.method.upper(), path, json=payload, headers=extra_headers)
                 else:
@@ -688,6 +717,13 @@ class WritebackEngine:
                     extra_headers = _make_extra_headers(payload)
                     if _3way_etag and writeback_cfg.etag_header:
                         extra_headers[writeback_cfg.if_match_header] = _3way_etag
+
+                    # B1: dry_run — log would-be write, skip actual HTTP call
+                    if dry_run:
+                        base_url = connector.connection.base_url.rstrip("/")
+                        _log_dry_run(action, ops.update.method.upper(), f"{base_url}{path}", extra_headers, payload)
+                        return
+
                     if extra_headers:
                         await transport._raw_request(ops.update.method.upper(), path, json=payload, headers=extra_headers)
                     else:
@@ -744,6 +780,13 @@ class WritebackEngine:
                     return
                 path = interpolate_path(ops.delete.path)
                 extra_headers = _make_extra_headers({})
+
+                # B1: dry_run
+                if dry_run:
+                    base_url = connector.connection.base_url.rstrip("/")
+                    _log_dry_run(action, ops.delete.method.upper(), f"{base_url}{path}", extra_headers, {})
+                    return
+
                 if extra_headers:
                     await transport._raw_request(ops.delete.method.upper(), path, headers=extra_headers)
                 else:
@@ -758,6 +801,13 @@ class WritebackEngine:
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.archive.path)
                 extra_headers = _make_extra_headers(payload)
+
+                # B1: dry_run
+                if dry_run:
+                    base_url = connector.connection.base_url.rstrip("/")
+                    _log_dry_run(action, ops.archive.method.upper(), f"{base_url}{path}", extra_headers, payload)
+                    return
+
                 if extra_headers:
                     await transport._raw_request(ops.archive.method.upper(), path, json=payload, headers=extra_headers)
                 else:
