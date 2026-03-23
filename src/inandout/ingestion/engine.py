@@ -282,8 +282,39 @@ class IngestionEngine:
         # Per-batch unique-value tracker for quality rules
         quality_seen: dict[str, set] = {}
 
+        # Compute cursor window if configured
+        window_end: str | None = None
+        cursor_window_watermark: str | None = None
+        inc = ingestion_cfg.list.incremental
+        if (
+            inc is not None
+            and inc.cursor_window is not None
+            and watermark is not None
+        ):
+            import time
+            from inandout.config._duration import parse_duration as _parse_dur
+            try:
+                window_secs = _parse_dur(inc.cursor_window)
+                watermark_float = float(watermark)
+                now_float = time.time()
+                window_end_float = min(watermark_float + window_secs, now_float)
+                window_end = str(window_end_float)
+                cursor_window_watermark = str(window_end_float)
+                logger.info(
+                    "incremental_window_sync",
+                    window_start=watermark,
+                    window_end=window_end,
+                    window_secs=window_secs,
+                    connector=connector.name,
+                    datatype=datatype,
+                )
+            except Exception:
+                pass  # Fall through to normal behavior if parsing fails
+
         async with HttpTransportAdapter(connector) as transport:
-            async for page in transport.fetch_pages(ingestion_cfg.list, watermark=watermark):
+            async for page in transport.fetch_pages(
+                ingestion_cfg.list, watermark=watermark, window_end=window_end
+            ):
                 result.records_fetched += len(page)
                 if not page:
                     continue
@@ -383,11 +414,13 @@ class IngestionEngine:
                                         new_watermark = candidate
 
                         # Update watermark atomically within the same transaction
-                        if new_watermark:
+                        # Use window_end as watermark when cursor_window is active
+                        effective_watermark = cursor_window_watermark if cursor_window_watermark is not None else new_watermark
+                        if effective_watermark:
                             inc = ingestion_cfg.list.incremental
                             wm_type = inc.cursor_type.value if inc and inc.cursor_type else "cursor"
                             await set_watermark(
-                                conn, connector.name, datatype, wm_type, new_watermark, result.run_id
+                                conn, connector.name, datatype, wm_type, effective_watermark, result.run_id
                             )
 
         # Full-sync deletion detection: tombstone records not seen in this run.

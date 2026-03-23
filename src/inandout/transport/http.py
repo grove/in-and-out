@@ -210,7 +210,15 @@ class HttpTransportAdapter:
         self,
         list_config: ListConfig,
         watermark: str | None = None,
+        window_end: str | None = None,
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
+        # GraphQL mode: detect by presence of graphql_query
+        graphql_query = getattr(list_config, "graphql_query", None)
+        if graphql_query is not None:
+            async for page in self._fetch_graphql_pages(list_config, watermark=watermark):
+                yield page
+            return
+
         method = list_config.method.upper()
         path = list_config.path
         record_selector = list_config.record_selector
@@ -226,6 +234,10 @@ class HttpTransportAdapter:
                 param_name = str(extra.get("param", "since"))
                 param_value = _substitute(str(extra.get("value", "${watermark}")), watermark)
                 base_params[param_name] = param_value
+                # Inject window_end via until_param if configured
+                until_param = getattr(rf, "until_param", None)
+                if until_param and window_end is not None:
+                    base_params[until_param] = window_end
 
         termination = set(pagination.termination or [])
 
@@ -289,6 +301,47 @@ class HttpTransportAdapter:
                 if len(records) < page_size:
                     break
                 page += 1
+
+    async def _fetch_graphql_pages(
+        self,
+        list_config: ListConfig,
+        watermark: str | None = None,
+    ) -> AsyncGenerator[list[dict[str, Any]], None]:
+        """Fetch pages using GraphQL POST requests."""
+        from inandout.ingestion.graphql import build_graphql_request_body, extract_graphql_records
+
+        graphql_query: str = list_config.graphql_query  # type: ignore[assignment]
+        graphql_variables: dict[str, Any] = getattr(list_config, "graphql_variables", {}) or {}
+        graphql_data_path: str | None = getattr(list_config, "graphql_data_path", None)
+        path = list_config.path
+        pagination = list_config.pagination
+
+        cursor_value: str | None = None
+        while True:
+            body = build_graphql_request_body(
+                graphql_query, graphql_variables, cursor=cursor_value
+            )
+            resp = await self._request("POST", path, json=body)
+            data = orjson.loads(resp.content)
+
+            if graphql_data_path:
+                records = extract_graphql_records(data, graphql_data_path)
+            else:
+                records = _extract_records(data, list_config.record_selector)
+
+            yield records
+
+            if not records:
+                break
+
+            # Cursor-based pagination for GraphQL
+            if pagination.strategy == PaginationStrategy.cursor and pagination.cursor is not None:
+                next_cursor = jmespath.search(pagination.cursor.response_path, data)
+                if next_cursor is None:
+                    break
+                cursor_value = str(next_cursor)
+            else:
+                break
 
     async def close(self) -> None:
         if self._client:

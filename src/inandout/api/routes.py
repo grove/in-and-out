@@ -572,6 +572,92 @@ class SlaStatus(BaseModel):
     max_lag_seconds: int | None = None
 
 
+# ---------------------------------------------------------------------------
+# Writeback audit endpoint (Step 63)
+# ---------------------------------------------------------------------------
+
+
+class WritebackAuditRow(BaseModel):
+    id: int
+    connector: str
+    datatype: str
+    action: str
+    external_id: str | None = None
+    status: str
+    processed_at: str
+    payload_snapshot: Any = None
+    field_diff: Any = None
+
+
+@router.get(
+    "/writeback-audit/{connector}/{datatype}",
+    response_model=list[WritebackAuditRow],
+)
+async def list_writeback_audit(
+    connector: str,
+    datatype: str,
+    since: str | None = Query(default=None, description="Only rows where processed_at >= NOW() - INTERVAL"),
+    limit: int = Query(default=20, ge=1, le=1000, description="Max rows to return"),
+) -> list[WritebackAuditRow]:
+    """Return recent writeback audit rows for a connector/datatype."""
+    if _pool is None:
+        return []
+
+    since_secs: float | None = None
+    if since:
+        try:
+            since_secs = parse_duration(since)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid since duration: {since!r}")
+
+    try:
+        async with _pool.connection() as conn:
+            if since_secs is not None:
+                rows = await (await conn.execute(
+                    """
+                    SELECT id, connector, datatype, action, external_id, status,
+                           processed_at, payload_snapshot, field_diff
+                    FROM inout_ops_writeback_result
+                    WHERE connector = %s AND datatype = %s
+                      AND processed_at >= NOW() - INTERVAL '1 second' * %s
+                    ORDER BY processed_at DESC
+                    LIMIT %s
+                    """,
+                    [connector, datatype, since_secs, limit],
+                )).fetchall()
+            else:
+                rows = await (await conn.execute(
+                    """
+                    SELECT id, connector, datatype, action, external_id, status,
+                           processed_at, payload_snapshot, field_diff
+                    FROM inout_ops_writeback_result
+                    WHERE connector = %s AND datatype = %s
+                    ORDER BY processed_at DESC
+                    LIMIT %s
+                    """,
+                    [connector, datatype, limit],
+                )).fetchall()
+            return [
+                WritebackAuditRow(
+                    id=r[0],
+                    connector=r[1],
+                    datatype=r[2],
+                    action=r[3],
+                    external_id=r[4],
+                    status=r[5],
+                    processed_at=str(r[6]),
+                    payload_snapshot=r[7],
+                    field_diff=r[8],
+                )
+                for r in rows
+            ]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("api_writeback_audit_error", error=str(exc))
+        return []
+
+
 @router.get("/sla", response_model=list[SlaStatus])
 async def list_sla_status() -> list[SlaStatus]:
     """Return SLA status for all connectors/datatypes."""

@@ -52,13 +52,15 @@ async def _writeback_polling_loop(
     writeback_cfg: Any,
     delta_table: str,
     interval_secs: float,
+    max_concurrent_writes_override: int | None = None,
 ) -> None:
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     log.info("writeback_polling_loop_started", interval_secs=interval_secs, delta_table=delta_table)
     while True:
         try:
             result = await engine.run_writeback_cycle(
-                connector_cfg, datatype, writeback_cfg, delta_table
+                connector_cfg, datatype, writeback_cfg, delta_table,
+                max_concurrent_writes_override=max_concurrent_writes_override,
             )
             log.info(
                 "writeback_poll_complete",
@@ -201,6 +203,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                             delta_table,
                         )
                     else:
+                        dtype_max_writes = getattr(dtype_cfg, "max_concurrent_writes", None)
                         tg.start_soon(
                             _writeback_polling_loop,
                             engine,
@@ -209,6 +212,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                             dtype_cfg.writeback,
                             delta_table,
                             default_interval_secs,
+                            dtype_max_writes,
                         )
     finally:
         log.info("daemon_stopping")

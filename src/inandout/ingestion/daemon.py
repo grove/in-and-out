@@ -347,8 +347,89 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     async def _run_health_server() -> None:
         await health_server.serve()
 
+    async def _apply_connector_changes(
+        outer_tg: Any,
+        changed_paths: set[Any] | None = None,
+        new_configs: list | None = None,
+    ) -> None:
+        """Apply connector config changes — handles adds, updates, and removals."""
+        if new_configs is None:
+            new_configs = _load_connectors()
+        old_names = {c.connector.name for c in connector_configs}
+        new_names = {c.connector.name for c in new_configs}
+        added = new_names - old_names
+        removed = old_names - new_names
+        updated = new_names & old_names
+
+        if added:
+            log.info("connectors_added", names=sorted(added))
+        if removed:
+            for name in removed:
+                log.info("connector_removed_requires_restart", connector=name)
+
+        # Handle updated connectors (config changed, same name)
+        old_map = {c.connector.name: c for c in connector_configs}
+        for cfg in new_configs:
+            name = cfg.connector.name
+            if name in updated and name in old_map:
+                old_cfg = old_map[name]
+                if cfg.connector != old_cfg.connector:
+                    log.info("connector_config_reloaded", connector=name)
+                    # Update in-memory config
+                    for i, c in enumerate(connector_configs):
+                        if c.connector.name == name:
+                            connector_configs[i] = cfg
+                            break
+
+        # Start polling loops for newly added connectors
+        for cfg in new_configs:
+            if cfg.connector.name in added:
+                connector_configs.append(cfg)
+                for dtype_name, dtype_cfg in cfg.connector.datatypes.items():
+                    if dtype_cfg.ingestion is None:
+                        continue
+                    outer_tg.start_soon(
+                        _polling_loop,
+                        engine,
+                        cfg.connector,
+                        dtype_name,
+                        dtype_cfg.ingestion,
+                        default_interval_secs,
+                        paused_connectors,
+                        dtype_cfg,
+                    )
+
     async def _hot_reload_watcher(outer_tg: Any) -> None:
         """Watch the reload flag; on SIGHUP reload connectors and restart polling tasks."""
+        # Try file watcher first (watchfiles), fall back to SIGHUP
+        try:
+            from inandout.ingestion.watcher import hot_reload_loop
+
+            async def _on_file_change(changed_paths: set[Any]) -> None:
+                log.info("connector_files_changed", count=len(changed_paths))
+                # Re-parse only the changed files
+                new_configs = []
+                for p in changed_paths:
+                    try:
+                        cfg = load_connector(p)
+                        new_configs.append(cfg)
+                        log.info("connector_reloaded_from_file", path=str(p), connector=cfg.connector.name)
+                    except Exception as exc:
+                        log.error("connector_reload_failed", path=str(p), error=str(exc))
+                # For files that weren't changed, keep existing configs
+                changed_connector_names = {c.connector.name for c in new_configs}
+                unchanged = [c for c in connector_configs if c.connector.name not in changed_connector_names]
+                merged = unchanged + new_configs
+                await _apply_connector_changes(outer_tg, changed_paths=changed_paths, new_configs=merged)
+
+            connectors_path = Path(config.connectors_dir)
+            if connectors_path.exists():
+                await hot_reload_loop(connectors_path, _on_file_change)
+                return
+        except ImportError:
+            pass
+
+        # Fallback: SIGHUP-based reload
         while True:
             await anyio.sleep(1.0)
             if not reload_flag.is_set():
@@ -356,31 +437,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             reload_flag.clear()
             log.info("sighup_received_reloading_connectors")
             new_configs = _load_connectors()
-            old_names = {c.connector.name for c in connector_configs}
-            new_names = {c.connector.name for c in new_configs}
-            added = new_names - old_names
-            removed = old_names - new_names
-            if added:
-                log.info("connectors_added", names=sorted(added))
-            if removed:
-                log.info("connectors_removed_requires_restart", names=sorted(removed))
-            # Start polling loops for newly added connectors
-            for cfg in new_configs:
-                if cfg.connector.name in added:
-                    connector_configs.append(cfg)
-                    for dtype_name, dtype_cfg in cfg.connector.datatypes.items():
-                        if dtype_cfg.ingestion is None:
-                            continue
-                        outer_tg.start_soon(
-                            _polling_loop,
-                            engine,
-                            cfg.connector,
-                            dtype_name,
-                            dtype_cfg.ingestion,
-                            default_interval_secs,
-                            paused_connectors,
-                            dtype_cfg,
-                        )
+            await _apply_connector_changes(outer_tg, new_configs=new_configs)
 
     log.info("daemon_started")
 

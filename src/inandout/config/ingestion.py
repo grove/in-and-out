@@ -64,6 +64,7 @@ class RequestFilterConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     mode: RequestFilterMode
+    until_param: str | None = None  # param name for window-end timestamp injection
 
 
 class IncrementalConfig(BaseModel):
@@ -73,16 +74,20 @@ class IncrementalConfig(BaseModel):
     cursor_field: str | None = None
     cursor_type: IncrementalCursorType | None = None
     request_filter: RequestFilterConfig | None = None
+    cursor_window: str | None = None  # e.g. "1d" — max time window per poll cycle
 
 
 class ListConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    method: str
+    method: str = "GET"
     path: str
     record_selector: str | None = None
     pagination: PaginationConfig
     incremental: IncrementalConfig | None = None
+    graphql_query: str | None = None  # GraphQL query string
+    graphql_variables: dict = {}  # static variables merged with runtime vars
+    graphql_data_path: str | None = None  # dot-notation path e.g. "data.contacts.nodes"
 
 
 class WebhookPayloadType(StrEnum):
@@ -116,3 +121,4 @@ class IngestionConfig(BaseModel):
     prune_orphan_columns: bool = False
     source_mode: Literal["polling", "cdc"] = "polling"
     cdc: Any | None = None  # CdcSourceConfig | None — imported lazily to avoid circular imports
+    max_concurrent_fetches: int = 1  # parallelism for fan-out fetch (1 = no parallelism)

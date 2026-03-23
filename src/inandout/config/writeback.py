@@ -25,6 +25,9 @@ class ConflictResolution(StrEnum):
     last_writer_wins = "last_writer_wins"
     skip_and_warn = "skip_and_warn"
     re_ingest_and_recompute = "re_ingest_and_recompute"
+    server_wins = "server_wins"
+    merge_fields = "merge_fields"
+    custom_merge = "custom_merge"
 
 
 class OperationConfig(BaseModel):
@@ -87,6 +90,7 @@ class WritebackConfig(BaseModel):
     diff_fields: bool = False
     streaming: bool = False
     join_sources: list[JoinSource] = []
+    idempotency_key_header: str | None = None  # e.g. "Idempotency-Key"
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":

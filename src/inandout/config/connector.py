@@ -181,6 +181,7 @@ class DatatypeConfig(BaseModel):
     field_mappings: list[FieldMapping] = []
     strict_field_mapping: bool = False
     quality_rules: QualityRule | None = None
+    max_concurrent_writes: int | None = None  # datatype-level override for writeback parallelism
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":
