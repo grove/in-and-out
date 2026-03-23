@@ -179,12 +179,27 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     async def _run_health_server() -> None:
         await health_server.serve()
 
+    # Slot monitor fallback state
+    _use_polling_fallback: dict[str, bool] = {"enabled": False}
+
+    def _on_slot_fallback() -> None:
+        _use_polling_fallback["enabled"] = True
+        logger.warning("writeback_fallback_to_polling_due_to_slot_lag")
+
+    async def _slot_monitor_loop() -> None:
+        from inandout.writeback.slot_monitor import monitor_replication_slot
+        if not config.replication_slot.slot_name:
+            return
+        await monitor_replication_slot(pool, config.replication_slot, _on_slot_fallback)
+
     log.info("daemon_started")
 
     try:
         async with anyio.create_task_group() as tg:
             tg.start_soon(_run_health_server)
             tg.start_soon(_control_table_poller, dispatcher, control_poll_secs)
+            if config.replication_slot.slot_name:
+                tg.start_soon(_slot_monitor_loop)
 
             for connector_file_cfg in connector_configs:
                 connector_cfg = connector_file_cfg.connector

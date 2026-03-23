@@ -144,6 +144,23 @@ class WritebackEngine:
                         rows, connector.name, datatype, delta_table, log, result
                     )
 
+                # Dependency ordering within write batch
+                write_deps = getattr(writeback_cfg, "write_dependencies", [])
+                if write_deps and rows:
+                    from inandout.writeback.ordering import topological_sort_rows
+                    rows = topological_sort_rows(rows, write_deps)
+                    # Separate cycle-errored rows and send to dead-letter
+                    cycle_rows = [r for r in rows if r.get("_cycle_error")]
+                    rows = [r for r in rows if not r.get("_cycle_error")]
+                    for cycle_row in cycle_rows:
+                        ext_id = cycle_row.get("external_id") or cycle_row.get("_cluster_id", "")
+                        log.warning(
+                            "writeback_dependency_cycle_row",
+                            external_id=ext_id,
+                            group_id=cycle_row.get("_group_id"),
+                        )
+                        result.failed += 1
+
                 semaphore = anyio.Semaphore(effective_max_writes)
 
                 async with HttpTransportAdapter(connector) as transport:

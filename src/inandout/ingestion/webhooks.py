@@ -207,7 +207,6 @@ async def handle_webhook(
                     payload_ts = payload.get(ts_field)
                     if payload_ts is not None:
                         # Check stored value from the source table
-                        from inandout.postgres.schema import source_table_name
                         src_table = source_table_name(connector.name, datatype)
                         ext_id_for_oo = _extract_external_id(payload, ingestion_cfg.primary_key)
                         if ext_id_for_oo is not None:

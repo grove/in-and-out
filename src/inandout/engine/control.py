@@ -105,6 +105,8 @@ class ControlDispatcher:
             return self._cmd_reload_config(connector, datatype, payload)
         elif command == "reset-circuit-breaker":
             return self._cmd_reset_circuit_breaker(connector, datatype)
+        elif command == "resync":
+            return await self._cmd_resync(connector, datatype, payload, engine)
         else:
             raise ValueError(f"Unknown command: {command!r}")
 
@@ -250,6 +252,107 @@ class ControlDispatcher:
 
         logger.info("circuit_breaker_reset_via_control", scope=scope)
         return {"reset": scope}
+
+    async def _cmd_resync(
+        self,
+        connector: str | None,
+        datatype: str | None,
+        payload: dict,
+        engine: Any | None,
+    ) -> dict:
+        """Handle a resync command: targeted single-record fetch or full sync."""
+        if not connector or not datatype:
+            raise ValueError("resync requires 'connector' and 'datatype'")
+        if engine is None:
+            raise RuntimeError("resync requires an active IngestionEngine")
+
+        external_id = payload.get("external_id")
+        max_iterations = int(payload.get("max_iterations", 3))
+
+        if external_id is not None:
+            # Check how many times this record has been resynced recently
+            async with self._pool.connection() as conn:
+                try:
+                    count_row = await (await conn.execute(
+                        """
+                        SELECT COUNT(*) FROM inout_ops_control
+                        WHERE connector = %s AND datatype = %s
+                          AND command = 'resync'
+                          AND payload->>'external_id' = %s
+                          AND issued_at > NOW() - INTERVAL '1 hour'
+                        """,
+                        [connector, datatype, str(external_id)],
+                    )).fetchone()
+                    resync_count = count_row[0] if count_row else 0
+                except Exception:
+                    resync_count = 0
+
+            if resync_count >= max_iterations:
+                logger.warning(
+                    "resync_max_iterations_reached",
+                    connector=connector,
+                    datatype=datatype,
+                    external_id=external_id,
+                    count=resync_count,
+                    max_iterations=max_iterations,
+                )
+                return {"status": "abandoned", "reason": "max_iterations", "external_id": external_id}
+
+            # Find connector config and ingestion config from engine
+            # engine.run_sync_single_record needs connector cfg — look it up
+            try:
+                connector_cfg = None
+                ingestion_cfg = None
+                if hasattr(engine, "_connector_configs"):
+                    for cfg in engine._connector_configs:
+                        if cfg.name == connector:
+                            connector_cfg = cfg
+                            dtype_cfg = cfg.datatypes.get(datatype)
+                            if dtype_cfg:
+                                ingestion_cfg = dtype_cfg.ingestion
+                            break
+
+                if connector_cfg is None or ingestion_cfg is None:
+                    logger.warning(
+                        "resync_connector_config_not_found",
+                        connector=connector, datatype=datatype
+                    )
+                    return {"status": "skipped", "reason": "connector_config_not_found"}
+
+                result = await engine.run_sync_single_record(
+                    connector_cfg, datatype, ingestion_cfg, str(external_id)
+                )
+                return {
+                    "status": result.status,
+                    "external_id": external_id,
+                    "inserted": result.records_inserted,
+                    "updated": result.records_updated,
+                }
+            except Exception as exc:
+                logger.error("resync_single_record_failed", error=str(exc))
+                return {"status": "failed", "error": str(exc)}
+        else:
+            # No external_id → trigger full sync
+            try:
+                connector_cfg = None
+                ingestion_cfg = None
+                if hasattr(engine, "_connector_configs"):
+                    for cfg in engine._connector_configs:
+                        if cfg.name == connector:
+                            connector_cfg = cfg
+                            dtype_cfg = cfg.datatypes.get(datatype)
+                            if dtype_cfg:
+                                ingestion_cfg = dtype_cfg.ingestion
+                            break
+
+                if connector_cfg is None or ingestion_cfg is None:
+                    return {"status": "skipped", "reason": "connector_config_not_found"}
+
+                result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg)
+                return {"status": result.status, "mode": "full_sync"}
+            except Exception as exc:
+                logger.error("resync_full_sync_failed", error=str(exc))
+                return {"status": "failed", "error": str(exc)}
 
     async def _requeue_single(
         self,

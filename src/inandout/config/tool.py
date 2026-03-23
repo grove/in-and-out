@@ -50,6 +50,11 @@ class WebhookServerConfig(BaseModel):
     listen: str = "0.0.0.0:8443"
     tls: TLSConfig = Field(default_factory=TLSConfig)
     rate_limit: WebhookServerRateLimitConfig = Field(default_factory=WebhookServerRateLimitConfig)
+    # Hardening fields (Item 9)
+    rate_limit_per_minute: int = 300            # requests per minute per IP
+    ip_allowlist: list[str] = []               # empty = allow all; supports CIDR notation
+    tls_cert_file: str | None = None           # path to TLS certificate
+    tls_key_file: str | None = None            # path to TLS private key
 
 
 class HealthServerConfig(BaseModel):
@@ -237,6 +242,15 @@ class _WritebackHealthServerConfig(BaseModel):
     listen: str = "0.0.0.0:9091"
 
 
+class ReplicationSlotConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot_name: str | None = None
+    warn_lag_bytes: int = 100_000_000       # 100 MB
+    max_lag_bytes: int = 1_000_000_000      # 1 GB — fallback to polling above this
+    poll_interval_secs: float = 30.0
+
+
 class WritebackToolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -253,3 +267,4 @@ class WritebackToolConfig(BaseModel):
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
+    replication_slot: ReplicationSlotConfig = Field(default_factory=ReplicationSlotConfig)

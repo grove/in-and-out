@@ -55,6 +55,13 @@ class DependencyConfig(BaseModel):
     depends_on: str
 
 
+class WriteDependency(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    parent_datatype: str   # must be written before this datatype
+    join_field: str        # field in this datatype's row that references parent's external_id
+
+
 class OperationsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -82,6 +89,7 @@ class WritebackConfig(BaseModel):
     conflict_resolution: ConflictResolution
     supported_actions: list[str] = Field(min_length=1)
     dependencies: list[DependencyConfig] = []
+    write_dependencies: list[WriteDependency] = []  # ordering within write batch
     operations: OperationsConfig
     max_concurrent_writes: int = Field(default=10, ge=1)
     batch_size: int = Field(default=50, ge=1)

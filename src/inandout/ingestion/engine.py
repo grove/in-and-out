@@ -882,6 +882,94 @@ class IngestionEngine:
             log.info("tombstone_pass_complete", deleted=len(missing_ids))
 
 
+    async def run_sync_single_record(
+        self,
+        connector: ConnectorConfig,
+        datatype: str,
+        ingestion_cfg: IngestionConfig,
+        external_id: str,
+        dtype_cfg: DatatypeConfig | None = None,
+    ) -> SyncResult:
+        """Fetch and upsert a single record by external_id (targeted re-fetch).
+
+        Does NOT update the watermark — this is a targeted re-fetch, not a full sync.
+        """
+        run_id = uuid.uuid4()
+        result = SyncResult(run_id, connector.name, datatype, "single_record")
+        log = logger.bind(
+            connector=connector.name,
+            datatype=datatype,
+            external_id=external_id,
+            run_id=str(run_id),
+        )
+
+        ns = self._namespace
+        table = source_table_name(connector.name, datatype, ns)
+        dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
+
+        detail_path = getattr(ingestion_cfg.list, "detail_path", None)
+        if detail_path is None:
+            # Construct from list.path + external_id
+            detail_path = f"{ingestion_cfg.list.path}/{external_id}"
+        else:
+            detail_path = detail_path.replace("${external_id}", external_id)
+
+        try:
+            async with HttpTransportAdapter(connector) as transport:
+                resp = await transport._raw_request("GET", detail_path)
+                if resp.status_code == 404:
+                    log.info("targeted_resync_record_not_found", external_id=external_id)
+                    result.status = "completed"
+                    return result
+                resp.raise_for_status()
+                import orjson as _orjson_sr
+                record: dict[str, Any] = _orjson_sr.loads(resp.content) if resp.content else {}
+
+            # Apply field mappings + hooks + quality checks
+            if dtype_cfg is not None and dtype_cfg.field_mappings:
+                record = apply_field_mappings(record, dtype_cfg.field_mappings, strict=dtype_cfg.strict_field_mapping)
+            record = await apply_hooks(record, connector.name, self._pool)
+            if record is None:
+                result.status = "completed"
+                return result
+
+            if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
+                violations = validate_record(record, dtype_cfg.quality_rules, {})
+                if violations:
+                    result.records_errored += 1
+                    async with self._pool.connection() as conn:
+                        await ensure_source_table(conn, connector.name, datatype, ns)
+                        await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype, ns)
+                        await _write_dead_letter(
+                            conn, dl_table, external_id, record,
+                            str([str(v) for v in violations]),
+                            "quality_violation", run_id,
+                        )
+                        await conn.commit()
+                    result.status = "completed"
+                    return result
+
+            raw_hash = _compute_raw_hash(record)
+            async with self._pool.connection() as conn:
+                await ensure_source_table(conn, connector.name, datatype, ns)
+                async with conn.transaction():
+                    inserted, updated = await _upsert_record(
+                        conn, table, external_id, record, raw_hash, run_id
+                    )
+            result.records_fetched = 1
+            result.records_inserted = inserted
+            result.records_updated = updated
+            result.status = "completed"
+            log.info("targeted_resync_completed", inserted=inserted, updated=updated)
+
+        except Exception as exc:
+            result.status = "failed"
+            result.error_message = str(exc)
+            log.error("targeted_resync_failed", error=str(exc))
+
+        return result
+
+
 def _extract_external_id(record: dict[str, Any], primary_key: Any) -> str | None:
     from inandout.config.ingestion import PrimaryKeyExpression
     if isinstance(primary_key, str):
