@@ -38,9 +38,14 @@ def lww_merge(
     local_ts = local.get(ts_field)
     remote_ts = remote.get(ts_field)
     if local_ts is not None and remote_ts is not None:
-        # Compare as strings — ISO-8601 timestamps sort lexicographically
-        if str(remote_ts) > str(local_ts):
-            return None  # Remote wins — skip write
+        # Try numeric comparison first (Unix epoch int/float timestamps).
+        # Fall back to lexicographic string comparison for ISO-8601 strings.
+        try:
+            if float(remote_ts) > float(local_ts):
+                return None  # Remote wins — skip write
+        except (TypeError, ValueError):
+            if str(remote_ts) > str(local_ts):
+                return None  # Remote wins — skip write
     return local
 
 

@@ -169,6 +169,9 @@ async def _control_table_poller(
     log = logger.bind(component="writeback_control_table_poller")
     log.info("control_table_poller_started")
     while True:
+        if _draining:
+            log.info("writeback_control_table_poller_draining")
+            break
         try:
             count = await dispatcher.dispatch_pending(engine=None)
             if count:
@@ -176,6 +179,8 @@ async def _control_table_poller(
         except Exception as exc:
             log.error("control_table_poll_error", error=str(exc))
         await anyio.sleep(poll_secs)
+        if _draining:
+            break
 
 
 # ---------------------------------------------------------------------------

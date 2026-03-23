@@ -281,6 +281,9 @@ async def _control_table_poller(
     log = logger.bind(component="control_table_poller")
     log.info("control_table_poller_started")
     while True:
+        if _draining:
+            log.info("control_table_poller_draining")
+            break
         try:
             count = await dispatcher.dispatch_pending(engine=engine)
             if count:
@@ -288,6 +291,8 @@ async def _control_table_poller(
         except Exception as exc:
             log.error("control_table_poll_error", error=str(exc))
         await anyio.sleep(poll_secs)
+        if _draining:
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +671,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     async def _hot_reload_watcher(outer_tg: Any) -> None:
         """Watch the reload flag; on SIGHUP reload connectors and restart polling tasks."""
+        if _draining:
+            return
+
         # Try file watcher first (watchfiles), fall back to SIGHUP
         try:
             from inandout.ingestion.watcher import hot_reload_loop
@@ -689,14 +697,18 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
             connectors_path = Path(config.connectors_dir)
             if connectors_path.exists():
-                await hot_reload_loop(connectors_path, _on_file_change)
+                await hot_reload_loop(connectors_path, _on_file_change, should_stop=lambda: _draining)
                 return
         except ImportError:
             pass
 
         # Fallback: SIGHUP-based reload
         while True:
+            if _draining:
+                break
             await anyio.sleep(1.0)
+            if _draining:
+                break
             if not reload_flag.is_set():
                 continue
             reload_flag.clear()

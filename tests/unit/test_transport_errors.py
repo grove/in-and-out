@@ -98,8 +98,22 @@ def test_retry_after_seconds_numeric():
     assert retry_after_seconds(exc) == 30.0
 
 
-def test_retry_after_seconds_date_fallback():
-    exc = _make_status_error(429, headers={"Retry-After": "Mon, 01 Jan 2026 00:00:00 GMT"})
+def test_retry_after_seconds_date_future():
+    """A future HTTP-date Retry-After header returns a positive seconds value."""
+    exc = _make_status_error(429, headers={"Retry-After": "Fri, 31 Dec 2100 00:00:00 GMT"})
+    result = retry_after_seconds(exc)
+    assert result is not None and result > 0.0
+
+
+def test_retry_after_seconds_date_past():
+    """A past HTTP-date Retry-After header returns 0.0 (can retry immediately)."""
+    exc = _make_status_error(429, headers={"Retry-After": "Mon, 01 Jan 2024 00:00:00 GMT"})
+    assert retry_after_seconds(exc) == 0.0
+
+
+def test_retry_after_seconds_date_unparseable():
+    """An unparseable Retry-After header falls back to 60.0."""
+    exc = _make_status_error(429, headers={"Retry-After": "not-a-date"})
     assert retry_after_seconds(exc) == 60.0
 
 

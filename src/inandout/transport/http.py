@@ -151,7 +151,7 @@ class HttpTransportAdapter:
                                 f"Retry budget exhausted for connector {self._connector.name!r}"
                             )
                     wait = retry_after_seconds(exc) or (2 ** attempt)
-                    await anyio.sleep(min(wait, 60.0))
+                    await anyio.sleep(min(wait, 300.0))  # honour Retry-After up to 5 min
                     attempt += 1
                     last_exc = exc
                     continue
