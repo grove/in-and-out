@@ -75,6 +75,7 @@ class WritebackConfig(BaseModel):
     batch_size: int = Field(default=50, ge=1)
     etag_header: str = "ETag"
     if_match_header: str = "If-Match"
+    diff_fields: bool = False
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":

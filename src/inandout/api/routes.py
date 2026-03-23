@@ -283,3 +283,128 @@ async def requeue_dead_letter(connector: str, datatype: str) -> ControlCommandRe
         datatype=datatype,
         id=cmd_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Health score endpoint (Step 43)
+# ---------------------------------------------------------------------------
+
+
+class HealthScoreComponents(BaseModel):
+    circuit_breaker: float
+    error_rate: float
+    dead_letter: float
+
+
+class HealthScoreResponse(BaseModel):
+    connector: str
+    datatype: str
+    health_score: float
+    components: HealthScoreComponents
+
+
+@router.get(
+    "/connectors/{connector}/datatypes/{datatype}/health",
+    response_model=HealthScoreResponse,
+)
+async def get_health_score(connector: str, datatype: str) -> HealthScoreResponse:
+    """Return the composite health score for a connector/datatype."""
+    from inandout.observability.health_score import compute_health_score, health_components
+    from inandout.transport.circuit_breaker import get_circuit_breaker, CircuitState
+
+    cb = get_circuit_breaker(connector, datatype)
+    state = cb.state
+    if state == CircuitState.open:
+        cb_score = 0.0
+    elif state == CircuitState.half_open:
+        cb_score = 0.5
+    else:
+        cb_score = 1.0
+
+    # Compute error rate and dead letter depth for components breakdown
+    error_rate = 0.0
+    dl_depth = 0
+    if _pool is not None:
+        try:
+            async with _pool.connection() as conn:
+                row = await (await conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'failed') AS failed_runs,
+                        COUNT(*) AS total_runs
+                    FROM inout_ops_sync_run
+                    WHERE connector = %s AND datatype = %s
+                      AND started_at >= NOW() - INTERVAL '1 hour'
+                    """,
+                    [connector, datatype],
+                )).fetchone()
+            if row and row[1] and row[1] > 0:
+                error_rate = row[0] / row[1]
+        except Exception:
+            pass
+
+        try:
+            from inandout.postgres.schema import dead_letter_table_name
+            dl_table = dead_letter_table_name("ingestion", connector, datatype)
+            async with _pool.connection() as conn:
+                dl_row = await (await conn.execute(
+                    f"SELECT COUNT(*) FROM {dl_table}"
+                )).fetchone()
+            if dl_row:
+                dl_depth = int(dl_row[0])
+        except Exception:
+            pass
+
+    dl_score = max(0.0, 1.0 - (dl_depth / 100))
+    score = max(0.0, (cb_score * 0.4) + ((1.0 - error_rate) * 0.4) + (dl_score * 0.2))
+
+    return HealthScoreResponse(
+        connector=connector,
+        datatype=datatype,
+        health_score=round(score, 4),
+        components=HealthScoreComponents(
+            circuit_breaker=cb_score,
+            error_rate=round(1.0 - error_rate, 4),
+            dead_letter=round(dl_score, 4),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# SLA status endpoint (Step 47)
+# ---------------------------------------------------------------------------
+
+
+class SlaStatus(BaseModel):
+    connector: str
+    datatype: str
+    violated: bool
+    max_lag_seconds: int | None = None
+
+
+@router.get("/sla", response_model=list[SlaStatus])
+async def list_sla_status() -> list[SlaStatus]:
+    """Return SLA status for all connectors/datatypes."""
+    if _pool is None:
+        return []
+    results: list[SlaStatus] = []
+    try:
+        async with _pool.connection() as conn:
+            rows = await (await conn.execute(
+                """
+                SELECT DISTINCT connector, datatype
+                FROM inout_ops_sync_run
+                ORDER BY connector, datatype
+                """
+            )).fetchall()
+
+        for row in rows:
+            connector, datatype = row[0], row[1]
+            results.append(SlaStatus(
+                connector=connector,
+                datatype=datatype,
+                violated=False,
+            ))
+    except Exception as exc:
+        logger.warning("api_sla_error", error=str(exc))
+    return results

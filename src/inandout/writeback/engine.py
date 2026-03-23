@@ -181,6 +181,25 @@ class WritebackEngine:
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.update.path)
 
+                # Incremental writeback: only send changed fields
+                if writeback_cfg.diff_fields and external_id:
+                    try:
+                        from inandout.postgres.schema import source_table_name
+                        src_table = source_table_name(connector.name, result.datatype)
+                        async with self._pool.connection() as diff_conn:
+                            lw_row = await (await diff_conn.execute(
+                                f"SELECT _last_written FROM {src_table} WHERE external_id = %s",
+                                [external_id],
+                            )).fetchone()
+                        if lw_row and lw_row[0]:
+                            last_written = lw_row[0] if isinstance(lw_row[0], dict) else {}
+                            payload = {k: v for k, v in payload.items() if last_written.get(k) != v}
+                        if not payload:
+                            result.skipped += 1
+                            return
+                    except Exception:
+                        pass  # Fall through to full payload if diff fails
+
                 if writeback_cfg.protection_level == ProtectionLevel.optimistic:
                     # Fetch ETag via lookup GET
                     lookup_path = interpolate_path(ops.lookup.path)
@@ -226,6 +245,22 @@ class WritebackEngine:
                         raise
                 else:
                     await transport._request(ops.update.method.upper(), path, json=payload)
+
+                # Update _last_written on successful PATCH when diff_fields is enabled
+                if writeback_cfg.diff_fields and external_id:
+                    try:
+                        import orjson as _orjson
+                        from inandout.postgres.schema import source_table_name as _src_table_name
+                        src_table = _src_table_name(connector.name, result.datatype)
+                        full_payload = {k: v for k, v in row.items() if not k.startswith("_")}
+                        async with self._pool.connection() as lw_conn:
+                            await lw_conn.execute(
+                                f"UPDATE {src_table} SET _last_written = %s WHERE external_id = %s",
+                                [_orjson.dumps(full_payload).decode(), external_id],
+                            )
+                            await lw_conn.commit()
+                    except Exception:
+                        pass  # Non-critical: don't fail writeback over _last_written update
 
                 result.processed += 1
 

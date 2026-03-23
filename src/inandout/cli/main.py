@@ -39,10 +39,17 @@ connector_app = typer.Typer(
     no_args_is_help=True,
 )
 
+webhook_app = typer.Typer(
+    name="webhook",
+    help="Webhook management commands.",
+    no_args_is_help=True,
+)
+
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(writeback_app, name="writeback")
 app.add_typer(db_app, name="db")
 app.add_typer(connector_app, name="connector")
+app.add_typer(webhook_app, name="webhook")
 
 console = Console()
 err_console = Console(stderr=True, style="bold red")
@@ -530,6 +537,160 @@ def connector_search(
         anyio.run(_run)
     except Exception as exc:
         err_console.print(f"Search failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# webhook sub-commands (Step 41)
+# ---------------------------------------------------------------------------
+
+def _parse_duration_to_seconds(duration: str) -> int:
+    """Parse a simple duration string like '1h', '30m', '7d' to seconds."""
+    from inandout.config._duration import parse_duration
+    return int(parse_duration(duration))
+
+
+@webhook_app.command("replay")
+def webhook_replay(
+    connector: str = typer.Option(..., "--connector", help="Connector name."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name."),
+    since: Optional[str] = typer.Option(  # noqa: UP007
+        "1h",
+        "--since",
+        help="Time window (e.g. '1h', '30m', '7d'). Default: 1h.",
+    ),
+    limit: int = typer.Option(100, "--limit", help="Maximum rows to replay."),
+    config: str = typer.Option(
+        "config/ingestion.yaml",
+        "--config", "-c",
+        help="Path to ingestion tool config YAML.",
+    ),
+) -> None:
+    """Replay webhook events from the audit log for a connector/datatype."""
+    import anyio
+    from inandout.config.loader import load_ingestion_tool_config
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_ingestion_tool_config(cfg_path)
+    since_secs = _parse_duration_to_seconds(since or "1h")
+
+    async def _run() -> None:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            async with pool.connection() as conn:
+                rows = await (await conn.execute(
+                    """
+                    SELECT id, connector, datatype, external_id, received_at,
+                           payload_hash, action, status
+                    FROM inout_ops_webhook_log
+                    WHERE connector = %s AND datatype = %s
+                      AND received_at >= NOW() - INTERVAL '1 second' * %s
+                    ORDER BY received_at DESC
+                    LIMIT %s
+                    """,
+                    [connector, datatype, since_secs, limit],
+                )).fetchall()
+        finally:
+            await pool.close()
+
+        table = Table(title=f"Webhook Replay — {connector}/{datatype}")
+        table.add_column("ID", style="cyan")
+        table.add_column("Received At")
+        table.add_column("Action")
+        table.add_column("Status")
+        table.add_column("External ID")
+        table.add_column("Replay")
+
+        for row in rows:
+            wl_id, conn_name, dtype, ext_id, recv_at, phash, action, status = row
+            if action == "direct_upsert":
+                replay_status = "[green]replayed[/green]"
+                # Note: actual re-trigger would need the original payload; log only
+            else:
+                replay_status = "[yellow]not supported (notification-only)[/yellow]"
+
+            if action == "sync_triggered":
+                console.print(
+                    f"[yellow]Warning:[/yellow] row {wl_id} has action='sync_triggered' — "
+                    "replay not supported (original payload unavailable)"
+                )
+
+            table.add_row(
+                str(wl_id),
+                str(recv_at),
+                action or "",
+                status or "",
+                ext_id or "",
+                replay_status,
+            )
+
+        console.print(table)
+        console.print(f"[bold]{len(rows)} row(s) found.[/bold]")
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Replay failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# connector status command (Step 46)
+# ---------------------------------------------------------------------------
+
+@connector_app.command("status")
+def connector_status(
+    config: str = typer.Option(
+        "config/ingestion.yaml",
+        "--config", "-c",
+        help="Path to ingestion tool config YAML.",
+    ),
+) -> None:
+    """Show deployed connector versions from the database."""
+    import anyio
+    from inandout.config.loader import load_ingestion_tool_config
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_ingestion_tool_config(cfg_path)
+
+    async def _run() -> None:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            async with pool.connection() as conn:
+                rows = await (await conn.execute(
+                    """
+                    SELECT connector, deployed_version, updated_at
+                    FROM inout_ops_connector_version
+                    ORDER BY connector
+                    """
+                )).fetchall()
+        finally:
+            await pool.close()
+
+        table = Table(title="Connector Version Status")
+        table.add_column("Connector", style="cyan")
+        table.add_column("Deployed Version", style="bold")
+        table.add_column("Last Updated")
+
+        for row in rows:
+            table.add_row(str(row[0]), str(row[1]), str(row[2]))
+
+        console.print(table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Failed to fetch connector status: {exc}")
         raise typer.Exit(code=1)
 
 

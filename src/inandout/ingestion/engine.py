@@ -79,10 +79,9 @@ class IngestionEngine:
             run_id = uuid.uuid4()
             log = logger.bind(connector=connector.name, datatype=datatype, run_id=str(run_id))
 
-            # Use a single long-lived connection to hold the advisory lock for the entire sync.
-            # PostgreSQL advisory locks are session-scoped (connection-scoped): acquiring and
-            # releasing on different connections would leave the lock permanently held or make
-            # the unlock a silent no-op. Keeping one connection open guarantees correctness.
+            # Use a single long-lived connection to hold the distributed lock for the entire sync.
+            # We use SELECT ... FOR UPDATE SKIP LOCKED on inout_ops_sync_lock to ensure only one
+            # instance runs a sync for a given (connector, datatype) pair at a time.
             async with self._pool.connection() as conn:
                 existing_wm = await get_watermark(conn, connector.name, datatype)
                 is_incremental = (
@@ -105,13 +104,48 @@ class IngestionEngine:
                 )
                 await conn.commit()
 
-                # Acquire advisory lock (non-blocking) on this connection.
-                lock_key = _advisory_lock_key(connector.name, datatype)
-                row = await (await conn.execute(
-                    "SELECT pg_try_advisory_lock(%s)", [lock_key]
-                )).fetchone()
-                if not row or not row[0]:
-                    log.warning("advisory_lock_skipped", reason="another instance holds the lock")
+                # Ensure the lock row exists, then attempt SELECT FOR UPDATE SKIP LOCKED.
+                # This replaces the old pg_try_advisory_lock approach with a distributed-safe
+                # row-level lock that works correctly across multiple PostgreSQL connections.
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO inout_ops_sync_lock (connector, datatype)
+                        VALUES (%s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        [connector.name, datatype],
+                    )
+                    await conn.commit()
+                except Exception:
+                    pass  # Table may not exist yet — fall back to advisory lock
+
+                lock_acquired = False
+                try:
+                    lock_row = await (await conn.execute(
+                        """
+                        SELECT id FROM inout_ops_sync_lock
+                        WHERE connector = %s AND datatype = %s
+                        FOR UPDATE SKIP LOCKED
+                        """,
+                        [connector.name, datatype],
+                    )).fetchone()
+                    lock_acquired = lock_row is not None
+                except Exception:
+                    # inout_ops_sync_lock table doesn't exist yet — fall back to advisory lock
+                    lock_key = _advisory_lock_key(connector.name, datatype)
+                    adv_row = await (await conn.execute(
+                        "SELECT pg_try_advisory_lock(%s)", [lock_key]
+                    )).fetchone()
+                    lock_acquired = bool(adv_row and adv_row[0])
+                    if lock_acquired:
+                        # Store the key so we can release it in finally
+                        self._advisory_lock_key_held = lock_key
+                    else:
+                        self._advisory_lock_key_held = None
+
+                if not lock_acquired:
+                    log.warning("sync_lock_skipped", reason="another instance holds the lock")
                     await conn.execute(
                         "UPDATE inout_ops_sync_run SET status='skipped', finished_at=NOW() WHERE id=%s",
                         [run_id],
@@ -120,6 +154,21 @@ class IngestionEngine:
                     result.status = "skipped"
                     return result
 
+                # Check connector version (if versioning table exists)
+                try:
+                    ver_row = await (await conn.execute(
+                        "SELECT deployed_version FROM inout_ops_connector_version WHERE connector = %s",
+                        [connector.name],
+                    )).fetchone()
+                    if ver_row and ver_row[0] != connector.version:
+                        log.warning(
+                            "connector_version_changed",
+                            old_version=ver_row[0],
+                            new_version=connector.version,
+                        )
+                except Exception:
+                    pass  # Table may not exist yet
+
                 try:
                     await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log, dtype_cfg=dtype_cfg)
                 except Exception as exc:
@@ -127,8 +176,7 @@ class IngestionEngine:
                     result.error_message = str(exc)
                     log.error("sync_failed", error=str(exc))
                 finally:
-                    # Update sync_run record and release the lock on the SAME connection
-                    # that acquired it, so the unlock is not a no-op.
+                    # Update sync_run record — lock is released when the transaction commits/rolls back
                     status = result.status if result.status != "running" else "completed"
                     await conn.execute(
                         """
@@ -152,7 +200,25 @@ class IngestionEngine:
                             run_id,
                         ],
                     )
-                    await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
+                    # Upsert connector version on successful full sync
+                    if status == "completed" and mode == "full":
+                        try:
+                            await conn.execute(
+                                """
+                                INSERT INTO inout_ops_connector_version (connector, deployed_version, updated_at)
+                                VALUES (%s, %s, NOW())
+                                ON CONFLICT (connector) DO UPDATE
+                                SET deployed_version = EXCLUDED.deployed_version, updated_at = NOW()
+                                """,
+                                [connector.name, connector.version],
+                            )
+                        except Exception:
+                            pass  # Table may not exist yet
+                    # Release fallback advisory lock if it was used
+                    adv_key = getattr(self, "_advisory_lock_key_held", None)
+                    if adv_key is not None:
+                        await conn.execute("SELECT pg_advisory_unlock(%s)", [adv_key])
+                        self._advisory_lock_key_held = None
                     await conn.commit()
 
             if result.status == "running":

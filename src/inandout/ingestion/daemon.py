@@ -213,6 +213,27 @@ async def _housekeeping_loop(
             log.error("housekeeping_failed", error=str(exc))
 
 
+async def _sla_check_loop(
+    pool: Any,
+    connector_configs: list,
+    interval_secs: float = 60.0,
+) -> None:
+    """Dedicated SLA check loop that runs every 60s independent of polling loops."""
+    from inandout.observability.sla import check_all_slas
+
+    log = logger.bind(component="sla_check_loop")
+    log.info("sla_check_loop_started")
+    while True:
+        await anyio.sleep(interval_secs)
+        try:
+            results = await check_all_slas(pool, connector_configs)
+            if results:
+                violated_count = sum(1 for v in results.values() if v)
+                log.info("sla_check_complete", checked=len(results), violated=violated_count)
+        except Exception as exc:
+            log.error("sla_check_failed", error=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # SIGHUP hot-reload support
 # ---------------------------------------------------------------------------
@@ -375,6 +396,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                 connector_datatypes,
                 housekeeping_interval_secs,
             )
+            tg.start_soon(_sla_check_loop, pool, connector_configs)
             await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
     finally:
         log.info("daemon_stopping")

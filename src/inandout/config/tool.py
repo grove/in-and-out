@@ -205,6 +205,7 @@ class IngestionToolConfig(BaseModel):
     housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
+    schema_registry_dir: str | None = None
 
 
 class _WritebackHealthServerConfig(BaseModel):

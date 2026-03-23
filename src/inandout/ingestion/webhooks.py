@@ -20,6 +20,31 @@ from inandout.transport.auth import resolve_credential
 
 logger = structlog.get_logger(__name__)
 
+
+async def _log_webhook(
+    pool: Any,
+    connector: str,
+    datatype: str | None,
+    external_id: str | None,
+    payload_hash: str,
+    action: str,
+    status: str,
+) -> None:
+    """Insert a row into inout_ops_webhook_log. Errors are silently swallowed."""
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO inout_ops_webhook_log
+                    (connector, datatype, external_id, payload_hash, action, status)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                [connector, datatype, external_id, payload_hash, action, status],
+            )
+            await conn.commit()
+    except Exception:
+        pass  # Audit log failure must never mask the original error
+
 # Max clock skew tolerated between sender and receiver (seconds).
 _MAX_TIMESTAMP_SKEW_SECS = 300
 
@@ -159,14 +184,24 @@ async def handle_webhook(
         and getattr(webhook_events_cfg, "payload_type", "full") == "notification"
     )
 
+    payload_hash = hashlib.sha256(body).hexdigest()
+
     if is_notification_only:
         log.info("webhook_notification_triggering_full_lookup")
         try:
             result = await engine.run_sync(connector, datatype, ingestion_cfg)
             log.info("webhook_lookup_complete", status=result.status, inserted=result.records_inserted)
+            await _log_webhook(
+                engine._pool, connector.name, datatype, None,
+                payload_hash, "sync_triggered", "processed"
+            )
             return JSONResponse({"status": "triggered", "sync_status": result.status})
         except Exception as exc:
             log.error("webhook_lookup_failed", error=str(exc))
+            await _log_webhook(
+                engine._pool, connector.name, datatype, None,
+                payload_hash, "sync_triggered", "failed"
+            )
             return JSONResponse({"error": "lookup failed"}, status_code=500)
 
     # Full-payload webhook: upsert the record directly.
@@ -192,8 +227,16 @@ async def handle_webhook(
             inserted=inserted,
             updated=updated,
         )
+        await _log_webhook(
+            engine._pool, connector.name, datatype, external_id,
+            payload_hash, "direct_upsert", "processed"
+        )
         return JSONResponse({"status": "ok", "inserted": inserted, "updated": updated})
 
     except Exception as exc:
         log.error("webhook_upsert_failed", error=str(exc))
+        await _log_webhook(
+            engine._pool, connector.name, datatype, None,
+            payload_hash, "direct_upsert", "failed"
+        )
         return JSONResponse({"error": "upsert failed"}, status_code=500)

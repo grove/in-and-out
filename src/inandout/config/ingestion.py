@@ -38,6 +38,7 @@ class ScheduleConfig(BaseModel):
 
     interval: str | None = None
     cron: str | None = None
+    max_lag_seconds: int | None = None
 
     @model_validator(mode="after")
     def interval_or_cron_required(self) -> "ScheduleConfig":

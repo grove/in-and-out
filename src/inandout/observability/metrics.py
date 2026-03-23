@@ -56,6 +56,20 @@ dead_letter_depth: Gauge = _gauge(
     ["connector", "datatype"],
 )
 
+# Connector health score (0.0–1.0)
+connector_health_score: Gauge = _gauge(
+    "inout_connector_health_score",
+    "Composite health score for connector/datatype (0.0=unhealthy, 1.0=healthy)",
+    ["connector", "datatype"],
+)
+
+# SLA violation gauge (1=violated, 0=ok)
+sync_sla_violated: Gauge = _gauge(
+    "inout_sync_sla_violated",
+    "Whether the sync SLA has been violated (1=violated, 0=ok)",
+    ["connector", "datatype"],
+)
+
 
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""

@@ -192,6 +192,7 @@ class ConnectorConfig(BaseModel):
     generation_profile: GenerationProfile
     description: str | None = None
     api_version: str = Field(min_length=1)
+    version: str = "1.0.0"
     api_deprecation_deadline: str | None = None
     runtime_params: dict[str, RuntimeParamConfig] | None = None
     connection: ConnectionConfig

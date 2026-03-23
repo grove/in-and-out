@@ -48,6 +48,7 @@ def source_table_ddl(connector: str, datatype: str, namespace: str = "public") -
     _deleted_at     TIMESTAMPTZ,
     _schema_version INTEGER NOT NULL DEFAULT 1,
     _source_version TEXT,
+    _last_written   JSONB,
     PRIMARY KEY (external_id)
 );
 CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_ingested_at_idx ON {table} (_ingested_at);""".strip()
