@@ -106,7 +106,7 @@ async def test_cdc_record_goes_through_field_mapping_before_upsert():
         ) as mock_fm,
         patch("inandout.ingestion.engine.apply_hooks", new=AsyncMock(side_effect=lambda r, *a, **kw: r)),
         patch("inandout.ingestion.engine.validate_record", return_value=[]),
-        patch("inandout.ingestion.engine._upsert_record", new=AsyncMock(return_value=(1, 0))),
+        patch("inandout.ingestion.engine._upsert_record", new=AsyncMock(return_value=(1, 0, 0))),
         patch("inandout.ingestion.engine.set_watermark", new=AsyncMock()),
     ):
         await engine._run_cdc_sync(
@@ -137,7 +137,7 @@ async def test_cdc_record_quality_violation_goes_to_dead_letter():
 
     async def _fake_upsert(*args, **kw):
         upsert_called.append(args)
-        return 1, 0
+        return 1, 0, 0
 
     dl_written = []
 
@@ -187,7 +187,7 @@ async def test_cdc_delete_event_writes_tombstone_not_upsert():
 
     async def _fake_upsert(*args, **kw):
         upsert_called.append(args)
-        return 1, 0
+        return 1, 0, 0
 
     with (
         patch("inandout.ingestion.engine.ensure_source_table", new=AsyncMock()),
@@ -237,7 +237,7 @@ async def test_cdc_plugin_hooks_applied():
         patch("inandout.ingestion.engine.apply_field_mappings", side_effect=lambda r, *a, **kw: r),
         patch("inandout.ingestion.engine.apply_hooks", new=AsyncMock(side_effect=_hook)),
         patch("inandout.ingestion.engine.validate_record", return_value=[]),
-        patch("inandout.ingestion.engine._upsert_record", new=AsyncMock(return_value=(1, 0))),
+        patch("inandout.ingestion.engine._upsert_record", new=AsyncMock(return_value=(1, 0, 0))),
         patch("inandout.ingestion.engine.set_watermark", new=AsyncMock()),
     ):
         await engine._run_cdc_sync(
@@ -276,7 +276,7 @@ async def test_cdc_watermark_updated_after_batch():
         patch("inandout.ingestion.engine.apply_field_mappings", side_effect=lambda r, *a, **kw: r),
         patch("inandout.ingestion.engine.apply_hooks", new=AsyncMock(side_effect=lambda r, *a, **kw: r)),
         patch("inandout.ingestion.engine.validate_record", return_value=[]),
-        patch("inandout.ingestion.engine._upsert_record", new=AsyncMock(return_value=(1, 0))),
+        patch("inandout.ingestion.engine._upsert_record", new=AsyncMock(return_value=(1, 0, 0))),
         patch("inandout.ingestion.engine.set_watermark", new=AsyncMock(side_effect=_mock_set_wm)),
     ):
         await engine._run_cdc_sync(

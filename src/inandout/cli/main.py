@@ -98,12 +98,27 @@ def ingest_run(
 ) -> None:
     """Start the ingestion daemon (blocking)."""
     import anyio
+    import os
     from inandout.ingestion.daemon import run_ingestion_daemon
+    from inandout.config.loader import load_ingestion_tool_config
 
     cfg_path = Path(config)
     if not cfg_path.exists():
         err_console.print(f"Config file not found: {cfg_path}")
         raise typer.Exit(code=1)
+
+    # Emit operator audit record before starting the daemon
+    try:
+        tool_cfg = load_ingestion_tool_config(cfg_path)
+        issued_by = os.environ.get("USER", "cli")
+        _write_operator_audit(
+            tool_cfg.database.dsn,
+            "operator-action",
+            {"action": "ingest-run-started", "config": str(cfg_path)},
+            issued_by,
+        )
+    except Exception:
+        pass  # audit failure must never block daemon startup
 
     console.print(f"[green]Starting ingestion daemon[/green] — config: {cfg_path}")
     anyio.run(run_ingestion_daemon, cfg_path)
@@ -448,6 +463,48 @@ def writeback_run(
 
 
 # ---------------------------------------------------------------------------
+# Operator audit trail helper
+# ---------------------------------------------------------------------------
+
+def _write_operator_audit(dsn: str, command: str, payload: dict, issued_by: str) -> None:
+    """Insert an operator-action row into inout_ops_control for audit trail.
+
+    Silently swallows errors so it never blocks the actual CLI action.
+    This satisfies the GOAL.md requirement that CLI-initiated actions produce
+    a durable audit record with issued_by tracking.
+    """
+    import asyncio
+    import uuid as _uuid
+
+    async def _insert() -> None:
+        import psycopg
+        import orjson
+
+        async with await psycopg.AsyncConnection.connect(dsn) as conn:
+            await conn.execute(
+                """
+                INSERT INTO inout_ops_control
+                    (id, connector, datatype, command, payload, target_tool, status, issued_by, issued_at)
+                VALUES
+                    (%s, NULL, NULL, %s, %s::jsonb, 'cli', 'completed', %s, NOW())
+                ON CONFLICT DO NOTHING
+                """,
+                [
+                    str(_uuid.uuid4()),
+                    command,
+                    orjson.dumps(payload).decode(),
+                    issued_by,
+                ],
+            )
+            await conn.commit()
+
+    try:
+        asyncio.run(_insert())
+    except Exception:
+        pass  # audit failure must never block the operator action
+
+
+# ---------------------------------------------------------------------------
 # db sub-commands
 # ---------------------------------------------------------------------------
 
@@ -473,7 +530,10 @@ def db_upgrade(
         raise typer.Exit(code=1)
 
     tool_cfg = load_ingestion_tool_config(cfg_path)
-    os.environ["INOUT_DATABASE_URL"] = tool_cfg.database.dsn
+    dsn = tool_cfg.database.dsn
+    os.environ["INOUT_DATABASE_URL"] = dsn
+    issued_by = os.environ.get("USER", "cli")
+    _write_operator_audit(dsn, "operator-action", {"action": "db-upgrade", "revision": revision}, issued_by)
 
     alembic_cfg = AlembicConfig("alembic.ini")
     console.print(f"[green]Running migrations[/green] → {revision}")
@@ -503,7 +563,10 @@ def db_downgrade(
         raise typer.Exit(code=1)
 
     tool_cfg = load_ingestion_tool_config(cfg_path)
-    os.environ["INOUT_DATABASE_URL"] = tool_cfg.database.dsn
+    dsn = tool_cfg.database.dsn
+    os.environ["INOUT_DATABASE_URL"] = dsn
+    issued_by = os.environ.get("USER", "cli")
+    _write_operator_audit(dsn, "operator-action", {"action": "db-downgrade", "revision": revision}, issued_by)
 
     alembic_cfg = AlembicConfig("alembic.ini")
     console.print(f"[yellow]Rolling back migrations[/yellow] → {revision}")

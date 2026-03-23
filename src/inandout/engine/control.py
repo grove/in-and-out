@@ -32,6 +32,7 @@ class ControlDispatcher:
         paused_connectors: set[tuple[str, str]],
         target_tool: str | None = None,
         drain_callback: Any | None = None,
+        reload_callback: Any | None = None,
     ) -> None:
         self._pool = pool
         self._paused = paused_connectors
@@ -39,6 +40,8 @@ class ControlDispatcher:
         self._target_tool = target_tool
         # Called when a 'drain' command is received; typically sets a module-level _draining flag
         self._drain_callback = drain_callback
+        # Called when a 'reload-config' command is received; typically sets a threading.Event
+        self._reload_callback = reload_callback
 
     # ------------------------------------------------------------------
     # Main entry point — called by the polling loop every N seconds
@@ -254,14 +257,18 @@ class ControlDispatcher:
         datatype: str | None,
         payload: dict,
     ) -> dict:
-        """Signal that config should be reloaded on next poll cycle.
+        """Signal that config should be reloaded at the start of the next poll cycle.
 
-        The actual reload is performed by the daemon loop — this command
-        just logs the intent. Hot-reload via plugin version watcher handles
-        the real work asynchronously.
+        Calls the registered reload_callback (typically threading.Event.set) which
+        is monitored by _hot_reload_watcher in the daemon.  The hot-reload loop then
+        re-reads connector YAML files and restarts affected polling tasks.
         """
         scope = f"{connector or '*'}/{datatype or '*'}"
-        logger.info("reload_config_requested", scope=scope, payload=payload)
+        if self._reload_callback is not None:
+            self._reload_callback()
+            logger.info("reload_config_triggered", scope=scope)
+        else:
+            logger.info("reload_config_requested_no_callback", scope=scope)
         return {"reload_requested": scope}
 
     def _cmd_reset_circuit_breaker(

@@ -127,7 +127,7 @@ async def test_upsert_record_shared_table_uses_connector_col():
     mock_conn.execute = AsyncMock(side_effect=_capture_execute)
 
     run_id = uuid.uuid4()
-    inserted, updated = await _upsert_record(
+    inserted, updated, _resurrected = await _upsert_record(
         mock_conn, "inout_src_contacts_unified",
         "ext_123", {"name": "Alice"}, "abc123", run_id,
         connector_col="hubspot",
@@ -196,7 +196,7 @@ async def test_upsert_record_shared_table_update_path():
     mock_conn.execute = AsyncMock(side_effect=_capture_execute)
 
     run_id = uuid.uuid4()
-    inserted, updated = await _upsert_record(
+    inserted, updated, _resurrected = await _upsert_record(
         mock_conn, "inout_src_contacts_unified",
         "ext_789", {"name": "Charlie"}, "new_hash_abc", run_id,
         connector_col="salesforce",

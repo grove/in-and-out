@@ -45,7 +45,7 @@ async def test_upsert_record_stores_lineage():
         "page_number": 1,
     }
 
-    inserted, updated = await _upsert_record(
+    inserted, updated, _resurrected = await _upsert_record(
         conn=mock_conn,
         table="inout_src_test_contacts",
         external_id="contact-1",
@@ -93,7 +93,7 @@ async def test_upsert_record_stores_lineage_on_update():
         "page_number": 2,
     }
 
-    inserted, updated = await _upsert_record(
+    inserted, updated, _resurrected = await _upsert_record(
         conn=mock_conn,
         table="inout_src_test_contacts",
         external_id="contact-2",
@@ -131,7 +131,7 @@ async def test_upsert_record_without_lineage():
 
     mock_conn.execute = AsyncMock(side_effect=_execute_side_effect)
 
-    inserted, updated = await _upsert_record(
+    inserted, updated, _resurrected = await _upsert_record(
         conn=mock_conn,
         table="inout_src_test_contacts",
         external_id="contact-3",

@@ -674,7 +674,7 @@ class IngestionEngine:
                             else:
                                 # Single-record path (default)
                                 raw_hash = _compute_raw_hash(record)
-                                inserted, updated = await _upsert_record(
+                                inserted, updated, resurrected = await _upsert_record(
                                     conn, table, external_id, record, raw_hash, result.run_id,
                                     lineage=_current_lineage,
                                     connector_col=connector.name if shared_table else None,
@@ -710,6 +710,11 @@ class IngestionEngine:
 
                                 # History table support
                                 if (inserted or updated) and history_mode == HistoryMode.append:
+                                    await _write_history_record(
+                                        conn, hist_table, external_id, record, raw_hash, result.run_id
+                                    )
+                                elif resurrected and history_mode == HistoryMode.append:
+                                    # T1 #41: preserve deletion-cleared event in history for audit
                                     await _write_history_record(
                                         conn, hist_table, external_id, record, raw_hash, result.run_id
                                     )
@@ -929,7 +934,7 @@ class IngestionEngine:
                             result.records_deleted = getattr(result, "records_deleted", 0) + 1
                             continue
 
-                        inserted, updated = await _upsert_record(
+                        inserted, updated, resurrected = await _upsert_record(
                             conn, table, external_id, record, raw_hash, result.run_id
                         )
                         result.records_inserted += inserted
@@ -937,6 +942,10 @@ class IngestionEngine:
 
                         # 7. History table write
                         if (inserted or updated) and history_mode == HistoryMode.append:
+                            await _write_history_record(
+                                conn, hist_table, external_id, record, raw_hash, result.run_id
+                            )
+                        elif resurrected and history_mode == HistoryMode.append:
                             await _write_history_record(
                                 conn, hist_table, external_id, record, raw_hash, result.run_id
                             )
@@ -995,7 +1004,7 @@ class IngestionEngine:
                 if external_id is None:
                     result.records_errored += 1
                     continue
-                ins, upd = await _upsert_record(conn, table, external_id, rec, raw_hash, result.run_id)
+                ins, upd, _res = await _upsert_record(conn, table, external_id, rec, raw_hash, result.run_id)
                 result.records_inserted += ins
                 result.records_updated += upd
             return
@@ -1207,7 +1216,7 @@ class IngestionEngine:
             async with self._pool.connection() as conn:
                 await ensure_source_table(conn, connector.name, datatype, ns)
                 async with conn.transaction():
-                    inserted, updated = await _upsert_record(
+                    inserted, updated, _resurrected = await _upsert_record(
                         conn, table, external_id, record, raw_hash, run_id
                     )
             result.records_fetched = 1
@@ -1249,8 +1258,12 @@ async def _upsert_record(
     run_id: uuid.UUID,
     lineage: dict[str, Any] | None = None,
     connector_col: str | None = None,  # A3: set for shared (fan-in) tables
-) -> tuple[int, int]:
-    """Upsert a record. Returns (inserted, updated).
+) -> tuple[int, int, int]:
+    """Upsert a record. Returns (inserted, updated, resurrected).
+
+    resurrected=1 means the record previously had a tombstone (_deleted_at IS NOT NULL)
+    and has been re-activated — callers should write a history record for audit purposes
+    when history_mode is HistoryMode.append (T1 #41).
 
     When connector_col is set, the upsert key is (external_id, _connector)
     rather than just external_id (A3 fan-in shared tables).
@@ -1279,7 +1292,7 @@ async def _upsert_record(
                     data, data, run_id, raw_hash, lineage_json,
                 ],
             )
-            return 1, 0
+            return 1, 0, 0
         elif row[0] != raw_hash:
             was_tombstoned = row[1] is not None
             await conn.execute(
@@ -1293,7 +1306,7 @@ async def _upsert_record(
             )
             if was_tombstoned:
                 _emit_resurrection(table, external_id)
-            return 0, 1
+            return 0, 1, int(was_tombstoned)
         else:
             was_tombstoned = row[1] is not None
             await conn.execute(
@@ -1303,7 +1316,7 @@ async def _upsert_record(
             )
             if was_tombstoned:
                 _emit_resurrection(table, external_id)
-            return 0, 0
+            return 0, 0, int(was_tombstoned)
 
     # Standard single-connector path
     row = await (await conn.execute(
@@ -1321,13 +1334,13 @@ async def _upsert_record(
             [external_id, data, data, run_id, raw_hash, lineage_json],
         )
         if cur.rowcount == 1:
-            return 1, 0
+            return 1, 0, 0
         # Concurrent insert happened; fall through to treat as an update
         row = await (await conn.execute(
             f"SELECT _raw_hash, _deleted_at FROM {table} WHERE external_id = %s", [external_id]
         )).fetchone()
         if row is None or row[0] == raw_hash:
-            return 0, 0
+            return 0, 0, 0
         # Concurrent insert has a different hash — update with our payload
 
     if row[0] != raw_hash:
@@ -1343,7 +1356,7 @@ async def _upsert_record(
         )
         if was_tombstoned:
             _emit_resurrection(table, external_id)
-        return 0, 1
+        return 0, 1, int(was_tombstoned)
     else:
         # No-op: same hash. Clear tombstone if record reappeared.
         was_tombstoned = row[1] is not None
@@ -1353,7 +1366,7 @@ async def _upsert_record(
         )
         if was_tombstoned:
             _emit_resurrection(table, external_id)
-        return 0, 0
+        return 0, 0, int(was_tombstoned)
 
 
 def _emit_resurrection(table: str, external_id: str) -> None:

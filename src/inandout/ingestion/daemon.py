@@ -518,7 +518,12 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     engine = IngestionEngine(pool, read_pool=read_pool, publisher=publisher)
 
     paused_connectors: set[tuple[str, str]] = set()
-    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="ingestion", drain_callback=_trigger_drain)
+    dispatcher = ControlDispatcher(
+        pool, paused_connectors,
+        target_tool="ingestion",
+        drain_callback=_trigger_drain,
+        reload_callback=reload_flag.set,
+    )
 
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     default_interval_secs = parse_duration(

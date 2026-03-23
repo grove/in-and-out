@@ -336,7 +336,7 @@ async def handle_webhook(
             import uuid
             async with conn.transaction():
                 run_id = uuid.uuid4()
-                inserted, updated = await _upsert_record(conn, table, external_id, payload, raw_hash, run_id)
+                inserted, updated, _resurrected = await _upsert_record(conn, table, external_id, payload, raw_hash, run_id)
 
         log.info(
             "webhook_upserted",
