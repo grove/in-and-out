@@ -15,6 +15,7 @@ from starlette.routing import Route
 from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_writeback_tool_config
 from inandout.config.tool import WritebackToolConfig
+from inandout.engine.control import ControlDispatcher
 from inandout.postgres.pool import create_pool
 from inandout.writeback.engine import WritebackEngine
 
@@ -71,14 +72,22 @@ async def _writeback_polling_loop(
 
 
 # ---------------------------------------------------------------------------
-# Control table poller (stub)
+# Control table poller
 # ---------------------------------------------------------------------------
 
-async def _control_table_poller(pool: Any, poll_secs: float) -> None:
+async def _control_table_poller(
+    dispatcher: ControlDispatcher,
+    poll_secs: float,
+) -> None:
     log = logger.bind(component="writeback_control_table_poller")
     log.info("control_table_poller_started")
     while True:
-        # TODO: poll inout_ops_control for pending commands and execute them
+        try:
+            count = await dispatcher.dispatch_pending(engine=None)
+            if count:
+                log.info("control_commands_dispatched", count=count)
+        except Exception as exc:
+            log.error("control_table_poll_error", error=str(exc))
         await anyio.sleep(poll_secs)
 
 
@@ -91,10 +100,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     config: WritebackToolConfig = load_writeback_tool_config(config_path)
 
-    configure_logging(
-        format=config.observability.logging.format,
-        level=config.observability.logging.level,
-    )
+    configure_logging(format=config.observability.logging.format, level=config.observability.logging.level)
     configure_metrics()
     configure_tracing(
         enabled=config.observability.tracing.enabled,
@@ -105,7 +111,6 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     log = logger.bind(component="writeback_daemon")
     log.info("daemon_starting", connectors_dir=config.connectors_dir)
 
-    # Load all connector configs
     connectors_dir = Path(config.connectors_dir)
     connector_configs = []
     if connectors_dir.exists():
@@ -120,13 +125,13 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     pool = await create_pool(config.database)
     engine = WritebackEngine(pool)
 
-    control_poll_secs = parse_duration(config.control_table.poll_interval)
+    paused_connectors: set[tuple[str, str]] = set()
+    dispatcher = ControlDispatcher(pool, paused_connectors)
 
-    # Determine default polling interval
+    control_poll_secs = parse_duration(config.control_table.poll_interval)
     batch_wait = config.defaults.batch.max_wait if config.defaults.batch else "5s"
     default_interval_secs = parse_duration(batch_wait)
 
-    # Build health server
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
         _build_health_app(), host=host, port=int(port_str), log_level="warning"
@@ -140,19 +145,14 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     try:
         async with anyio.create_task_group() as tg:
-            # Health endpoints
             tg.start_soon(_run_health_server)
+            tg.start_soon(_control_table_poller, dispatcher, control_poll_secs)
 
-            # Control table poller
-            tg.start_soon(_control_table_poller, pool, control_poll_secs)
-
-            # One polling loop per writeback-capable connector/datatype
             for connector_file_cfg in connector_configs:
                 connector_cfg = connector_file_cfg.connector
                 for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
                     if dtype_cfg.writeback is None:
                         continue
-                    # OSI-Mapping convention: _delta_{connector}_{datatype}
                     delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
                     tg.start_soon(
                         _writeback_polling_loop,
@@ -163,7 +163,6 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                         delta_table,
                         default_interval_secs,
                     )
-
     finally:
         log.info("daemon_stopping")
         await pool.close()
