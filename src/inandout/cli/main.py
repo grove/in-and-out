@@ -51,12 +51,19 @@ api_app = typer.Typer(
     no_args_is_help=True,
 )
 
+dead_letter_app = typer.Typer(
+    name="dead-letter",
+    help="Dead-letter queue inspection and re-processing commands.",
+    no_args_is_help=True,
+)
+
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(writeback_app, name="writeback")
 app.add_typer(db_app, name="db")
 app.add_typer(connector_app, name="connector")
 app.add_typer(webhook_app, name="webhook")
 app.add_typer(api_app, name="api")
+app.add_typer(dead_letter_app, name="dead-letter")
 
 console = Console()
 err_console = Console(stderr=True, style="bold red")
@@ -179,6 +186,78 @@ def ingest_validate_connector(
         table.add_row(connector_path.name, "[red]FAIL[/red]", str(exc))
         console.print(table)
         err_console.print(f"\nValidation failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+@ingest_app.command("backfill")
+def ingest_backfill(
+    connector: str = typer.Option(..., "--connector", help="Path to connector YAML file."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name to backfill."),
+    from_date: str = typer.Option(..., "--from-date", help="Start date (ISO 8601, e.g. 2024-01-01)."),
+    to_date: str = typer.Option(..., "--to-date", help="End date (ISO 8601, e.g. 2024-01-31)."),
+    window: str = typer.Option("1d", "--window", help="Window size per sync (e.g. 1d, 6h)."),
+    config: str = typer.Option(
+        "config/ingestion.yaml",
+        "--config", "-c",
+        help="Path to ingestion tool config YAML.",
+    ),
+    staging_table: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--staging-table",
+        help="Name of the staging table (auto-generated if omitted).",
+    ),
+) -> None:
+    """Run a historical backfill for a connector/datatype over a date range."""
+    import anyio
+    from datetime import datetime, timezone
+
+    from inandout.ingestion.backfill import BackfillConfig, run_backfill
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    connector_path = Path(connector)
+    if not connector_path.exists():
+        err_console.print(f"Connector file not found: {connector_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        from_dt = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+        to_dt = datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        err_console.print(f"Invalid date format: {exc}")
+        raise typer.Exit(code=1)
+
+    if from_dt >= to_dt:
+        err_console.print("--from must be before --to")
+        raise typer.Exit(code=1)
+
+    backfill_cfg = BackfillConfig(
+        connector_path=connector_path,
+        datatype=datatype,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        window=window,
+        staging_table=staging_table,
+    )
+
+    async def _run() -> None:
+        result = await run_backfill(backfill_cfg, cfg_path)
+        table = Table(title="Backfill Complete")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value")
+        table.add_row("Windows processed", str(result.windows_processed))
+        table.add_row("Total records", str(result.total_records))
+        table.add_row("Staging table", result.staging_table)
+        table.add_row("Promoted", str(result.promoted))
+        console.print(table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Backfill failed: {exc}")
         raise typer.Exit(code=1)
 
 
@@ -509,6 +588,114 @@ def connector_install(
         raise
     except Exception as exc:
         err_console.print(f"Install failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+@connector_app.command("new")
+def connector_new(
+    name: str = typer.Option(..., "--name", help="Connector name (lowercase, alphanumeric)."),
+    base_url: str = typer.Option(..., "--base-url", help="Base URL of the target API."),
+    auth: str = typer.Option(
+        "none",
+        "--auth",
+        help="Auth type: api_key|oauth2|basic|none",
+    ),
+    spec_url: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--spec-url",
+        help="URL to fetch the OpenAPI spec from (optional, auto-discovers from base-url if omitted).",
+    ),
+    output: str = typer.Option(
+        ".",
+        "--output",
+        help="Output directory for the generated YAML.",
+        show_default=True,
+    ),
+) -> None:
+    """Generate a new connector YAML from an API spec (or a stub template)."""
+    import anyio
+    from inandout.generator.introspect import (
+        extract_list_endpoints,
+        fetch_openapi_spec,
+        infer_auth,
+        infer_pagination,
+    )
+    from inandout.generator.template import render_connector_yaml
+
+    async def _run() -> None:
+        spec: dict | None = None
+
+        # Try spec URL first, then auto-discover from base_url
+        if spec_url:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                try:
+                    resp = await client.get(spec_url)
+                    if resp.status_code == 200:
+                        spec = resp.json()
+                except Exception as exc:
+                    console.print(f"[yellow]Warning: could not fetch spec from {spec_url}: {exc}[/yellow]")
+        else:
+            spec = await fetch_openapi_spec(base_url)
+            if spec is None:
+                console.print(f"[yellow]No OpenAPI spec found at {base_url} — generating stub.[/yellow]")
+
+        endpoints: list[dict] = []
+        resolved_auth = auth
+
+        if spec is not None:
+            raw_endpoints = extract_list_endpoints(spec)
+            # Enrich with pagination info
+            for ep in raw_endpoints:
+                ep["pagination"] = infer_pagination(spec, ep["path"])
+            endpoints = raw_endpoints
+
+            if auth == "none":
+                resolved_auth = infer_auth(spec)
+                if resolved_auth != "none":
+                    console.print(f"[cyan]Detected auth type from spec: {resolved_auth}[/cyan]")
+
+        yaml_content = render_connector_yaml(
+            name=name,
+            base_url=base_url,
+            auth=resolved_auth,
+            endpoints=endpoints,
+        )
+
+        out_dir = Path(output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = name.lower().replace(" ", "_")
+        out_path = out_dir / f"{safe_name}.yaml"
+        out_path.write_text(yaml_content, encoding="utf-8")
+
+        table = Table(title=f"Generated connector: {name}")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value")
+        table.add_row("Output", str(out_path))
+        table.add_row("Base URL", base_url)
+        table.add_row("Auth", resolved_auth)
+        table.add_row("Endpoints detected", str(len(endpoints)))
+        table.add_row(
+            "Datatypes generated",
+            str(len(endpoints)) if endpoints else "1 (stub)",
+        )
+        console.print(table)
+
+        if endpoints:
+            ep_table = Table(title="Detected endpoints")
+            ep_table.add_column("Path", style="cyan")
+            ep_table.add_column("Pagination")
+            ep_table.add_column("Description")
+            for ep in endpoints:
+                ep_table.add_row(ep["path"], ep.get("pagination", "none"), ep.get("description", ""))
+            console.print(ep_table)
+
+        console.print("\n[yellow]Review the generated YAML and update all # TODO: comments.[/yellow]")
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Failed to generate connector: {exc}")
         raise typer.Exit(code=1)
 
 
@@ -899,6 +1086,207 @@ def lint_connectors(
 
     if total_errors > 0:
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# dead-letter sub-commands (Step 75)
+# ---------------------------------------------------------------------------
+
+
+@dead_letter_app.command("inspect")
+def dead_letter_inspect(
+    connector: str = typer.Option(..., "--connector", help="Connector name."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name."),
+    config: str = typer.Option(
+        "config/ingestion.yaml",
+        "--config", "-c",
+        help="Path to ingestion tool config YAML.",
+    ),
+    limit: int = typer.Option(20, "--limit", help="Maximum number of rows to display."),
+) -> None:
+    """Inspect dead-letter queue rows for a connector/datatype."""
+    import anyio
+    from inandout.config.loader import load_ingestion_tool_config
+    from inandout.deadletter.inspect import fetch_dead_letter_rows
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_ingestion_tool_config(cfg_path)
+
+    async def _run() -> None:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            rows = await fetch_dead_letter_rows(pool, connector, datatype, limit=limit)
+        finally:
+            await pool.close()
+
+        if not rows:
+            console.print(f"[green]No dead-letter rows for {connector}/{datatype}[/green]")
+            return
+
+        dl_table = Table(title=f"Dead Letter: {connector}/{datatype} ({len(rows)} rows)")
+        dl_table.add_column("ID", style="cyan")
+        dl_table.add_column("External ID")
+        dl_table.add_column("Error Class", style="bold red")
+        dl_table.add_column("Error Message")
+        dl_table.add_column("Failed At")
+        dl_table.add_column("Requeue Count")
+        dl_table.add_column("Raw (truncated)")
+
+        for row in rows:
+            raw_preview = str(row.get("raw", ""))[:100]
+            dl_table.add_row(
+                str(row["id"]),
+                str(row.get("external_id") or ""),
+                str(row.get("error_class") or ""),
+                str(row.get("error_message") or ""),
+                str(row.get("failed_at") or ""),
+                str(row.get("requeue_count") or 0),
+                raw_preview,
+            )
+
+        console.print(dl_table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Inspect failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+@dead_letter_app.command("transform")
+def dead_letter_transform(
+    connector: str = typer.Option(..., "--connector", help="Connector name."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name."),
+    script: str = typer.Option(..., "--script", help="Path to Python transform script."),
+    config: str = typer.Option(
+        "config/ingestion.yaml",
+        "--config", "-c",
+        help="Path to ingestion tool config YAML.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen without writing."),
+) -> None:
+    """Apply a transform script to dead-letter rows to reprocess them."""
+    import anyio
+    from inandout.config.loader import load_ingestion_tool_config
+    from inandout.deadletter.transform import apply_transform_script
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    script_path = Path(script)
+    if not script_path.exists():
+        err_console.print(f"Script file not found: {script_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_ingestion_tool_config(cfg_path)
+
+    async def _run() -> None:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            result = await apply_transform_script(pool, connector, datatype, script_path, dry_run=dry_run)
+        finally:
+            await pool.close()
+
+        suffix = " (DRY RUN)" if dry_run else ""
+        table = Table(title=f"Transform Result{suffix}")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Count", style="bold")
+        table.add_row("Processed", str(result.processed))
+        table.add_row("Upserted", str(result.upserted))
+        table.add_row("Dropped", str(result.dropped))
+        table.add_row("Failed", str(result.failed))
+        console.print(table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Transform failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# migrate-connector command (Step 77)
+# ---------------------------------------------------------------------------
+
+
+@app.command("migrate-connector")
+def migrate_connector(
+    input_path: str = typer.Option(..., "--input", help="Path to connector YAML to migrate."),
+    from_version: str = typer.Option(..., "--from-version", help="Source schema version."),
+    to_version: str = typer.Option(..., "--to-version", help="Target schema version."),
+    output_path: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--output",
+        help="Output path (default: overwrite input with .bak backup).",
+    ),
+) -> None:
+    """Migrate a connector YAML from one schema version to another."""
+    import shutil
+
+    import yaml
+    from inandout.migrations.connector_schema import apply_migrations, find_migration_path
+
+    in_path = Path(input_path)
+    if not in_path.exists():
+        err_console.print(f"Input file not found: {in_path}")
+        raise typer.Exit(code=1)
+
+    raw_text = in_path.read_text(encoding="utf-8")
+    raw_dict = yaml.safe_load(raw_text)
+
+    try:
+        migrations = find_migration_path(from_version, to_version)
+    except ValueError as exc:
+        err_console.print(str(exc))
+        raise typer.Exit(code=1)
+
+    if not migrations:
+        console.print(f"[green]No migrations needed from {from_version} to {to_version}.[/green]")
+        raise typer.Exit(code=0)
+
+    migrated = apply_migrations(raw_dict, migrations)
+
+    # Validate result
+    try:
+        from inandout.config.loader import load_connector_from_string
+        result_yaml = yaml.dump(migrated, allow_unicode=True)
+        load_connector_from_string(result_yaml)
+        console.print("[green]Migrated config passes Pydantic validation.[/green]")
+    except Exception as exc:
+        console.print(f"[yellow]Warning: migrated config validation issue: {exc}[/yellow]")
+
+    # Determine output path
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        # Backup original and overwrite
+        backup_path = in_path.with_suffix(in_path.suffix + ".bak")
+        shutil.copy2(in_path, backup_path)
+        console.print(f"[dim]Backup written to {backup_path}[/dim]")
+        out_path = in_path
+
+    result_text = yaml.dump(migrated, allow_unicode=True)
+    out_path.write_text(result_text, encoding="utf-8")
+
+    table = Table(title="Connector Migration Complete")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value")
+    table.add_row("Input", str(in_path))
+    table.add_row("Output", str(out_path))
+    table.add_row("From version", from_version)
+    table.add_row("To version", to_version)
+    table.add_row("Migrations applied", str(len(migrations)))
+    for m in migrations:
+        table.add_row("  Migration", f"{m.from_version} → {m.to_version}: {m.description}")
+    console.print(table)
 
 
 if __name__ == "__main__":

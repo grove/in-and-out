@@ -139,6 +139,7 @@ class HttpTransportAdapter:
                             connector=self._connector.name,
                             datatype="",
                             status_code="429",
+                            namespace="public",
                         ).inc()
                     except Exception:
                         pass
@@ -167,6 +168,7 @@ class HttpTransportAdapter:
                         connector=self._connector.name,
                         datatype="",
                         status_code=str(exc.response.status_code),
+                        namespace="public",
                     ).inc()
                 except Exception:
                     pass

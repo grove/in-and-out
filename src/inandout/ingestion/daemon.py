@@ -72,7 +72,12 @@ async def _ready(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ready", "connectors": []})
 
 
-def _build_app(engine: IngestionEngine, connector_configs: list, pool: Any = None) -> Any:
+def _build_app(
+    engine: IngestionEngine,
+    connector_configs: list,
+    pool: Any = None,
+    api_auth: Any = None,
+) -> Any:
     from fastapi import FastAPI
     from inandout.api import build_api_router
     from inandout.ui import build_ui_router
@@ -108,7 +113,11 @@ def _build_app(engine: IngestionEngine, connector_configs: list, pool: Any = Non
         pass  # UI mount is best-effort
 
     app = Starlette(routes=routes)
-    return OpenTelemetryMiddleware(app)
+    otel_app = OpenTelemetryMiddleware(app)
+    if api_auth is not None:
+        from inandout.api.auth import BearerTokenMiddleware
+        return BearerTokenMiddleware(otel_app, api_auth=api_auth)
+    return otel_app
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +383,10 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # Build HTTP app (health + webhook routes + metrics)
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_app(engine, connector_configs, pool=pool), host=host, port=int(port_str), log_level="warning"
+        _build_app(engine, connector_configs, pool=pool, api_auth=config.api_auth),
+        host=host,
+        port=int(port_str),
+        log_level="warning",
     )
     health_server = uvicorn.Server(health_server_config)
 
@@ -472,6 +484,14 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             log.info("sighup_received_reloading_connectors")
             new_configs = _load_connectors()
             await _apply_connector_changes(outer_tg, new_configs=new_configs)
+
+    # Discover and register plugin hooks from installed packages
+    try:
+        from inandout.plugins.discovery import discover_and_register_hooks
+        n_hooks = discover_and_register_hooks()
+        log.info("plugin_hooks_registered", count=n_hooks)
+    except Exception as exc:
+        log.warning("plugin_hook_discovery_failed", error=str(exc))
 
     log.info("daemon_started")
 

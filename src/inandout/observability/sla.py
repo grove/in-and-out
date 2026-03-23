@@ -57,7 +57,7 @@ async def check_sla(
 
     gauge_val = 1 if violated else 0
     try:
-        _sla_gauge.labels(connector=connector, datatype=datatype).set(gauge_val)
+        _sla_gauge.labels(connector=connector, datatype=datatype, namespace="public").set(gauge_val)
     except Exception:
         pass
 

@@ -113,6 +113,7 @@ class CircuitBreaker:
             circuit_breaker_state.labels(
                 connector=self.connector,
                 datatype=self.datatype,
+                namespace="public",
             ).set(state_int)
         except Exception:
             pass

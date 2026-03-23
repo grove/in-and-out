@@ -79,7 +79,7 @@ async def compute_health_score(
     # Emit Prometheus gauge
     try:
         from inandout.observability.metrics import connector_health_score
-        connector_health_score.labels(connector=connector, datatype=datatype).set(score)
+        connector_health_score.labels(connector=connector, datatype=datatype, namespace="public").set(score)
     except Exception:
         pass
 

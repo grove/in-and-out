@@ -47,12 +47,13 @@ def test_circuit_breaker_state_is_gauge():
 
 def test_records_processed_labels():
     from inandout.observability.metrics import records_processed_total
-    # Should be labelable with required labels
+    # Should be labelable with required labels (including namespace)
     counter = records_processed_total.labels(
         tool="ingestion",
         connector="test",
         datatype="contacts",
         operation="insert",
+        namespace="public",
     )
     counter.inc()  # should not raise
 
@@ -63,5 +64,6 @@ def test_http_errors_labels():
         connector="test",
         datatype="contacts",
         status_code="503",
+        namespace="public",
     )
     counter.inc()  # should not raise

@@ -25,56 +25,56 @@ def _gauge(name: str, documentation: str, labelnames: list[str]) -> Gauge:
 records_processed_total: Counter = _counter(
     "inout_records_processed_total",
     "Total records processed by operation",
-    ["tool", "connector", "datatype", "operation"],
+    ["tool", "connector", "datatype", "operation", "namespace"],
 )
 
 # Sync lag
 sync_lag_seconds: Gauge = _gauge(
     "inout_sync_lag_seconds",
     "Seconds since the last successful sync for this connector/datatype",
-    ["tool", "connector", "datatype"],
+    ["tool", "connector", "datatype", "namespace"],
 )
 
 # HTTP errors
 http_errors_total: Counter = _counter(
     "inout_http_errors_total",
     "Total HTTP errors by status code, connector, and datatype",
-    ["connector", "datatype", "status_code"],
+    ["connector", "datatype", "status_code", "namespace"],
 )
 
 # Circuit breaker state (0=closed, 1=open, 2=half_open)
 circuit_breaker_state: Gauge = _gauge(
     "inout_circuit_breaker_state",
     "Circuit breaker state (0=closed 1=open 2=half_open)",
-    ["connector", "datatype"],
+    ["connector", "datatype", "namespace"],
 )
 
 # Dead letter queue depth
 dead_letter_depth: Gauge = _gauge(
     "inout_dead_letter_depth",
     "Number of unresolved dead-letter records",
-    ["connector", "datatype"],
+    ["connector", "datatype", "namespace"],
 )
 
 # Connector health score (0.0–1.0)
 connector_health_score: Gauge = _gauge(
     "inout_connector_health_score",
     "Composite health score for connector/datatype (0.0=unhealthy, 1.0=healthy)",
-    ["connector", "datatype"],
+    ["connector", "datatype", "namespace"],
 )
 
 # SLA violation gauge (1=violated, 0=ok)
 sync_sla_violated: Gauge = _gauge(
     "inout_sync_sla_violated",
     "Whether the sync SLA has been violated (1=violated, 0=ok)",
-    ["connector", "datatype"],
+    ["connector", "datatype", "namespace"],
 )
 
 # Data quality violations counter
 quality_violations_total: Counter = _counter(
     "inout_quality_violations_total",
     "Total data quality rule violations by connector, datatype, and rule",
-    ["connector", "datatype", "rule"],
+    ["connector", "datatype", "rule", "namespace"],
 )
 
 

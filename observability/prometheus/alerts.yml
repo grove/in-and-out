@@ -1,0 +1,48 @@
+groups:
+  - name: inandout_alerts
+    interval: 60s
+    rules:
+      - alert: SyncSLAViolated
+        expr: sync_sla_violated == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sync SLA violated for {{ $labels.connector }}/{{ $labels.datatype }}"
+          description: "Last successful sync is older than configured max_lag_seconds"
+
+      - alert: CircuitBreakerOpen
+        expr: circuit_breaker_state == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.connector }}/{{ $labels.datatype }}"
+          description: "Circuit breaker has been open for >5 minutes — API may be down"
+
+      - alert: DeadLetterDepthHigh
+        expr: dead_letter_depth > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High dead-letter depth for {{ $labels.connector }}/{{ $labels.datatype }}"
+          description: "{{ $value }} records in dead-letter queue"
+
+      - alert: ConnectorHealthDegraded
+        expr: connector_health_score < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connector health degraded: {{ $labels.connector }}/{{ $labels.datatype }}"
+          description: "Health score {{ $value }} below 0.5 threshold"
+
+      - alert: QualityViolationsHigh
+        expr: rate(quality_violations_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High quality violation rate for {{ $labels.connector }}/{{ $labels.datatype }}"
+          description: "More than 0.1 quality violations/sec in the last 5 minutes"

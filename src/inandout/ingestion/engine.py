@@ -257,7 +257,8 @@ class IngestionEngine:
 
             if result.status == "completed":
                 sync_lag_seconds.labels(
-                    tool="ingestion", connector=connector.name, datatype=datatype
+                    tool="ingestion", connector=connector.name, datatype=datatype,
+                    namespace=self._namespace,
                 ).set(0.0)
 
             return result
@@ -374,6 +375,7 @@ class IngestionEngine:
                                                 connector=connector.name,
                                                 datatype=datatype,
                                                 rule=v.rule,
+                                                namespace=self._namespace,
                                             ).inc()
                                         except Exception:
                                             pass
@@ -423,6 +425,7 @@ class IngestionEngine:
                                         connector=connector.name,
                                         datatype=datatype,
                                         operation="insert",
+                                        namespace=self._namespace,
                                     ).inc()
                                 elif updated:
                                     records_processed_total.labels(
@@ -430,6 +433,7 @@ class IngestionEngine:
                                         connector=connector.name,
                                         datatype=datatype,
                                         operation="update",
+                                        namespace=self._namespace,
                                     ).inc()
                                 else:
                                     records_processed_total.labels(
@@ -437,6 +441,7 @@ class IngestionEngine:
                                         connector=connector.name,
                                         datatype=datatype,
                                         operation="noop",
+                                        namespace=self._namespace,
                                     ).inc()
 
                                 # History table support
@@ -698,6 +703,7 @@ class IngestionEngine:
                         connector=connector_name,
                         datatype=datatype,
                         operation="delete",
+                        namespace=self._namespace,
                     ).inc()
 
             log.info("tombstone_pass_complete", deleted=len(missing_ids))

@@ -82,7 +82,7 @@ async def test_check_sla_sets_prometheus_gauge():
             violated = await check_sla(pool, "conn", "dtype", max_lag_seconds=3600)
 
     assert violated is False
-    mock_gauge.labels.assert_called_once_with(connector="conn", datatype="dtype")
+    mock_gauge.labels.assert_called_once_with(connector="conn", datatype="dtype", namespace="public")
     mock_labels.set.assert_called_once_with(0)
 
 

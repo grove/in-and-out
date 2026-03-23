@@ -1,0 +1,62 @@
+# Alertmanager configuration for in-and-out
+#
+# This is a minimal placeholder configuration that routes all alerts to a
+# webhook receiver at http://localhost:5001.
+#
+# To configure real receivers, replace the webhook_configs section with:
+#
+# Slack:
+#   - name: 'slack-notifications'
+#     slack_configs:
+#       - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+#         channel: '#alerts'
+#         title: 'in-and-out alert: {{ .GroupLabels.alertname }}'
+#         text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+#
+# PagerDuty:
+#   - name: 'pagerduty-critical'
+#     pagerduty_configs:
+#       - routing_key: 'YOUR_PAGERDUTY_ROUTING_KEY'
+#         severity: '{{ .CommonLabels.severity }}'
+#
+# Email:
+#   - name: 'email-notifications'
+#     email_configs:
+#       - to: 'oncall@yourcompany.com'
+#         from: 'alertmanager@yourcompany.com'
+#         smarthost: 'smtp.yourcompany.com:587'
+#         auth_username: 'alertmanager'
+#         auth_password: 'YOUR_SMTP_PASSWORD'
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'connector', 'datatype']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'webhook-placeholder'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'webhook-placeholder'
+      continue: true
+    - match:
+        severity: warning
+      receiver: 'webhook-placeholder'
+
+receivers:
+  - name: 'webhook-placeholder'
+    webhook_configs:
+      - url: 'http://localhost:5001'
+        send_resolved: true
+        # TODO: replace this with your actual notification receiver
+        # See comments above for Slack, PagerDuty, or email configuration
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'connector', 'datatype']

@@ -658,6 +658,112 @@ async def list_writeback_audit(
         return []
 
 
+# ---------------------------------------------------------------------------
+# Billing / cost attribution metrics endpoint (Step 78)
+# ---------------------------------------------------------------------------
+
+
+class NamespaceMetricsSummary(BaseModel):
+    namespace: str
+    connectors: int
+    total_records_processed_24h: int
+    total_quality_violations_24h: int
+    connectors_healthy: int
+    connectors_degraded: int
+    connectors_unhealthy: int
+    dead_letter_total: int
+
+
+@router.get(
+    "/namespaces/{namespace}/metrics-summary",
+    response_model=NamespaceMetricsSummary,
+)
+async def get_namespace_metrics_summary(namespace: str) -> NamespaceMetricsSummary:
+    """Return a billing/cost metrics summary for a namespace."""
+    if _pool is None:
+        return NamespaceMetricsSummary(
+            namespace=namespace,
+            connectors=0,
+            total_records_processed_24h=0,
+            total_quality_violations_24h=0,
+            connectors_healthy=0,
+            connectors_degraded=0,
+            connectors_unhealthy=0,
+            dead_letter_total=0,
+        )
+
+    # Table prefix pattern for this namespace
+    table_prefix = f"inout_{namespace}_"
+
+    total_records_24h = 0
+    total_qv_24h = 0
+    connectors_set: set[str] = set()
+    connectors_healthy = 0
+    connectors_degraded = 0
+    connectors_unhealthy = 0
+    dead_letter_total = 0
+
+    try:
+        async with _pool.connection() as conn:
+            # Count records and connectors from sync run log
+            rows = await (await conn.execute(
+                """
+                SELECT connector, datatype,
+                       COALESCE(SUM(records_inserted + records_updated), 0) AS records_24h
+                FROM inout_ops_sync_run
+                WHERE started_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY connector, datatype
+                """
+            )).fetchall()
+
+            for row in rows:
+                connector_name, datatype, recs = row[0], row[1], row[2]
+                connectors_set.add(connector_name)
+                total_records_24h += int(recs or 0)
+
+            # Compute health brackets for all known connector/datatype pairs
+            from inandout.transport.circuit_breaker import get_circuit_breaker, CircuitState
+
+            all_pairs = await (await conn.execute(
+                """
+                SELECT DISTINCT connector, datatype
+                FROM inout_ops_sync_run
+                """
+            )).fetchall()
+
+            for pair_row in all_pairs:
+                c, d = pair_row[0], pair_row[1]
+                cb = get_circuit_breaker(c, d)
+                if cb.state == CircuitState.open:
+                    cb_score = 0.0
+                elif cb.state == CircuitState.half_open:
+                    cb_score = 0.5
+                else:
+                    cb_score = 1.0
+                # Simple health score based on CB state alone
+                bracket = _health_bracket(cb_score)
+                if bracket == "healthy":
+                    connectors_healthy += 1
+                elif bracket == "degraded":
+                    connectors_degraded += 1
+                else:
+                    connectors_unhealthy += 1
+
+    except Exception as exc:
+        logger.warning("namespace_metrics_summary_error", namespace=namespace, error=str(exc))
+
+    return NamespaceMetricsSummary(
+        namespace=namespace,
+        connectors=len(connectors_set),
+        total_records_processed_24h=total_records_24h,
+        total_quality_violations_24h=total_qv_24h,
+        connectors_healthy=connectors_healthy,
+        connectors_degraded=connectors_degraded,
+        connectors_unhealthy=connectors_unhealthy,
+        dead_letter_total=dead_letter_total,
+    )
+
+
 @router.get("/sla", response_model=list[SlaStatus])
 async def list_sla_status() -> list[SlaStatus]:
     """Return SLA status for all connectors/datatypes."""
