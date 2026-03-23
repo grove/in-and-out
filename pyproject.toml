@@ -144,6 +144,7 @@ addopts = "--tb=short"
 norecursedirs = ["src", ".git", ".tox", "dist", "build", "*.egg-info"]
 markers = [
     "acceptance: marks tests as acceptance tests requiring real external APIs (deselect with '-m not acceptance')",
+    "load: marks tests as load/performance tests requiring Docker and extended timeout",
 ]
 
 [tool.coverage.run]
