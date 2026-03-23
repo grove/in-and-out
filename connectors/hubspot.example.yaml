@@ -45,10 +45,14 @@ connector:
     pause_duration: "60s"
 
   webhooks:
-    signature_header: X-HubSpot-Signature
-    credential_ref: hubspot_webhook_secret
+    path: /webhooks/hubspot
+    signature:
+      algorithm: hmac-sha256
+      header: X-HubSpot-Signature-V3
+      credential_ref: hubspot_webhook_secret
     fan_out:
       discriminator: objectType
+      unmatched: log_and_discard
       routes:
         - match: contact.creation
           datatype: contacts

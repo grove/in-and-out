@@ -1,0 +1,86 @@
+schema_version: 1
+
+connector:
+  name: salesforce
+  system: "Salesforce CRM"
+  generation_profile: full_duplex
+  api_version: "v59.0"
+
+  connection:
+    base_url: "https://myorg.my.salesforce.com"
+    timeout:
+      connect: "10s"
+      read: "30s"
+      write: "30s"
+
+  auth:
+    type: oauth2
+    credential_ref: salesforce_app          # env: INOUT_CREDENTIAL_SALESFORCE_APP = "client_id:client_secret"
+    oauth2:
+      grant_type: client_credentials
+      token_url: "https://myorg.my.salesforce.com/services/oauth2/token"
+      scopes: []
+
+  rate_limit:
+    requests_per_second: 10
+
+  datatypes:
+    contacts:
+      ingestion:
+        primary_key: "Id"
+        history_mode: overwrite
+        schedule:
+          interval: "10m"
+        list:
+          method: GET
+          path: "/services/data/v59.0/query"
+          record_selector: "records"
+          pagination:
+            strategy: cursor
+            cursor:
+              # Initial request: ?q=SELECT+Id,FirstName,...+FROM+Contact
+              # Subsequent pages: GET nextRecordsUrl value from response body
+              request_param: "q"
+              response_path: "nextRecordsUrl"
+          incremental:
+            enabled: true
+            cursor_field: "LastModifiedDate"
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: q
+              value: "SELECT Id, FirstName, LastName, Email, Phone, LastModifiedDate FROM Contact WHERE LastModifiedDate > ${watermark} ORDER BY LastModifiedDate ASC"
+        full_sync_query: "SELECT Id, FirstName, LastName, Email, Phone, LastModifiedDate FROM Contact ORDER BY LastModifiedDate ASC"
+
+      writeback:
+        protection_level: 2
+        conflict_resolution: remote_wins
+        operations:
+          update:
+            method: PATCH
+            path: "/services/data/v59.0/sobjects/Contact/${external_id}"
+
+    accounts:
+      ingestion:
+        primary_key: "Id"
+        history_mode: overwrite
+        schedule:
+          interval: "15m"
+        list:
+          method: GET
+          path: "/services/data/v59.0/query"
+          record_selector: "records"
+          pagination:
+            strategy: cursor
+            cursor:
+              request_param: "q"
+              response_path: "nextRecordsUrl"
+          incremental:
+            enabled: true
+            cursor_field: "LastModifiedDate"
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: q
+              value: "SELECT Id, Name, Industry, BillingCity, LastModifiedDate FROM Account WHERE LastModifiedDate > ${watermark} ORDER BY LastModifiedDate ASC"
+        full_sync_query: "SELECT Id, Name, Industry, BillingCity, LastModifiedDate FROM Account ORDER BY LastModifiedDate ASC"

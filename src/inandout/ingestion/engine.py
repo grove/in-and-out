@@ -12,7 +12,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from inandout.config.connector import ConnectorConfig
 from inandout.config.ingestion import IngestionConfig
-from inandout.postgres.schema import source_table_name, ensure_source_table
+from inandout.postgres.schema import (
+    source_table_name,
+    ensure_source_table,
+    dead_letter_table_name,
+    ensure_dead_letter_table,
+)
 from inandout.postgres.watermark import get_watermark, set_watermark
 from inandout.transport.http import HttpTransportAdapter
 
@@ -155,12 +160,14 @@ class IngestionEngine:
         watermark: str | None,
         log: Any,
     ) -> None:
-        # Ensure source table exists
+        # Ensure source table and dead-letter table exist
         async with self._pool.connection() as conn:
             await ensure_source_table(conn, connector.name, datatype)
+            await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype)
             await conn.commit()
 
         table = source_table_name(connector.name, datatype)
+        dl_table = dead_letter_table_name("ingestion", connector.name, datatype)
         new_watermark: str | None = None
         seen_ids: set[str] = set()
 
@@ -178,6 +185,10 @@ class IngestionEngine:
                             if external_id is None:
                                 result.records_errored += 1
                                 log.warning("missing_external_id", record_keys=list(record.keys()))
+                                await _write_dead_letter(
+                                    conn, dl_table, None, record, "could not extract primary key",
+                                    "data_error", result.run_id
+                                )
                                 continue
 
                             seen_ids.add(external_id)
@@ -316,3 +327,25 @@ async def _upsert_record(
             [external_id],
         )
         return 0, 0
+
+
+async def _write_dead_letter(
+    conn: psycopg.AsyncConnection,
+    dl_table: str,
+    external_id: str | None,
+    raw: dict[str, Any],
+    error_message: str,
+    error_class: str,
+    run_id: uuid.UUID,
+) -> None:
+    """Write a failed record to the dead-letter table."""
+    try:
+        await conn.execute(
+            f"""
+            INSERT INTO {dl_table} (external_id, raw, error_message, error_class, sync_run_id)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            [external_id, orjson.dumps(raw).decode(), error_message, error_class, run_id],
+        )
+    except Exception:
+        pass  # DL write failure must never mask the original error

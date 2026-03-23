@@ -58,6 +58,30 @@ CREATE INDEX IF NOT EXISTS {hist}_external_id_idx ON {hist} (external_id, _inges
 """.strip()
 
 
+def dead_letter_table_ddl(tool: str, connector: str, datatype: str) -> str:
+    table = dead_letter_table_name(tool, connector, datatype)
+    return f"""
+CREATE TABLE IF NOT EXISTS {table} (
+    id              BIGSERIAL PRIMARY KEY,
+    external_id     TEXT,
+    raw             JSONB,
+    error_message   TEXT NOT NULL,
+    error_class     TEXT NOT NULL DEFAULT 'unknown',
+    failed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sync_run_id     UUID,
+    requeued_at     TIMESTAMPTZ,
+    requeue_count   INT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS {table}_failed_at_idx ON {table} (failed_at DESC);
+""".strip()
+
+
+async def ensure_dead_letter_table(
+    conn: psycopg.AsyncConnection, tool: str, connector: str, datatype: str
+) -> None:
+    await conn.execute(dead_letter_table_ddl(tool, connector, datatype))
+
+
 async def ensure_source_table(conn: psycopg.AsyncConnection, connector: str, datatype: str) -> None:
     """Create the source table for a connector/datatype pair if it doesn't exist."""
     await conn.execute(source_table_ddl(connector, datatype))

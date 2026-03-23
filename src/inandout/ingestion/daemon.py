@@ -76,13 +76,26 @@ async def _polling_loop(
     ingestion_cfg: Any,
     interval_secs: float,
 ) -> None:
+    from inandout.transport.circuit_breaker import get_circuit_breaker
+
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     log.info("polling_loop_started", interval_secs=interval_secs)
+    cb = get_circuit_breaker(connector_cfg.name, datatype)
+
     while True:
+        if not cb.allow_request():
+            log.warning("poll_skipped_circuit_open", state=cb.state)
+            await anyio.sleep(interval_secs)
+            continue
         try:
             result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg)
+            if result.status in ("completed", "skipped"):
+                cb.record_success()
+            elif result.status == "failed":
+                cb.record_failure()
             log.info("poll_complete", status=result.status)
         except Exception as exc:
+            cb.record_failure()
             log.error("poll_error", error=str(exc))
         await anyio.sleep(interval_secs)
 
