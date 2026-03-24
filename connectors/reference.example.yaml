@@ -1,0 +1,267 @@
+# ---------------------------------------------------------------------------
+# REFERENCE CONNECTOR — HubSpot CRM (annotated)
+# ---------------------------------------------------------------------------
+#
+# This file is the canonical onboarding reference for connector authors.
+# Every field is annotated with:
+#   - Its purpose in plain English
+#   - The GOAL.md requirement number it satisfies (T1/T2 #N)
+#   - The schema-validation rule it triggers (CFG-NNN), where applicable
+#
+# Copy this file to connectors/<your-system>.yaml and customise.
+# Run `python scripts/validate_connector_fixtures.py connectors/` to validate.
+# ---------------------------------------------------------------------------
+
+# Schema version — must be 1. Governs backward-compat rules.
+schema_version: 1
+
+connector:
+
+  # ── Identity ────────────────────────────────────────────────────────────────
+  # Unique slug used as a table-name prefix (inout_src_<name>_<datatype>).
+  # Lowercase, underscores OK, no spaces.
+  name: hubspot
+
+  # Human-readable system name used in logs and dashboards.
+  system: HubSpot CRM
+
+  # Controls which sub-system pipelines are generated.
+  # Options: full_duplex | ingestion_polling_readonly | writeback_only
+  # Req: T1 #1 (connector topology)
+  generation_profile: full_duplex
+
+  description: >
+    HubSpot CRM contacts connector — annotated reference.
+    Demonstrates full-duplex sync: polling ingestion, incremental watermarking,
+    webhook fan-out, writeback via PATCH, and field mappings.
+
+  # API version injected as a query param or path segment on every request.
+  # Req: T1 #6 / T1 #39 (api_version_header injection)
+  api_version: "v3"
+
+  # Optional: date when this api_version is deprecated. Emits a warning at boot.
+  api_deprecation_deadline: null  # e.g. "2027-01-01"
+
+  # ── Connection ──────────────────────────────────────────────────────────────
+  connection:
+    base_url: https://api.hubapi.com
+
+    # Per-request timeouts (ISO-8601 duration strings).
+    timeout:
+      connect: "10s"
+      read: "30s"
+      write: "30s"
+
+  # ── Authentication ──────────────────────────────────────────────────────────
+  # credential_ref points to a secret key in the secrets store.
+  # The actual secret is never stored here — only its logical name.
+  # Req: T1 #2 (credential management)
+  auth:
+    type: oauth2
+    credential_ref: hubspot_oauth
+    oauth2:
+      grant_type: client_credentials
+      token_url: https://api.hubapi.com/oauth/v1/token
+      scopes:
+        - crm.objects.contacts.read
+        - crm.objects.contacts.write
+
+  # ── Rate limiting ────────────────────────────────────────────────────────────
+  # Applied globally across all outbound requests for this connector.
+  # Req: T1 #3 (rate limiting)
+  rate_limit:
+    requests_per_second: 9.0   # HubSpot free tier: 10 rps; leave headroom
+    burst: 20
+
+  # ── Retry policy ─────────────────────────────────────────────────────────────
+  # Retries on transient errors (5xx, network timeouts) with exponential backoff.
+  # Req: T1 #3 (retry with backoff)
+  retry:
+    max_retries: 5
+    backoff:
+      initial: "1s"
+      max: "60s"
+      multiplier: 2.0
+      jitter: true   # adds ±25% jitter — prevents thundering-herd on restart
+
+  # ── Circuit breaker ──────────────────────────────────────────────────────────
+  # Opens the circuit after error_threshold consecutive failures, pausing all
+  # requests for pause_duration.  Health score drops to 0 while open.
+  # Req: T1 #44 / T2 #25 (circuit breaker & source unavailability)
+  circuit_breaker:
+    error_threshold: 10
+    pause_duration: "60s"
+
+  # ── Webhook configuration ─────────────────────────────────────────────────────
+  # Accepts inbound events from HubSpot's webhook service.
+  # Req: T1 #7 (webhook ingestion), T1 #42 (webhook hardening)
+  webhooks:
+    # The path this daemon listens on for POST requests.
+    path: /webhooks/hubspot
+
+    # HMAC signature verification — rejects unsigned / tampered payloads.
+    signature:
+      algorithm: hmac-sha256
+      header: X-HubSpot-Signature-V3
+      credential_ref: hubspot_webhook_secret
+
+    # Per-connector IP allowlist (T1 #42).
+    # Empty = accept from any IP (subject to server-wide allowlist).
+    ip_allowlist: []
+
+    # Per-connector rate limit in requests/minute (T1 #42).
+    # null = inherit server-wide limit.
+    rate_limit_per_minute: null
+
+    # Fan-out routes — map event discriminator values to ingestion datatypes.
+    # Req: T1 #7 (fan-out)
+    fan_out:
+      discriminator: objectType
+      unmatched: log_and_discard   # options: log_and_discard | reject_400
+      routes:
+        - match: contact.creation
+          datatype: contacts
+        - match: contact.propertyChange
+          datatype: contacts
+
+  # ── Datatypes ────────────────────────────────────────────────────────────────
+  # Each datatype maps to exactly one source table (inout_src_hubspot_contacts)
+  # and optionally includes both ingestion and writeback configs.
+  datatypes:
+
+    contacts:
+      description: HubSpot CRM contacts
+
+      # kind: entity (default) or relationship (T1 #22).
+      # "relationship" datatypes will provision a join-table schema.
+      kind: entity
+
+      # ── Ingestion ─────────────────────────────────────────────────────────
+      ingestion:
+        # Field used as the stable external primary key (stored in external_id).
+        primary_key: id
+
+        # History mode: overwrite (latest wins) or append (full audit trail).
+        # Req: T1 #10 (history mode)
+        history_mode: overwrite
+
+        # Polling schedule — how often to trigger a full or incremental sync.
+        schedule:
+          interval: "5m"
+
+        # List endpoint — used for both full and incremental syncs.
+        list:
+          method: GET
+          path: /crm/v3/objects/contacts
+          record_selector: results   # dot-notation path to the records array
+
+          # Pagination — cursor-based (T2 #12).
+          # CFG-001: cursor strategy requires both response_path AND request_param.
+          pagination:
+            strategy: cursor
+            cursor:
+              request_param: after
+              response_path: "paging.next.after"
+            termination:
+              - empty_page   # stop when a page with 0 records is returned
+
+          # Incremental sync — only fetch records modified since last watermark.
+          # Req: T1 #35 (incremental sync), T2 #12 (pagination strategies)
+          incremental:
+            enabled: true
+            cursor_field: lastmodifieddate     # field in the record
+            cursor_type: timestamp             # options: timestamp | integer | string
+            request_filter:
+              mode: query_param
+              param: lastmodifieddate__gt
+              value: "${watermark}"            # ${watermark} substituted at runtime
+
+          # Drift protection — circuit-trips if result set shrinks > 50%.
+          # Req: T1 #38 (pagination drift protection)
+          drift_protection: true
+          drift_max_shrink_pct: 50.0
+
+        # Field mappings — rename/cast API fields before upsert.
+        # Req: T1 #31 (field-level schema mapping)
+        field_mappings:
+          - source: properties.firstname
+            target: first_name
+          - source: properties.lastname
+            target: last_name
+          - source: properties.email
+            target: email
+
+        # Linked objects — fetch child records embedded in parent IDs.
+        # Req: T1 #16 (linked/nested object resolution)
+        linked_objects:
+          - field: associations.company_ids   # field in contacts holding company IDs
+            datatype: companies               # ingest into the companies datatype
+            detail_path: /crm/v3/objects/companies/${id}
+            concurrency: 3                    # max concurrent GETs
+            primary_key: id
+
+      # ── Writeback ─────────────────────────────────────────────────────────
+      writeback:
+        # Protection level — controls pre-write lookup and post-write verification.
+        # 0=none, 1=lookup_required, 2=optimistic, 3=post_write_verify
+        # Req: T2 #23 (protection level), T2 #18 (conflict detection)
+        protection_level: 2   # optimistic: lookup, compare etag, then write
+
+        # What to do when a conflict is detected (e.g., 409 from the target).
+        # Options: last_writer_wins | dead_letter | manual_review
+        # Req: T2 #18 (conflict resolution)
+        conflict_resolution: last_writer_wins
+
+        # Which action verbs this connector's target system supports.
+        supported_actions:
+          - insert
+          - update
+          - delete
+
+        # HTTP endpoint definitions for each action.
+        # Req: T2 #1 (writeback operations)
+        operations:
+          lookup:
+            method: GET
+            path: /crm/v3/objects/contacts/${external_id}
+          insert:
+            method: POST
+            path: /crm/v3/objects/contacts
+          update:
+            method: PATCH
+            path: /crm/v3/objects/contacts/${external_id}
+          delete:
+            method: DELETE
+            path: /crm/v3/objects/contacts/${external_id}
+
+        # Field that holds an ETag / version token for optimistic concurrency.
+        # Req: T2 #18 (etag-based conflict)
+        etag_field: "_version"
+
+        # Maximum concurrent HTTP writes per writeback cycle.
+        # Req: T2 #19 (writeback ordering / concurrency)
+        max_concurrent_writes: 5
+
+    # ── Relationship datatype example ─────────────────────────────────────────
+    # A many-to-many association between contacts and companies.
+    # When kind: relationship, a join-table schema is provisioned:
+    #   inout_src_hubspot_contact_company_assoc (source_id, target_id, data, …)
+    # Req: T1 #22 (relationship datatypes)
+    contact_company_assoc:
+      description: HubSpot contact → company association (many-to-many)
+      kind: relationship
+
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: "15m"
+        list:
+          method: GET
+          path: /crm/v3/associations/contacts/companies/batch/read
+          record_selector: results
+          pagination:
+            strategy: cursor
+            cursor:
+              request_param: after
+              response_path: "paging.next.after"
