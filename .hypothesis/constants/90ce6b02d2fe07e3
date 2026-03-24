@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/tool.py
+# hypothesis_version: 6.151.9
+
+[0.0, 1.0, 2.0, 10.0, 30.0, 100, 200, 300, 1048576, 100000000, 1000000000, './connectors', '/metrics', '0.0.0.0:8443', '0.0.0.0:9090', '0.0.0.0:9091', '100MB', '1h', '1s', '30d', '30m', '30s', '365d', '500MB', '5m', '5s', '60s', '7d', '90d', 'aws_sm', 'debug', 'drain_timeout', 'env', 'error', 'forbid', 'gcp_sm', 'info', 'inout_desired_state', 'inout_writeback', 'json', 'logical_replication', 'poll_interval', 'polling', 'public', 'text', 'vault', 'warn']

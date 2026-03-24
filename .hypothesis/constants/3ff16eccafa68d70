@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/migrations/versions/010_20260323_watermark_columns.py
+# hypothesis_version: 6.151.9
+
+['009_20260323', '010_20260323']

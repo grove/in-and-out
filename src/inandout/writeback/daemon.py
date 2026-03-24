@@ -17,6 +17,7 @@ from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_writeback_tool_config
 from inandout.config.tool import WritebackToolConfig
 from inandout.engine.control import ControlDispatcher
+from inandout.federation.heartbeat import FederationHeartbeat, heartbeat_loop
 from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
 from inandout.postgres.version_check import SchemaVersionMismatch, check_schema_version
@@ -36,6 +37,7 @@ async def _health(request: Request) -> JSONResponse:
 # Module-level draining flag — set to True when SIGTERM/SIGINT received.
 _draining: bool = False
 _alert_dispatcher: AlertDispatcher | None = None
+_federation_hb: FederationHeartbeat | None = None
 
 
 def _trigger_drain() -> None:
@@ -119,6 +121,16 @@ async def _writeback_polling_loop(
                         datatype=datatype,
                         message="circuit breaker closed — writes recovering",
                     )
+            # Update federation heartbeat after each writeback cycle
+            if _federation_hb is not None:
+                import datetime
+                _federation_hb.update(
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    health_score=0.0 if result.failed > 0 else 1.0,
+                    last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
+                    circuit_breaker_state=_cb.state.value,
+                )
         except Exception as exc:
             log.error("writeback_poll_error", error=str(exc))
             _cb.record_failure()
@@ -128,6 +140,13 @@ async def _writeback_polling_loop(
                     connector=connector_cfg.name,
                     datatype=datatype,
                     message=str(exc),
+                )
+            if _federation_hb is not None:
+                _federation_hb.update(
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    health_score=0.0,
+                    circuit_breaker_state=_cb.state.value,
                 )
         await anyio.sleep(interval_secs)
         if _draining:
@@ -320,6 +339,10 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     if not scheduling_enabled:
         log.warning("writeback_scheduler_disabled", reason="scheduling_enabled=False")
 
+    # Initialise federation heartbeat
+    global _federation_hb
+    _federation_hb = FederationHeartbeat(namespace=getattr(config.database, "schema", "public"))
+
     log.info("daemon_started")
 
     import signal as _signal
@@ -348,6 +371,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
             )
             if config.replication_slot.slot_name:
                 tg.start_soon(_slot_monitor_loop)
+            tg.start_soon(heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining)
 
             # B2: only start polling loops when scheduling is enabled
             if scheduling_enabled:

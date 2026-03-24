@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/postgres/housekeeping.py
+# hypothesis_version: 6.151.9
+
+[86400, '30d', '7d', '90d', 'sync_run', 'webhook_route_seq', 'writeback_result']

@@ -164,7 +164,7 @@ async def test_payload_snapshot_stored_on_insert():
 
     assert result.processed == 1
     assert len(result._audit_entries) == 1
-    ext_id, action, payload, diff = result._audit_entries[0]
+    ext_id, action, payload, diff, *_rest = result._audit_entries[0]
     assert ext_id == "new-1"
     assert action == "insert"
     assert payload is not None
@@ -197,6 +197,7 @@ async def test_write_feedback_includes_audit_columns():
         "update",
         {"name": "Bob"},
         {"added": [], "removed": [], "changed": {"name": {"from": "Alice", "to": "Bob"}}},
+        "optimistic",
     ))
 
     rows = [{"external_id": "ext-1", "_action": "update"}]

@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/federation/__init__.py
+# hypothesis_version: 6.151.9
+
+['FederationHeartbeat', 'FederationRegistry', 'InstanceStatus', 'report_heartbeat']

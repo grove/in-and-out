@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/dry_run.py
+# hypothesis_version: 6.151.9
+
+['base_url', 'connection', 'dry_run_complete', 'production', 'staging']

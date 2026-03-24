@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/migrations/versions/008_20260323_source_table_schema.py
+# hypothesis_version: 6.151.9
+
+['007_20260323', '008_20260323']

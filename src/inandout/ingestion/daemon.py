@@ -21,6 +21,7 @@ from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_ingestion_tool_config
 from inandout.config.tool import IngestionToolConfig
 from inandout.engine.control import ControlDispatcher, is_paused
+from inandout.federation.heartbeat import FederationHeartbeat, heartbeat_loop
 from inandout.ingestion.engine import IngestionEngine
 from inandout.ingestion.webhooks import handle_webhook
 from inandout.observability.metrics import REGISTRY
@@ -65,6 +66,7 @@ logger = structlog.get_logger(__name__)
 # All polling loops check this at the top of each iteration and exit cleanly.
 _draining: bool = False
 _alert_dispatcher: AlertDispatcher | None = None
+_federation_hb: FederationHeartbeat | None = None
 
 
 def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
@@ -294,6 +296,16 @@ async def _polling_loop(
                         reason=result.error_message or "consecutive failures exceeded threshold",
                     )
             log.info("poll_complete", status=result.status)
+            # Update federation heartbeat after each sync
+            if _federation_hb is not None:
+                import datetime
+                _federation_hb.update(
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    health_score=0.0 if result.status == "failed" else 1.0,
+                    last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
+                    circuit_breaker_state=cb.state.value,
+                )
         except Exception as exc:
             cb.record_failure()
             log.error("poll_error", error=str(exc))
@@ -301,6 +313,13 @@ async def _polling_loop(
                 await _mark_connector_unavailable(
                     engine._pool, connector_cfg.name, datatype,
                     reason=str(exc),
+                )
+            if _federation_hb is not None:
+                _federation_hb.update(
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    health_score=0.0,
+                    circuit_breaker_state=cb.state.value,
                 )
 
         sleep_secs = _next_interval_secs(schedule, interval_secs)
@@ -852,6 +871,10 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     from inandout.events import EventType, get_event_bus
     get_event_bus().subscribe(EventType.REINGEST_SIGNAL, _on_reingest_signal)
 
+    # Initialise federation heartbeat
+    global _federation_hb
+    _federation_hb = FederationHeartbeat(namespace=getattr(config.database, "schema", "public"))
+
     log.info("daemon_started")
 
     async def _run_webhook_server() -> None:
@@ -879,6 +902,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                 for cfg in connector_configs
             ):
                 tg.start_soon(_webhook_dedup_cleanup_loop, pool, connector_configs)
+            tg.start_soon(heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining)
             await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
     finally:
         log.info("daemon_stopping")

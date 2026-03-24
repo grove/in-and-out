@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/events/bus.py
+# hypothesis_version: 6.151.9
+
+[120, '__qualname__', 'connector_recovered', 'event_bus_publish', 'event_bus_subscribed', 'reingest_signal', 'sync_completed', 'writeback_conflict']

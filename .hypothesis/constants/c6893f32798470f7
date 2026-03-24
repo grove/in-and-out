@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/federation/registry.py
+# hypothesis_version: 6.151.9
+
+[1.0, 90.0, ' AND ', 'WHERE ', 'closed', 'connector', 'connector = %s', 'datatype', 'datatype = %s', 'dead_letter_depth', 'health_score', 'instance_id', 'last_sync_at', 'namespace', 'public', 'reported_at']

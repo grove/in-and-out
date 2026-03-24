@@ -72,8 +72,8 @@ class WritebackResult:
     error_message: str | None = None
     # B1: populated when dry_run=True
     dry_run_log: list[dict[str, Any]] = field(default_factory=list)
-    # Accumulates (external_id, action, payload, diff) for audit trail
-    _audit_entries: list[tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]] = field(
+    # Accumulates (external_id, action, payload, diff, effective_protection_level) for audit trail
+    _audit_entries: list[tuple[str, str, dict[str, Any] | None, dict[str, Any] | None, str]] = field(
         default_factory=list
     )
     # Tracks external IDs that resulted in a write failure (HTTP error or dead-letter)
@@ -482,7 +482,8 @@ class WritebackEngine:
                 # Record audit
                 last_written: dict[str, Any] = {}
                 diff = _compute_field_diff(last_written, payload)
-                result._audit_entries.append((external_id, action, payload, diff))
+                _eff_pl = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((external_id, action, payload, diff, _eff_pl))
 
                 # Level 3: post-write verification — GET and compare against what was sent
                 if writeback_cfg.protection_level == ProtectionLevel.post_write_verify:
@@ -906,7 +907,8 @@ class WritebackEngine:
                     except Exception:
                         pass  # Non-critical
 
-                result._audit_entries.append((external_id, action, sent_payload, sent_diff))
+                _eff_pl_upd = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((external_id, action, sent_payload, sent_diff, _eff_pl_upd))
 
                 # Level 3: post-write verification — GET and compare against what was sent
                 if (
@@ -940,7 +942,8 @@ class WritebackEngine:
                     _del_resp.raise_for_status()
                 else:
                     await transport._request(ops.delete.method.upper(), path)
-                result._audit_entries.append((external_id, action, None, None))
+                _eff_pl_del = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((external_id, action, None, None, _eff_pl_del))
                 _http_write_ok = True
                 result.processed += 1
 
@@ -963,7 +966,8 @@ class WritebackEngine:
                     _arch_resp.raise_for_status()
                 else:
                     await transport._request(ops.archive.method.upper(), path, json=payload)
-                result._audit_entries.append((external_id, action, payload, None))
+                _eff_pl_arch = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((external_id, action, payload, None, _eff_pl_arch))
                 _http_write_ok = True
                 result.processed += 1
 
@@ -1022,7 +1026,8 @@ class WritebackEngine:
                         internal_id=surviving_id,
                     )
 
-                result._audit_entries.append((surviving_id, action, payload, None))
+                _eff_pl_merge = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((surviving_id, action, payload, None, _eff_pl_merge))
                 _http_write_ok = True
                 result.processed += 1
 
@@ -1077,7 +1082,8 @@ class WritebackEngine:
                         pass
 
                 logger.info("split_complete", source_id=external_id, child_count=len(created_ids))
-                result._audit_entries.append((external_id, action, {"_split_rows": len(split_rows)}, None))
+                _eff_pl_split = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((external_id, action, {"_split_rows": len(split_rows)}, None, _eff_pl_split))
                 _http_write_ok = True
                 result.processed += 1
 
@@ -1290,9 +1296,10 @@ class WritebackEngine:
         if not rows and not result._failed_entries:
             return
         # Build audit map from accumulated entries
-        audit_map: dict[tuple[str, str], tuple[dict[str, Any] | None, dict[str, Any] | None]] = {}
-        for ext_id, act, payload, diff in result._audit_entries:
-            audit_map[(ext_id, act)] = (payload, diff)
+        audit_map: dict[tuple[str, str], tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]] = {}
+        for ext_id, act, payload, diff, *rest in result._audit_entries:
+            pl = rest[0] if rest else None
+            audit_map[(ext_id, act)] = (payload, diff, pl)
 
         try:
             async with self._pool.connection() as conn:
@@ -1300,16 +1307,17 @@ class WritebackEngine:
                 for row in rows:
                     action = row.get("_action", "")
                     external_id = row.get("external_id") or row.get("_cluster_id", "")
-                    payload_snap, field_diff = audit_map.get((external_id, action), (None, None))
+                    audit_entry = audit_map.get((external_id, action), (None, None, None))
+                    payload_snap, field_diff, effective_pl = audit_entry
 
-                    # Try inserting with run_id + audit columns (migration 022 / 006)
+                    # Try inserting with run_id + audit columns + protection_level (migration 022 / 006)
                     try:
                         await conn.execute(
                             """
                             INSERT INTO inout_ops_writeback_result
                                 (connector, datatype, delta_table, action, external_id, status,
-                                 run_id, payload_snapshot, field_diff, processed_at)
-                            VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, %s, NOW())
+                                 run_id, payload_snapshot, field_diff, protection_level, processed_at)
+                            VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, %s, %s, NOW())
                             ON CONFLICT (connector, datatype, run_id, external_id, action)
                                 WHERE run_id IS NOT NULL DO NOTHING
                             """,
@@ -1322,17 +1330,20 @@ class WritebackEngine:
                                 uuid.UUID(result.run_id),
                                 orjson.dumps(payload_snap).decode() if payload_snap is not None else None,
                                 orjson.dumps(field_diff).decode() if field_diff is not None else None,
+                                effective_pl,
                             ],
                         )
                     except Exception:
-                        # Fall back: without run_id (pre-022 DB) but still with audit columns
+                        # Fall back: without protection_level column (pre-T2#38 DB)
                         try:
                             await conn.execute(
                                 """
                                 INSERT INTO inout_ops_writeback_result
                                     (connector, datatype, delta_table, action, external_id, status,
-                                     payload_snapshot, field_diff, processed_at)
-                                VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, NOW())
+                                     run_id, payload_snapshot, field_diff, processed_at)
+                                VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, %s, NOW())
+                                ON CONFLICT (connector, datatype, run_id, external_id, action)
+                                    WHERE run_id IS NOT NULL DO NOTHING
                                 """,
                                 [
                                     result.connector,
@@ -1340,26 +1351,47 @@ class WritebackEngine:
                                     result.delta_table,
                                     action,
                                     external_id,
+                                    uuid.UUID(result.run_id),
                                     orjson.dumps(payload_snap).decode() if payload_snap is not None else None,
                                     orjson.dumps(field_diff).decode() if field_diff is not None else None,
                                 ],
                             )
                         except Exception:
-                            # Fall back to insert without audit columns
-                            await conn.execute(
-                                """
-                                INSERT INTO inout_ops_writeback_result
-                                    (connector, datatype, delta_table, action, external_id, status, processed_at)
-                                VALUES (%s, %s, %s, %s, %s, 'ok', NOW())
-                                """,
-                                [
-                                    result.connector,
-                                    result.datatype,
-                                    result.delta_table,
-                                    action,
-                                    external_id,
-                                ],
-                            )
+                            # Fall back: without run_id (pre-022 DB) but still with audit columns
+                            try:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO inout_ops_writeback_result
+                                        (connector, datatype, delta_table, action, external_id, status,
+                                         payload_snapshot, field_diff, processed_at)
+                                    VALUES (%s, %s, %s, %s, %s, 'ok', %s, %s, NOW())
+                                    """,
+                                    [
+                                        result.connector,
+                                        result.datatype,
+                                        result.delta_table,
+                                        action,
+                                        external_id,
+                                        orjson.dumps(payload_snap).decode() if payload_snap is not None else None,
+                                        orjson.dumps(field_diff).decode() if field_diff is not None else None,
+                                    ],
+                                )
+                            except Exception:
+                                # Final fallback: bare insert
+                                await conn.execute(
+                                    """
+                                    INSERT INTO inout_ops_writeback_result
+                                        (connector, datatype, delta_table, action, external_id, status, processed_at)
+                                    VALUES (%s, %s, %s, %s, %s, 'ok', NOW())
+                                    """,
+                                    [
+                                        result.connector,
+                                        result.datatype,
+                                        result.delta_table,
+                                        action,
+                                        external_id,
+                                    ],
+                                )
 
                 # Write failed rows so operators can see all outcomes
                 for ext_id, act, error_msg in result._failed_entries:

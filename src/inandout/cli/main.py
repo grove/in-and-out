@@ -466,6 +466,130 @@ def writeback_validate_connector(
         raise typer.Exit(code=1)
 
 
+@writeback_app.command("dry-run")
+def writeback_dry_run(
+    connector: str = typer.Option(
+        ...,
+        "--connector",
+        help="Path to a connector YAML file.",
+    ),
+    datatype: Optional[str] = typer.Option(  # noqa: UP007
+        None,
+        "--datatype",
+        help="Specific datatype to test (default: all writeback datatypes).",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        help="Maximum number of delta rows to preview per datatype.",
+    ),
+) -> None:
+    """Preview what a writeback cycle would do without issuing any HTTP writes (T2 #27).
+
+    Reads from the delta table and shows what actions (insert/update/delete)
+    would be dispatched, complete with URL and payload preview.  No HTTP
+    requests are sent; no rows are deleted from the delta table.
+    """
+    import anyio
+    from inandout.config.loader import load_connector
+
+    connector_path = Path(connector)
+    if not connector_path.exists():
+        err_console.print(f"Connector file not found: {connector_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = load_connector(connector_path)
+    except Exception as exc:
+        err_console.print(f"[red]Invalid connector config:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    connector_cfg = cfg.connector
+    dtype_names: list[str]
+    if datatype:
+        if datatype not in connector_cfg.datatypes:
+            err_console.print(f"Datatype '{datatype}' not found in connector.")
+            raise typer.Exit(code=1)
+        dtype_names = [datatype]
+    else:
+        dtype_names = [
+            name
+            for name, dc in connector_cfg.datatypes.items()
+            if dc.writeback is not None
+        ]
+
+    if not dtype_names:
+        console.print("[yellow]No writeback-enabled datatypes found in connector.[/yellow]")
+        raise typer.Exit(code=0)
+
+    async def _run() -> dict[str, list[dict]]:
+        from inandout.writeback.engine import WritebackEngine
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Minimal fake pool that returns empty rows from the delta table.
+        # The dry_run flag on writeback_cfg prevents any HTTP calls.
+        fake_pool = MagicMock()
+        fake_conn = AsyncMock()
+        fake_cursor = AsyncMock()
+        fake_cursor.description = [("external_id",), ("_action",)]
+        fake_cursor.fetchall = AsyncMock(return_value=[])
+        fake_conn.execute = AsyncMock(return_value=fake_cursor)
+        fake_conn.__aenter__ = AsyncMock(return_value=fake_conn)
+        fake_conn.__aexit__ = AsyncMock(return_value=None)
+        fake_pool.connection = MagicMock(return_value=fake_conn)
+
+        engine = WritebackEngine(fake_pool)
+        results: dict[str, list[dict]] = {}
+        for dtype_name in dtype_names:
+            dtype_cfg = connector_cfg.datatypes[dtype_name]
+            if dtype_cfg.writeback is None:
+                continue
+            import copy
+            wb_cfg = copy.deepcopy(dtype_cfg.writeback)
+            # Force dry_run mode and a small batch size
+            object.__setattr__(wb_cfg, "dry_run", True)
+            object.__setattr__(wb_cfg, "batch_size", limit)
+            delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
+            result = await engine.run_writeback_cycle(
+                connector_cfg, dtype_name, wb_cfg, delta_table
+            )
+            results[dtype_name] = result.dry_run_log
+        return results
+
+    try:
+        all_results = anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"[red]Dry-run failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    for dtype_name, log_entries in all_results.items():
+        preview_table = Table(title=f"Writeback dry-run: {connector_cfg.name} / {dtype_name}")
+        preview_table.add_column("action", style="bold")
+        preview_table.add_column("method")
+        preview_table.add_column("url", style="cyan")
+        preview_table.add_column("payload preview")
+
+        for entry in log_entries:
+            action_label = str(entry.get("action", ""))
+            method_label = str(entry.get("method", ""))
+            url_label = str(entry.get("url", ""))
+            body = entry.get("body") or {}
+            body_preview = str({k: v for k, v in list(body.items())[:3]})
+            color = "green" if "insert" in action_label else ("red" if "delete" in action_label else "yellow")
+            preview_table.add_row(
+                f"[{color}]{action_label}[/{color}]",
+                method_label,
+                url_label,
+                body_preview,
+            )
+
+        console.print(preview_table)
+        if not log_entries:
+            console.print(f"[dim]No delta rows found for {dtype_name} — nothing to write back.[/dim]")
+        else:
+            console.print(f"[bold]{len(log_entries)} action(s) would be dispatched for {dtype_name}.[/bold]")
+
+
 # ---------------------------------------------------------------------------
 # Operator audit trail helper
 # ---------------------------------------------------------------------------

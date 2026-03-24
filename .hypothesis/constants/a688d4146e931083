@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/migrations/versions/005_20260323_connector_version.py
+# hypothesis_version: 6.151.9
+
+['004_20260323', '005_20260323']
