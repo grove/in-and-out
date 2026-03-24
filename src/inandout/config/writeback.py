@@ -110,6 +110,11 @@ class WritebackConfig(BaseModel):
     crdt_ts_field: str = "_updated_at"  # field carrying the timestamp for lww_register
     # T2 #31: delete safety guard — abort the batch when delete-action count exceeds this limit
     max_deletes_per_batch: int | None = Field(default=None, ge=1)
+    # T2 #33: write batch composition — close batch when any threshold is reached first
+    batch_max_bytes: int | None = Field(default=None, ge=1)   # max uncompressed payload bytes per batch
+    batch_max_age_secs: float | None = Field(default=None, ge=0.0)  # max age of oldest row in forming batch
+    # T2 #35: payload required-fields guard — route to dead-letter when any field is absent
+    required_fields: list[str] = []
 
     @model_validator(mode="after")
     def validate_crdt_ts_field_requires_lww(self) -> "WritebackConfig":

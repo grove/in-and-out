@@ -179,18 +179,24 @@ def ingest_validate_connector(
         "--connector",
         help="Path to a single connector YAML file.",
     ),
+    check_connectivity: bool = typer.Option(
+        True,
+        "--check-connectivity/--skip-connectivity",
+        help="Probe the connector's base_url with an HTTP GET after schema validation.",
+    ),
 ) -> None:
     """Validate a single connector YAML against the Pydantic schema."""
+    import anyio
     from inandout.config.loader import load_connector
 
     connector_path = Path(connector)
     table = Table(title="Connector Validation")
-    table.add_column("File", style="cyan")
+    table.add_column("Check", style="cyan")
     table.add_column("Status", style="bold")
     table.add_column("Details")
 
     if not connector_path.exists():
-        table.add_row(connector_path.name, "[red]FAIL[/red]", "File not found")
+        table.add_row("schema", "[red]FAIL[/red]", "File not found")
         console.print(table)
         raise typer.Exit(code=1)
 
@@ -199,16 +205,35 @@ def ingest_validate_connector(
         conn = cfg.connector
         datatypes = ", ".join(conn.datatypes.keys())
         table.add_row(
-            connector_path.name,
+            "schema",
             "[green]OK[/green]",
             f"{conn.name} — datatypes: {datatypes}",
         )
-        console.print(table)
     except Exception as exc:
-        table.add_row(connector_path.name, "[red]FAIL[/red]", str(exc))
+        table.add_row("schema", "[red]FAIL[/red]", str(exc))
         console.print(table)
         err_console.print(f"\nValidation failed: {exc}")
         raise typer.Exit(code=1)
+
+    if check_connectivity:
+        base_url: str = cfg.connector.connection.base_url
+
+        async def _probe() -> tuple[int | None, str]:
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(base_url)
+                    return resp.status_code, f"HTTP {resp.status_code}"
+            except Exception as exc:  # noqa: BLE001
+                return None, str(exc)
+
+        status_code, detail = anyio.run(_probe)
+        if status_code is not None and status_code < 500:
+            table.add_row("connectivity", "[green]OK[/green]", f"{base_url} → {detail}")
+        else:
+            table.add_row("connectivity", "[yellow]WARN[/yellow]", f"{base_url} → {detail}")
+
+    console.print(table)
 
 
 @ingest_app.command("dry-run")

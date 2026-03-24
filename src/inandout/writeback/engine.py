@@ -142,7 +142,8 @@ class WritebackEngine:
 
             try:
                 rows = await self._fetch_delta_rows(
-                    delta_table, log, result, batch_size=writeback_cfg.batch_size
+                    delta_table, log, result, batch_size=writeback_cfg.batch_size,
+                    batch_max_bytes=getattr(writeback_cfg, "batch_max_bytes", None),
                 )
                 if rows is None:
                     return result
@@ -319,8 +320,15 @@ class WritebackEngine:
         log: object,
         result: WritebackResult,
         batch_size: int = 50,
+        batch_max_bytes: int | None = None,
     ) -> list[dict] | None:
-        """Fetch up to *batch_size* non-noop rows from the delta table. Returns None if table doesn't exist."""
+        """Fetch up to *batch_size* non-noop rows from the delta table. Returns None if table doesn't exist.
+
+        When *batch_max_bytes* is set (T2 #33), rows are accumulated until the
+        cumulative uncompressed JSON payload size would exceed the limit, then
+        the remainder is dropped from the in-memory batch (remaining rows stay
+        in the delta table for the next cycle).
+        """
         try:
             async with self._pool.connection() as fetch_conn:
                 cur = await fetch_conn.execute(
@@ -330,7 +338,31 @@ class WritebackEngine:
                 rows_raw = await cur.fetchall()
                 if not rows_raw:
                     return []
-                return [dict(zip(col_names, row)) for row in rows_raw]
+                rows = [dict(zip(col_names, row)) for row in rows_raw]
+
+                # T2 #33: trim batch when cumulative payload exceeds batch_max_bytes
+                if batch_max_bytes is not None:
+                    trimmed: list[dict] = []
+                    cumulative_bytes = 0
+                    for row in rows:
+                        row_bytes = len(orjson.dumps(
+                            {k: v for k, v in row.items() if not k.startswith("_")}
+                        ))
+                        if trimmed and cumulative_bytes + row_bytes > batch_max_bytes:
+                            logger.info(
+                                "writeback_batch_max_bytes_reached",
+                                delta_table=delta_table,
+                                batch_bytes=cumulative_bytes,
+                                batch_max_bytes=batch_max_bytes,
+                                rows_in_batch=len(trimmed),
+                                rows_deferred=len(rows) - len(trimmed),
+                            )
+                            break
+                        trimmed.append(row)
+                        cumulative_bytes += row_bytes
+                    rows = trimmed
+
+                return rows
         except psycopg.errors.UndefinedTable:
             logger.warning("delta_table_not_found", delta_table=delta_table)
             result.skipped = 1
@@ -388,6 +420,26 @@ class WritebackEngine:
             )
             result.skipped += 1
             return
+
+        # T2 #35: required-fields guard — route to dead-letter when any configured field is absent
+        _required_fields = getattr(writeback_cfg, "required_fields", [])
+        if _required_fields:
+            _payload_check = {k: v for k, v in row.items() if not k.startswith("_")}
+            _missing = [f for f in _required_fields if f not in _payload_check]
+            if _missing:
+                logger.warning(
+                    "writeback_required_fields_missing",
+                    connector=connector.name,
+                    datatype=result.datatype,
+                    external_id=external_id,
+                    missing_fields=_missing,
+                )
+                result.failed += 1
+                result._failed_external_ids.add(external_id)
+                result._failed_entries.append(
+                    (external_id, action, f"required_fields_missing:{','.join(_missing)}")
+                )
+                return
 
         ops = writeback_cfg.operations
         dry_run = getattr(writeback_cfg, "dry_run", False)
