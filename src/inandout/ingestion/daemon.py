@@ -88,11 +88,9 @@ def _build_app(
     engine: IngestionEngine,
     connector_configs: list,
     pool: Any = None,
-    api_auth: Any = None,
 ) -> Any:
     from fastapi import FastAPI
     from inandout.api import build_api_router
-    from inandout.ui import build_ui_router
 
     routes = [
         Route("/health", _health),
@@ -118,17 +116,8 @@ def _build_app(
     api_app.include_router(api_router, prefix="/api")
     routes.append(Mount("/api", app=api_app))
 
-    # Mount Web UI
-    try:
-        routes.append(build_ui_router())
-    except Exception:
-        pass  # UI mount is best-effort
-
     app = Starlette(routes=routes)
     otel_app = OpenTelemetryMiddleware(app)
-    if api_auth is not None:
-        from inandout.api.auth import BearerTokenMiddleware
-        return BearerTokenMiddleware(otel_app, api_auth=api_auth)
     return otel_app
 
 
@@ -644,7 +633,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # Build HTTP app (health + webhook routes + metrics)
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_app(engine, connector_configs, pool=pool, api_auth=config.api_auth),
+        _build_app(engine, connector_configs, pool=pool),
         host=host,
         port=int(port_str),
         log_level="warning",

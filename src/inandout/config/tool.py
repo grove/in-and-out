@@ -10,15 +10,6 @@ from inandout.alerting.config import AlertingConfig
 from inandout.config._duration import parse_duration
 
 
-class ApiAuthConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-    token: str | None = None          # bearer token value (or load from env via ${VAR})
-    token_env_var: str | None = None  # env var name to read token from at startup
-    realm: str = "in-and-out"
-
-
 class DatabaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -235,7 +226,6 @@ class IngestionToolConfig(BaseModel):
     schema_registry_dir: str | None = None
     alerting: AlertingConfig = Field(default_factory=AlertingConfig)
     event_output: Any = Field(default_factory=lambda: None)  # EventOutputConfig | None
-    api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     federation: FederationConfig = Field(default_factory=FederationConfig)
     drain_timeout_secs: float = 30.0  # B8: max time to drain in-flight ops on SIGTERM
 
@@ -271,6 +261,5 @@ class WritebackToolConfig(BaseModel):
     housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
-    api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     replication_slot: ReplicationSlotConfig = Field(default_factory=ReplicationSlotConfig)
     drain_timeout_secs: float = 30.0  # B8: max time to drain in-flight ops on SIGTERM
