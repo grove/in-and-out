@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from inandout.alerting.dispatcher import AlertDispatcher, AlertEventType
 from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_writeback_tool_config
 from inandout.config.tool import WritebackToolConfig
@@ -34,6 +35,7 @@ async def _health(request: Request) -> JSONResponse:
 
 # Module-level draining flag — set to True when SIGTERM/SIGINT received.
 _draining: bool = False
+_alert_dispatcher: AlertDispatcher | None = None
 
 
 def _trigger_drain() -> None:
@@ -72,6 +74,14 @@ async def _writeback_polling_loop(
     global _draining
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     log.info("writeback_polling_loop_started", interval_secs=interval_secs, delta_table=delta_table)
+    from inandout.transport.circuit_breaker import CircuitState, get_circuit_breaker
+    _cb_cfg = getattr(connector_cfg, "circuit_breaker", None) or {}
+    _cb = get_circuit_breaker(
+        connector_cfg.name,
+        datatype,
+        failure_threshold=int(_cb_cfg.get("failure_threshold", 5) if isinstance(_cb_cfg, dict) else 5),
+        recovery_timeout=float(_cb_cfg.get("recovery_timeout", 60.0) if isinstance(_cb_cfg, dict) else 60.0),
+    )
     while True:
         # Check draining flag at the TOP of each iteration (after completing current cycle)
         if _draining:
@@ -88,8 +98,37 @@ async def _writeback_polling_loop(
                 skipped=result.skipped,
                 failed=result.failed,
             )
+            # Track circuit breaker: failures increment; success resets it
+            if result.failed > 0:
+                _cb.record_failure()
+                if _cb.state == CircuitState.open and _alert_dispatcher:
+                    await _alert_dispatcher.dispatch(
+                        AlertEventType.circuit_breaker_open,
+                        connector=connector_cfg.name,
+                        datatype=datatype,
+                        message=f"{result.failed} write(s) failed — circuit breaker opened",
+                        detail={"failed": result.failed},
+                    )
+            else:
+                prev_state = _cb.state
+                _cb.record_success()
+                if prev_state == CircuitState.open and _cb.state == CircuitState.closed and _alert_dispatcher:
+                    await _alert_dispatcher.dispatch(
+                        AlertEventType.circuit_breaker_closed,
+                        connector=connector_cfg.name,
+                        datatype=datatype,
+                        message="circuit breaker closed — writes recovering",
+                    )
         except Exception as exc:
             log.error("writeback_poll_error", error=str(exc))
+            _cb.record_failure()
+            if _cb.state == CircuitState.open and _alert_dispatcher:
+                await _alert_dispatcher.dispatch(
+                    AlertEventType.connector_unavailable,
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    message=str(exc),
+                )
         await anyio.sleep(interval_secs)
         if _draining:
             log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
@@ -194,6 +233,12 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     from inandout.observability import configure_logging, configure_metrics, configure_tracing
 
     config: WritebackToolConfig = load_writeback_tool_config(config_path)
+
+    # Initialise alert dispatcher if configured
+    global _alert_dispatcher
+    if config.alerting and config.alerting.enabled:
+        _alert_dispatcher = AlertDispatcher(config.alerting)
+        logger.info("writeback_alert_dispatcher_initialised")
 
     configure_logging(format=config.observability.logging.format, level=config.observability.logging.level)
     configure_metrics()
