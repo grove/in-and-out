@@ -42,12 +42,16 @@ async def purge_by_external_id(
     hist_table = f"inout_src_{connector}_{datatype}_history"
     lwstate_table = f"inout_dst_{connector}_{datatype}_lwstate"
     dl_table = f"inout_dl_ingestion_{connector}_{datatype}"
+    wbdl_table = f"inout_dl_writeback_{connector}_{datatype}"
+    dst_table = f"inout_dst_{connector}_{datatype}"
 
     if namespace and namespace != "public":
         src_table = f"{namespace}.{src_table}"
         hist_table = f"{namespace}.{hist_table}"
         lwstate_table = f"{namespace}.{lwstate_table}"
         dl_table = f"{namespace}.{dl_table}"
+        wbdl_table = f"{namespace}.{wbdl_table}"
+        dst_table = f"{namespace}.{dst_table}"
 
     log = logger.bind(
         connector=connector, datatype=datatype, external_id=external_id
@@ -128,6 +132,31 @@ async def purge_by_external_id(
                 result.tables_purged["webhook_log"] = cur.rowcount or 0
             except Exception:
                 result.tables_purged["webhook_log"] = 0
+
+            # 7. Delete writeback dead-letter rows
+            try:
+                cur = await conn.execute(
+                    f"DELETE FROM {wbdl_table} WHERE external_id = %s",
+                    [external_id],
+                )
+                result.tables_purged["writeback_dead_letter"] = cur.rowcount or 0
+            except Exception:
+                result.tables_purged["writeback_dead_letter"] = 0
+
+            # 8. Tombstone desired-state processed rows (clear data/base columns)
+            try:
+                cur = await conn.execute(
+                    f"""
+                    UPDATE {dst_table}
+                    SET data = '{{}}'::jsonb,
+                        base = NULL
+                    WHERE cluster_id = %s OR (action = 'insert' AND cluster_id = %s)
+                    """,
+                    [external_id, external_id],
+                )
+                result.tables_purged["desired_state"] = cur.rowcount or 0
+            except Exception:
+                result.tables_purged["desired_state"] = 0
 
     log.info("privacy_purge_complete", tables_purged=result.tables_purged)
     return result

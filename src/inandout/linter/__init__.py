@@ -12,6 +12,10 @@ from inandout.linter.rules import (
     _lint005,
     _lint006,
     _lint007,
+    _lint008,
+    _lint009,
+    _lint010,
+    _lint011,
 )
 
 __all__ = ["lint_connector", "LintDiagnostic"]
@@ -45,4 +49,8 @@ def lint_connector(
     diags.extend(_lint005(cfg))
     diags.extend(_lint006(cfg, known))
     diags.extend(_lint007(cfg))
+    diags.extend(_lint008(cfg))
+    diags.extend(_lint009(cfg))
+    diags.extend(_lint010(cfg))
+    diags.extend(_lint011(cfg))
     return diags

@@ -1,4 +1,4 @@
-"""Tests for the HubSpot API simulator."""
+"""Tests for the HubSpot simulator using GenericSimulator directly."""
 from __future__ import annotations
 
 import os
@@ -6,13 +6,18 @@ import os
 import httpx
 import pytest
 
-from inandout.simulators.hubspot import HubSpotSimulator, make_hubspot_connector_config
+from inandout.simulators import (
+    HUBSPOT_BASE_URL,
+    GenericSimulator,
+    make_hubspot_connector_config,
+    make_hubspot_sim_config,
+)
 from inandout.transport.http import HttpTransportAdapter
 
 
 @pytest.mark.anyio
 async def test_simulator_lists_all_contacts_with_pagination():
-    """Uses HubSpotSimulator and HttpTransportAdapter to fetch all contacts across pages."""
+    """GenericSimulator + HttpTransportAdapter fetches all contacts across pages."""
     os.environ["INOUT_CREDENTIAL_HUBSPOT_OAUTH"] = "dummy-token"
 
     connector = make_hubspot_connector_config()
@@ -21,7 +26,7 @@ async def test_simulator_lists_all_contacts_with_pagination():
 
     all_records: list[dict] = []
 
-    with HubSpotSimulator(page_size=2):
+    with GenericSimulator(connector, make_hubspot_sim_config(page_size=2)):
         async with HttpTransportAdapter(connector) as adapter:
             async for page in adapter.fetch_pages(ingestion_cfg.list):
                 all_records.extend(page)
@@ -38,8 +43,8 @@ async def test_simulator_returns_404_for_missing_contact():
 
     connector = make_hubspot_connector_config()
 
-    with HubSpotSimulator():
-        async with httpx.AsyncClient(base_url=HubSpotSimulator.BASE_URL) as client:
+    with GenericSimulator(connector, make_hubspot_sim_config()):
+        async with httpx.AsyncClient(base_url=HUBSPOT_BASE_URL) as client:
             resp = await client.get("/crm/v3/objects/contacts/999")
 
     assert resp.status_code == 404
@@ -54,8 +59,8 @@ async def test_simulator_update_contact():
 
     connector = make_hubspot_connector_config()
 
-    with HubSpotSimulator():
-        async with httpx.AsyncClient(base_url=HubSpotSimulator.BASE_URL) as client:
+    with GenericSimulator(connector, make_hubspot_sim_config()):
+        async with httpx.AsyncClient(base_url=HUBSPOT_BASE_URL) as client:
             resp = await client.patch(
                 "/crm/v3/objects/contacts/1",
                 json={"properties": {"firstname": "AliceUpdated"}},

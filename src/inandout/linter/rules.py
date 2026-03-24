@@ -181,3 +181,108 @@ def _lint007(cfg: Any) -> list[LintDiagnostic]:
                     path=f"connector.datatypes.{dtype_name}.ingestion.schedule.max_lag_seconds",
                 ))
     return diags
+
+
+def _lint008(cfg: Any) -> list[LintDiagnostic]:
+    """LINT008: writeback protection_level=none — no write-anomaly guard active → warning."""
+    from inandout.config.writeback import ProtectionLevel
+
+    diags: list[LintDiagnostic] = []
+    connector = cfg.connector
+    for dtype_name, dtype_cfg in connector.datatypes.items():
+        if dtype_cfg.writeback is None:
+            continue
+        wb = dtype_cfg.writeback
+        if wb.protection_level == ProtectionLevel.none:
+            diags.append(LintDiagnostic(
+                severity="warning",
+                rule_id="LINT008",
+                message=(
+                    f"datatype '{dtype_name}' writeback has protection_level=none — "
+                    "no write-anomaly guard is active; external modifications may be "
+                    "silently overwritten"
+                ),
+                path=f"connector.datatypes.{dtype_name}.writeback.protection_level",
+            ))
+    return diags
+
+
+def _lint009(cfg: Any) -> list[LintDiagnostic]:
+    """LINT009: fan-in shared_table set but datatype has no ingestion config → error."""
+    diags: list[LintDiagnostic] = []
+    connector = cfg.connector
+    for dtype_name, dtype_cfg in connector.datatypes.items():
+        shared_table = getattr(dtype_cfg, "shared_table", None)
+        if not shared_table:
+            continue
+        if dtype_cfg.ingestion is None:
+            diags.append(LintDiagnostic(
+                severity="error",
+                rule_id="LINT009",
+                message=(
+                    f"datatype '{dtype_name}' declares shared_table='{shared_table}' (fan-in) "
+                    "but has no ingestion config — fan-in requires an ingestion pipeline to "
+                    "populate the shared table"
+                ),
+                path=f"connector.datatypes.{dtype_name}.shared_table",
+            ))
+    return diags
+
+
+def _lint010(cfg: Any) -> list[LintDiagnostic]:
+    """LINT010: 'merge'/'split' in supported_actions but required operations not configured → error."""
+    diags: list[LintDiagnostic] = []
+    connector = cfg.connector
+    for dtype_name, dtype_cfg in connector.datatypes.items():
+        if dtype_cfg.writeback is None:
+            continue
+        wb = dtype_cfg.writeback
+        actions = [str(a).lower() for a in (getattr(wb, "supported_actions", None) or [])]
+        ops = wb.operations
+
+        if "merge" in actions and ops.update is None:
+            diags.append(LintDiagnostic(
+                severity="error",
+                rule_id="LINT010",
+                message=(
+                    f"datatype '{dtype_name}' lists 'merge' in supported_actions "
+                    "but operations.update is not configured — merge requires an update operation"
+                ),
+                path=f"connector.datatypes.{dtype_name}.writeback.operations.update",
+            ))
+        if "split" in actions and ops.insert is None:
+            diags.append(LintDiagnostic(
+                severity="error",
+                rule_id="LINT010",
+                message=(
+                    f"datatype '{dtype_name}' lists 'split' in supported_actions "
+                    "but operations.insert is not configured — split requires an insert operation"
+                ),
+                path=f"connector.datatypes.{dtype_name}.writeback.operations.insert",
+            ))
+    return diags
+
+
+def _lint011(cfg: Any) -> list[LintDiagnostic]:
+    """LINT011: PII fields declared on datatype that also has writeback → info."""
+    diags: list[LintDiagnostic] = []
+    connector = cfg.connector
+    for dtype_name, dtype_cfg in connector.datatypes.items():
+        pii = list(getattr(dtype_cfg, "pii_fields", None) or [])
+        if not pii:
+            continue
+        if dtype_cfg.writeback is not None:
+            sample = ", ".join(pii[:3])
+            ellipsis_mark = "\u2026" if len(pii) > 3 else ""
+            diags.append(LintDiagnostic(
+                severity="info",
+                rule_id="LINT011",
+                message=(
+                    f"datatype '{dtype_name}' declares {len(pii)} PII field(s) "
+                    f"({sample}{ellipsis_mark}) and also has a writeback config — "
+                    "verify that PII fields are excluded from writeback payloads "
+                    "or that the target system is authorised to receive them"
+                ),
+                path=f"connector.datatypes.{dtype_name}.pii_fields",
+            ))
+    return diags

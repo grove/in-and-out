@@ -373,9 +373,12 @@ PostgreSQL tables (inout_src_*)
    ↓
 [OSI-Mapping Engine]  ← consolidates, resolves identity, computes delta
    ↓
-PostgreSQL views (_delta_{mapping})  ← action-classified, per-source,
-                                       with _cluster_id and _base
-   ↓ (optional: thin business-filter query on top)
+PostgreSQL views (_resolved_*, _delta_*)
+   ↓
+[Bridge Layer]  ← app logic, produces desired-state table
+   ↓
+Desired-State Table  ← cluster_id, base, action populated FROM OSI
+   ↓
 [Writeback Tool]  ← executes writes, unchanged
    ↓
 External APIs
@@ -388,13 +391,10 @@ External APIs
 | **MDM Responsibility** | Assumed external | OSI-Mapping is the MDM |
 | **Identity Computation** | Writeback tool | OSI via `_cluster_id` |
 | **Conflict Resolution** | Assumed external | OSI via field strategies |
-| **Desired-State Source** | Assumed external | OSI `_delta_{mapping}` views (directly) |
+| **Desired-State Source** | Assumed external | Bridge layer (app-specific) |
 | **Base State Origin** | Assumed external | OSI's `_base` (source snapshot) |
-| **Action Classification** | Assumed external | OSI's `_action` in delta views |
-| **Per-Source Routing** | Assumed external | OSI produces one `_delta` per mapping |
-| **Reverse Mapping** | Part of writeback config | OSI computes in `_rev` views |
-| **Payload Reshaping** | Part of writeback config | In-and-out `transform.template` (unchanged) |
-| **Business Filtering** | N/A | Optional thin query on OSI delta views |
+| **Writeback Cluster_id** | Pre-populated by external | Provided by bridge layer from OSI |
+| **Reverse Mapping** | Part of writeback config | OSI computes in delta view |
 | **Testing** | Per-connector integration tests | OSI's YAML tests + in-and-out e2e tests |
 
 ---
@@ -445,31 +445,40 @@ External APIs
 │  - Conflict resolution by strategy   │
 │    (coalesce, last_modified, etc.)   │
 │  - FK resolution across ID spaces    │
-│  - Reverse projection to source shape│
-│  - Delta classification per source   │
-│    (insert/update/delete/noop)       │
+│  - Bidirectional delta detection     │
 │  - Lineage & provenance              │
 │                                      │
 │  Generates views:                    │
 │  - _resolved_contact (golden record) │
-│  - _rev_crm_contacts (source shape)  │
-│  - _delta_crm_contacts (classified)  │
+│  - _delta_crm_contacts (changes)     │
+│  - _rev_crm_contacts (reverse shape) │
 │  - _cluster_id (entity identity)     │
 │  - _base (original source values)    │
-│                                      │
-│  _delta views are the desired-state  │
-│  source: action, cluster_id, data,   │
-│  and _base are all present.          │
-│                                      │
-│  Business logic declared IN the YAML:│
-│  - filter / reverse_filter (routing) │
-│  - expression/reverse_expression     │
-│  - written_state + derive_noop       │
-│  - cluster_members (insert feedback) │
-│  - reverse_required (delete prop.)   │
 └────────────┬─────────────────────────┘
              │
-          consumes
+          reads
+             │
+             ▼
+┌──────────────────────────────────────┐
+│  BRIDGE LAYER (dbt/Python/SQL)       │
+│  ──────────────────────────────────  │
+│  Responsibility: Business logic      │
+│  - Read unified entities from OSI    │
+│  - Apply app-specific rules          │
+│  - Decide which changes to writeback │
+│  - Route to target systems           │
+│  - Produce desired-state table       │
+│                                      │
+│  Example dbt model:                  │
+│  SELECT                              │
+│    r._cluster_id,                    │
+│    'update' as action,               │
+│    jsonb_build_object(...) as data,  │
+│    r._base                           │
+│  FROM _resolved_contact r            │
+│  WHERE <business_filters>            │
+└────────────┬─────────────────────────┘
+             │ produces
              ▼
 ┌──────────────────────────────────────┐
 │  DESIRED-STATE TABLES                │
@@ -513,26 +522,23 @@ External APIs
 
 ### Architectural Responsibilities
 
-**OSI-Mapping (Consolidation + Business Logic Layer)**
+**OSI-Mapping (Consolidation Layer)**
 - Declares target entity schemas (what contact should look like)
-- Declares field mappings with forward/reverse transforms (`expression` / `reverse_expression`)
+- Declares field mappings (how to construct targets from sources)
 - Declares identity rules (when two rows represent same entity)
 - Declares conflict strategies (which source wins for each field)
-- Declares business filters (`filter` for forward, `reverse_filter` for writeback)
 - Computes transitive closure for identity matching
-- Produces golden records and per-source change deltas
-- Reverse-projects resolved values back to per-source shapes
-- Classifies changes as insert/update/delete/noop per source (`_delta` views)
-- Handles target-centric noop suppression (`written_state` + `derive_noop: true`)
-- Tracks insert feedback via `cluster_members` table (ETL writes, OSI reads)
-- Handles delete propagation via `reverse_required: true` on fields
+- Produces golden records and change deltas
 - Maintains lineage & provenance
-- Fully testable via embedded inline YAML tests
-- **This is 100% of what was previously called the "bridge layer"**
+- Provides base snapshots for 3-way merge
+- Fully testable via embedded YAML tests
 
-**Optional Business-Filter Query** ~~(formerly "Bridge Layer")~~
-
-*Not needed.* Business filtering, routing, and transforms are all declared in the OSI mapping YAML via `reverse_filter`, `expression`/`reverse_expression`, `written_state`, and `reverse_required`. The only remaining gap is cross-entity transaction atomicity (rare edge case, orchestration concern).
+**Bridge Layer (Business Logic)**
+- Decides when to route changes (filters, conditions)
+- Applies app-specific conflict resolution (if OSI's isn't sufficient)
+- Produces desired-state table format
+- Handles atomicity across related entities
+- Can be dbt YAML, Python, stored procedures, or custom code
 
 **In-and-Out Ingestion (HTTP Source Connector)**
 - Pulls data from external HTTP APIs reliably
@@ -545,13 +551,14 @@ External APIs
 - **NOT responsible for:** Identity resolution, conflict resolution, MDM logic
 
 **In-and-Out Writeback (HTTP Target Connector)**
-- Reads desired-state directly from OSI delta views (`_delta_{mapping}`)
+- Reads desired-state tables (provided by bridge)
 - Issues pre-flight GET for conflict detection
 - Compares base vs current vs resolved
 - Issues conditional writes (ETags) when available
-- Constructs payloads via `transform.template` (wraps source-shaped delta fields into target API JSON structure)
-- Writes ETL feedback: updates `_written_{mapping}` and `_cluster_members_{mapping}` tables after each write
+- Constructs payloads via field mapping templates
+- Tracks last-written-state and identity links
 - Handles retries, rate limiting, dead-letter
+- Writes generated IDs back to PostgreSQL feedback table
 - **Unchanged core logic:** 3-way merge conflict detection
 
 ---
@@ -600,43 +607,41 @@ Groups by _cluster_id:
   _base: {email: "alice@x.com", name: "Alice"}
 ```
 
-### Step 5: OSI Delta View (`_delta_crm_contacts`)
-
-OSI's delta view already classifies the change and includes all fields needed for writeback:
-
+### Step 5: Bridge Layer
 ```sql
--- OSI produces this automatically from _rev vs _base comparison:
-_action: 'noop'            -- resolved name "Alice" = _base name "Alice" → no change needed
-_cluster_id: <UUID>
-id: 100
-email: alice@x.com
-name: Alice
-_base: {id: 100, email: "alice@x.com", name: "Alice"}
+INSERT INTO inout_dst_crm_contact
+SELECT
+  CASE
+    WHEN r.name != prev.name THEN 'update'
+    ELSE 'noop'
+  END as action,
+  r._cluster_id,
+  jsonb_build_object('email', r.email, 'name', r.name) as data,
+  r._base,
+  NULL as base_version
+FROM _resolved_contact r
+LEFT JOIN previous_resolved prev USING (cluster_id)
+WHERE r._cluster_id IS NOT NULL
 ```
 
-For SAP (`_delta_sap_contacts`):
-```sql
-_action: 'update'          -- resolved name "Alice" ≠ _base full_name "Alice Smith" → update
-_cluster_id: <UUID>
-customer_id: CUST-001
-contact_email: alice@x.com
-full_name: Alice           -- Resolved: CRM priority wins
-_base: {customer_id: "CUST-001", contact_email: "alice@x.com", full_name: "Alice Smith"}
+Produces:
 ```
-
-**No separate bridge layer needed** — this is the desired-state, produced directly by OSI.
-Optional: a thin `WHERE` clause can filter (e.g., `WHERE email IS NOT NULL`).
+action: 'update'
+cluster_id: <UUID>
+data: {email: "alice@x.com", name: "Alice"}
+base: {email: "alice@x.com", name: "Alice"}
+base_version: NULL
+```
 
 ### Step 6: Writeback Conflict Detection
 ```
-1. Read from _delta_sap_contacts: _action=update, _cluster_id=<UUID>,
-   full_name="Alice", _base={full_name: "Alice Smith"}
-2. Issue GET /customer/CUST-001 → {full_name: "Alice Anderson"}
+1. Read desired-state: action=update, cluster_id=<UUID>, data={...}, base={...}
+2. Issue GET /contacts/100 → {id: 100, email: "alice@x.com", name: "Alice Anderson"}
 3. Three-way comparison:
-   - base (from OSI _base): {full_name: "Alice Smith"}
-   - current (pre-flight): {full_name: "Alice Anderson"}
-   - desired (from OSI delta): {full_name: "Alice"}
-4. Conflict detected: base≠current ("Anderson" added externally)
+   - base (from OSI): {email: "alice@x.com", name: "Alice"}
+   - current (pre-flight): {email: "alice@x.com", name: "Alice Anderson"}
+   - resolved (from bridge): {email: "alice@x.com", name: "Alice"}
+4. Conflict detected: "Anderson" added externally
 5. Apply conflict_resolution strategy:
    - dead_letter: Route to DLQ for operator review
    - last_writer_wins: Overwrite (use caution)
@@ -647,12 +652,12 @@ Optional: a thin `WHERE` clause can filter (e.g., `WHERE email IS NOT NULL`).
 ### Step 7: OSI Delta View (Reverse Mapping)
 ```
 _delta_crm:
-  _action: noop             (resolved matches _base → no write needed)
   {id: 100, email: "alice@x.com", name: "Alice"}
+  (change type: noop if no conflict)
 
 _delta_sap:
-  _action: update           (resolved name differs from _base's full_name)
-  {customer_id: "CUST-001", contact_email: "alice@x.com", full_name: "Alice"}
+  {customer_id: "CUST-001", contact_email: "alice@x.com", full_name: "Alice Smith"}
+  (compare resolved against source's _base)
 ```
 
 ### Step 8: ETL Writes Back
@@ -826,7 +831,7 @@ tests:
 **Result:**
 - In-and-out config: **simpler, more focused**
 - OSI config: **Single source of truth for consolidation**
-- Bridge layer: **Eliminated — OSI covers 100% via filter/reverse_filter, expression/reverse_expression, written_state + derive_noop**
+- Bridge layer: **Clearly separated business logic**
 - Requirements: **More precise, non-overlapping**
 
 ---
@@ -838,17 +843,17 @@ tests:
 | Requirement | Current Scope | With OSI | Reason |
 |---|---|---|---|
 | **#1: Per-Datatype Mapping** | Writeback must declare API endpoint per datatype | OSI declares this in central config | Consolidation mapping, not HTTP sync concern |
-| **#7: Desired-State Table** | Writeback tool must produce these | OSI delta views produce these directly | MDM + delta classification is OSI's concern |
+| **#7: Desired-State Table** | Writeback tool must produce these | Bridge layer produces these | MDM responsibility, not sync tool concern |
 | **#8: Identity Mapping** | Writeback tool computes cluster_id | OSI's `_cluster_id` via transitive closure | Identity resolution, not HTTP protocol concern |
 | **#12: API Asymmetry Handling** | Writeback handles read≠write schemas | Split: OSI handles consolidation asymmetry, in-and-out handles target asymmetry | Consolidated schema asymmetry is MDM concern |
-| **#34: Cluster Merge & Split Propagation** | Writeback tool handles merge/split actions | OSI delta views emit merge/split action classifications | Identity resolution logic, not HTTP sync concern |
+| **#34: Cluster Merge & Split Propagation** | Writeback tool handles merge/split actions | Bridge layer produces merge/split actions in desired-state | Business logic decision, not HTTP sync concern |
 
 ### Requirements Simplified (Clearer Responsibility)
 
 | Requirement | Change | Impact |
 |---|---|---|
 | **#8: Identity Mapping** | Change from "compute + enforce unique constraint" to "accept pre-computed from bridge" | Writeback now ~50 lines simpler |
-| **#16: External Reference Field** | Move from writeback config to OSI reverse view | OSI reverse view can include cluster_id as a mapped field |
+| **#16: External Reference Field** | Move from writeback config to bridge layer | Bridge decides what field to populate |
 | **#23: Pre-Write Validation** | Simplified: validate against target API schema (not consolidation schema) | Less redundant validation |
 | **#37: Connector Validation Mode** | Move to bridge layer + OSI validation | OSI tests full consolidation pipeline |
 
@@ -901,8 +906,8 @@ tests:
 - Simplified identity mapping logic
 - Updated tests for new data contracts
 
-### Phase 3: Business-Filter Patterns & Direct Delta Consumption (Weeks 5-6)
-**Focus: Document how writeback reads OSI delta views**
+### Phase 3: Bridge Layer Patterns (Weeks 5-6)
+**Focus: Document how to build bridge layer**
 
 - Create dbt example: `_resolved_contact` → `desired_state_contact`
 - Create Python example: same transformation
@@ -975,56 +980,100 @@ tests:
 
 ### Limitations & Gaps
 
-❌ **No Orchestration** — OSI doesn't schedule syncs; external system must trigger  
+❌ **No Orchestration** — OSI doesn't schedule syncs; external system (cron, Airflow) must trigger  
 ❌ **No CDC** — OSI doesn't detect changes; external CDC tool must populate tables  
 ❌ **PostgreSQL Views Only** — Currently generates views; other targets would need engine extensions  
-❌ **No Streaming (native IVM)** — Batch processing model; views re-execute from scratch  
+❌ **No Streaming** — Batch processing model; incremental IVM discussed but deferred  
 ❌ **No Transaction Semantics** — Cannot guarantee all-or-nothing ACID guarantee across sources  
 ❌ **Expression Safety** — SQL expression safety checked at validation time; assumes trusted authors  
 
 **These gaps are not weaknesses—they're intentional scope boundaries. OSI is the consolidation layer, not the orchestration or execution layer.**
 
-> **Note:** The "No CDC" and "No Streaming/IVM" gaps are directly addressed by **pg-trickle** (https://github.com/grove/pg-trickle/), a companion PostgreSQL extension by the same team. pg-trickle converts OSI's view pipeline into automatically-refreshing stream tables maintained via differential dataflow. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for details.
-
 ---
 
-## 13. OSI-Mapping Covers 100% of the Bridge Layer
+## 13. Bridge Layer: The Missing Piece
 
-### Confirmed After Schema Reference Analysis
+### What Is It?
 
-A thorough reading of the OSI-Mapping schema reference (https://github.com/BaardBouvet/OSI-mapping/blob/main/docs/reference/schema-reference.md) confirms that the author's claim is correct: **OSI-Mapping's schema handles every concern we previously attributed to a "bridge layer".**
+The **bridge layer** is the application logic between OSI's golden records and in-and-out's writeback tool. It decides:
+- When is a change worth writing back? (filtering)
+- Should this entity go to all targets or just some? (routing)
+- Are there app-specific conflict overrides? (business rules)
+- How should related entities stay atomic? (transaction boundaries)
 
-| Concern | OSI Feature | Example |
-|---|---|---|
-| Business filtering (forward) | `filter: "status = 'active'"` | Only active rows contribute to golden record |
-| Business filtering (reverse) | `reverse_filter: "type LIKE '%customer%'"` | Only customer-type entities written back to this source |
-| Multi-target routing | Multiple mappings, each with its own `reverse_filter` | Enterprise → ERP, SMB → CRM, all declared per mapping |
-| Field-level transforms | `expression: "split_part(full_name, ' ', 1)"` | Forward: split full_name into first_name |
-| Reverse transforms | `reverse_expression: "first_name \|\| ' ' \|\| last_name"` | Reverse: reconstruct full_name from parts |
-| Constants / injections | `direction: forward_only` with an `expression` | Inject `type: 'customer'` for this source in reverse |
-| Target-centric noop | `written_state: true` + `derive_noop: true` | Skip write if resolved value matches what was last actually sent |
-| Insert feedback | `cluster_members: true` | ETL writes back generated IDs; OSI reads them on next cycle |
-| Delete propagation | `reverse_required: true` on a field | If `is_active` is null in resolved record, treat as delete |
-| Precision-loss noop | `normalize: "trunc(%s::numeric, 0)"` | Don't emit update if only rounding difference changes |
-| Nested array elements | `derive_tombstones: true` | Propagate element-level deletions across sources |
-| Composite transforms | `default_expression: "first_name \|\| ' ' \|\| last_name"` | Computed fallback when no source provides value |
+### Implementations
 
-### What Remains (Outside OSI's Scope)
-
-These are NOT bridge layer concerns — they are separate component responsibilities:
-
-1. **HTTP payload wrapping** — In-and-out's `transform.template` constructs the final JSON envelope (`{"properties": {"firstname": "..."}}`) for target APIs. This is HTTP config, not business logic.
-2. **ETL feedback writes** — In-and-out writeback maintains `_written_{mapping}` and `_cluster_members_{mapping}` tables after each sync cycle. This is in-and-out's operational responsibility.
-3. **Cross-entity transaction atomicity** — Ensuring contact + company update atomically. Rare edge case; orchestration concern, not a bridge layer.
-
-### Architecture Is Two YAML Files
-
-```
-osi-mapping.yaml          (business logic: identity, conflict, filtering, routing, transforms)
-connectors/hubspot.yaml   (HTTP mechanics: auth, pagination, endpoints, rate limits, payload templates)
+**Option A: dbt YAML** (SQL-centric)
+```yaml
+# models/desired_state/contact_sync.sql
+select
+  r._cluster_id as cluster_id,
+  case
+    when r._ts_updated_at > cast(null as timestamp) -- check if changed
+    then 'update'
+    else 'noop'
+  end as action,
+  jsonb_build_object(
+    'email', r.email,
+    'first_name', r.first_name,
+    'last_name', r.last_name
+  ) as data,
+  r._base,
+  null as base_version
+from {{ ref('resolved_contact') }} r
+where r._cluster_id is not null
+  and r.email is not null -- business rule: email required
 ```
 
-No bridge layer. No intermediate code. No separate SQL views needed.
+**Option B: Python** (logic-centric)
+```python
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+def build_desired_state(session: Session):
+    resolved = session.execute("""
+        SELECT _cluster_id, email, first_name, ...
+        FROM _resolved_contact
+    """).fetchall()
+    
+    for row in resolved:
+        desired_action = decide_action(row)  # Custom logic
+        desired_data = construct_payload(row)
+        
+        insert_desired_state(
+            cluster_id=row['_cluster_id'],
+            action=desired_action,
+            data=desired_data,
+            base=row['_base']
+        )
+```
+
+**Option C: PostgreSQL Stored Procedure**
+```sql
+CREATE OR REPLACE FUNCTION build_desired_state_contact()
+RETURNS void AS $$
+BEGIN
+  INSERT INTO inout_dst_crm_contact
+    (cluster_id, action, data, base, base_version)
+  SELECT
+    r._cluster_id,
+    (CASE WHEN r.email != prev.email THEN 'update' ELSE 'noop' END),
+    to_jsonb(r),
+    r._base,
+    NULL
+  FROM _resolved_contact r
+  LEFT JOIN previous_contact prev USING (cluster_id);
+END
+$$ LANGUAGE plpgsql;
+```
+
+### Responsibility
+
+- Reads from `_resolved_{target}` views (golden records)
+- Applies business filters and transformations
+- Produces desired-state tables in in-and-out format
+- Can be idempotent or incremental
+- Can handle complex atomicity requirements
 
 ---
 
@@ -1055,20 +1104,15 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 - Less feature creep
 - Clear boundaries
 
-### 3. Document OSI YAML Patterns for Common Cases ✅
+### 3. Document Bridge Layer Pattern ✅
 
-**Action:** Create reference OSI YAML examples showing how to express common integration patterns:
-- Filtering (`reverse_filter`)
-- Multi-target routing (multiple mappings with different `reverse_filter`)
-- Field transforms (`expression` / `reverse_expression`)
-- Target-centric noop (`written_state` + `derive_noop`)
-- Insert propagation (`cluster_members`)
-- Delete propagation (`reverse_required`)
+**Action:** Create reference implementations (dbt, Python, SQL) showing how to build a bridge from OSI output to in-and-out input.
 
 **Rationale:**
-- OSI covers 100% of business logic but teams need worked examples
-- The OSI YAML _is_ the integration contract — document it as such
-- Each pattern is testable inline via OSI's embedded test harness
+- OSI is a library, not an application
+- Bridge layer is where app-specific logic lives
+- Makes integration pattern explicit
+- Customers can customize without modifying in-and-out
 
 ### 4. Create Integration Tests ✅
 
@@ -1106,29 +1150,6 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 - Prevents bugs from duplicate logic
 - Clarifies responsibilities
 
-### 7. Adopt pg-trickle as the OSI Execution Substrate
-
-**Action:** Use [pg-trickle](https://github.com/grove/pg-trickle/) to convert OSI's 6-stage view pipeline into automatically-refreshing stream tables. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the full analysis.
-
-**What pg-trickle provides:**
-- **Incremental refresh (O(changed rows), not O(all rows))** — Critical for production-scale datasets
-- **ETL feedback loop automation** — CDC auto-detects writes to `_written_` / `_cluster_members_`; OSI views re-evaluate without external orchestration
-- **DAG-aware scheduling** — Maintains OSI's 6-stage pipeline in topological order automatically
-- **Watermark gating** — Holds OSI refresh until ingestion cycle is confirmed complete
-- **WITH RECURSIVE in DIFFERENTIAL mode** — Incremental transitive closure updates (only affected clusters recomputed)
-
-**Rationale:**
-- Same authors as OSI-Mapping — explicitly designed to compose with it
-- Replaces need for external orchestration of OSI pipeline
-- Makes large-scale MDM viable (thousands of source records, hundreds of connectors)
-- All within PostgreSQL — no additional infrastructure
-
-**Phasing:**
-1. Phase 1 (development/early production): Use plain OSI views — simpler, validate the architecture
-2. Phase 2 (scale): Wrap OSI views with pg-trickle stream tables when datasets grow beyond ~100K rows per source
-
-**Caveats:** pg-trickle v0.9.0 targets PostgreSQL 18 and is pre-1.0. Plan adoption for v1.0.0 and PG 16/17 compatibility (v0.12.0).
-
 ---
 
 ## 15. Competitive / Strategic Analysis
@@ -1143,9 +1164,7 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 | **dbt Cloud** | Transform warehouse data | Bridge layer + orchestration |
 | **OSI-Mapping alone** | Declarative consolidation spec | No HTTP sync, no orchestration |
 | **In-and-Out alone** | Bidirectional HTTP sync | No MDM, no consolidation |
-| **pg-trickle alone** | Incremental view maintenance for PostgreSQL | No HTTP sync, no consolidation logic |
 | **In-and-Out + OSI** | Bidirectional HTTP sync with MDM | ✅ Complete, open, modular |
-| **In-and-Out + OSI + pg-trickle** | Full stack with incremental IVM | ✅ Production-scale, self-orchestrating |
 
 ### Unique Capabilities
 
@@ -1179,25 +1198,26 @@ No bridge layer. No intermediate code. No separate SQL views needed.
 - Versioning: in-and-out declares required OSI version
 - Keep bridge layer as abstraction (can switch consolidation layer underneath)
 
-### Risk 3: Underestimating OSI's Scope
+### Risk 3: Bridge Layer Complexity
 
-**Concern:** Teams may still build separate bridge layers not knowing OSI already handles filtering, routing, and transforms natively.
+**Concern:** Bridge layer adds another moving part.
 
 **Mitigation:**
-- Document OSI's `filter`/`reverse_filter`, `expression`/`reverse_expression`, `written_state`, and `cluster_members` features prominently
-- Provide worked examples in OSI YAML for common patterns (routing, transforms, noop detection)
-- Default contract: writeback reads `_delta_{mapping}` directly; no intermediate layer
+- Provide templates (dbt, Python)
+- Start simple (direct pass-through: OSI output → desired-state)
+- Incrementally add business logic
+- Monitor adoption patterns
 
 ### Risk 4: Performance (Views + Triggers)
 
-**Concern:** PostgreSQL views + 6-stage pipeline might be slow at scale. The `WITH RECURSIVE` transitive closure at Stage 2 is especially expensive — O(all source rows) per full recompute.
+**Concern:** PostgreSQL views + 6-stage pipeline might be slow.
 
 **Mitigation:**
-- OSI generates standard SQL (no magic); simple scenarios are fast
-- For moderate scale (up to ~100K rows per source): plain OSI views are acceptable, especially for development
-- **For production scale (>100K rows): use pg-trickle** — converts OSI's view pipeline into differential stream tables, reducing per-cycle cost from O(all rows) to O(changed rows). Same SQL interface, no connector change required
-- pg-trickle supports `WITH RECURSIVE` in DIFFERENTIAL mode — only affected clusters recomputed, not all
-- See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the complete performance analysis and integration guide
+- OSI generates standard SQL (no magic)
+- Materialized views option (IVM) discussed in OSI
+- Start with modest datasets (10K–100K records)
+- Profile and optimize as needed
+- Can parallelize ingestion ↔ consolidation
 
 ---
 
@@ -1212,7 +1232,7 @@ OSI-Mapping represents a **paradigm shift** from custom integration code to **de
 3. **Improve testability** — OSI's YAML tests are executable; integration tests can be deterministic
 4. **Reduce configuration burden** — Single YAML file declares all consolidation rules, not scattered across multiple connector configs
 5. **Enable multi-system scenarios** — Naturally handles 2+ sources simultaneously, not just pairwise
-6. **Provide clear architecture** — Two components: OSI-Mapping (consolidation + business logic) and in-and-out (HTTP mechanics). No bridge layer.
+6. **Provide clear architecture** — Three clear layers: ingestion (HTTP), consolidation (OSI), sync (in-and-out)
 
 ### Immediate Actions
 

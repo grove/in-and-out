@@ -5,11 +5,11 @@
 **As of March 2026**, this configuration design reflects a simplified scope: In-and-Out focuses on **HTTP API specification and mechanics**. Identity resolution, consolidation mapping, and multi-source conflict strategies are declared in **OSI-Mapping's YAML config** (separate from in-and-out).
 
 **Configuration Layers:**
-1. **OSI-Mapping Config** (`osi/consolidation.yaml`): Declares all consolidation and business logic — identity rules, conflict strategies, business filtering (`reverse_filter`), field transforms (`expression` / `reverse_expression`), target-centric noop (`written_state` + `derive_noop`), and insert/delete propagation. OSI's delta views (`_delta_{mapping}`) are the complete desired-state source.
-2. **pg-trickle Stream Tables** (SQL / dbt macros): Wraps OSI's view pipeline into automatically-refreshing stream tables using differential dataflow. Handles DAG-ordered refresh, ETL feedback loop automation via CDC, and watermark-gated ingestion coordination. Optional for small datasets; required for production scale. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md).
-3. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP mechanics only — endpoints, auth, pagination, rate limits, and `transform.template` for wrapping source-shaped delta fields into target API JSON payloads.
+1. **OSI-Mapping Config** (`osi/consolidation.yaml`): Declares sources, targets, field mappings, identity rules, conflict strategies
+2. **In-and-Out Config** (`connectors/*.yaml`): Declares HTTP endpoints, auth, pagination, field selection, writeback operations
+3. **Bridge Layer** (dbt/Python/SQL): Produces desired-state tables from OSI's consolidated views
 
-There is no bridge layer. OSI-Mapping covers 100% of business logic. In-and-Out covers 100% of HTTP mechanics. pg-trickle provides incremental view maintenance to make the OSI pipeline efficient at scale.
+This document specifies the In-and-Out connector configuration schema.
 
 ## Table of Contents
 
@@ -776,8 +776,8 @@ writeback:
   # Level 1: Full protection (conditional writes).
   # Level 2: Practical protection (pre-flight read only).
   # Level 3: Level 2 + post-write verification read.
-  # Note: In an OSI-integrated architecture, OSI-Mapping's delta views
-  # provide _action, _cluster_id, and _base. This connector
+  # Note: In an OSI-integrated architecture, the bridge layer
+  # computes desired-state and populates cluster_id. This connector
   # performs 3-way conflict detection (base vs current vs desired)
   # to determine if writes are safe.
 
@@ -793,8 +793,8 @@ writeback:
 
   # ─── Identity Tracking (T2 #16) ─────────────────────────
   # Track the cluster_id → external_id (target system ID) mapping.
-  # In OSI-integrated workflow, cluster_id is provided by OSI-Mapping's
-  # delta views (_delta_{mapping}). This connector writes it to the target
+  # In OSI-integrated workflow, cluster_id is pre-published by bridge layer
+  # in the desired-state table. This connector writes it to the target
   # system and maintains reverse mapping for identity lookups.
   identity_tracking:
     enabled: true
@@ -844,7 +844,7 @@ writeback:
       method: POST
       path: "/crm/v3/objects/contacts"
       # Transform: reshape desired-state data into target payload.
-      # OSI's delta views provide source-shaped fields; this template
+      # The bridge layer prepares desired-state; this template
       # handles any final HTTP-specific reshaping.
       transform:
         template:
@@ -967,15 +967,15 @@ datatypes:
 
 ### 4.6 Merge & Split Actions (T2 #34)
 
-In an OSI-integrated architecture, **OSI-Mapping's delta views** detect cluster merges and splits via identity resolution changes (e.g., two clusters becoming one, or one splitting into multiple). The `_delta_{mapping}` views emit `merge` and `split` action classifications. The writeback tool recognises these actions in the `_action` column and executes them via standard operations (`insert`, `update`, `delete`/`archive`, and identity-mapping updates).
+In an OSI-integrated architecture, the **bridge layer** detects cluster merges and splits from OSI-Mapping's consolidated views (e.g., two clusters becoming one, or one splitting into two) and populates the desired-state table with `action: merge` or `action: split` records. The writeback tool recognises these actions in the desired-state `action` column and executes them via standard operations (`insert`, `update`, `delete`/`archive`, and identity-mapping updates).
 
 No additional per-datatype config is needed beyond standard operations. The connector must simply declare which operations are available so the tool knows what the target system supports.
 
 ```yaml
 writeback:
   # Declare which action types this datatype supports.
-  # OSI-Mapping's delta views classify cluster events as merge/split.
-  # This connector executes them.
+  # The bridge layer populates desired-state action based on 
+  # cluster events detected by OSI-Mapping. This connector executes them.
   supported_actions:
     - insert
     - update

@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from inandout.alerting.dispatcher import AlertDispatcher, AlertEventType
 from inandout.config._duration import parse_duration
 from inandout.config.loader import load_connector, load_ingestion_tool_config
 from inandout.config.tool import IngestionToolConfig
@@ -63,6 +64,7 @@ logger = structlog.get_logger(__name__)
 # Drain flag — set by SIGTERM/SIGINT or a 'drain' control command.
 # All polling loops check this at the top of each iteration and exit cleanly.
 _draining: bool = False
+_alert_dispatcher: AlertDispatcher | None = None
 
 
 def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
@@ -145,7 +147,13 @@ def _next_interval_secs(schedule: Any, default_interval_secs: float) -> float:
 # Connector health persistence helpers
 # ---------------------------------------------------------------------------
 
-async def _mark_connector_unavailable(pool: Any, connector: str, datatype: str, reason: str) -> None:
+async def _mark_connector_unavailable(
+    pool: Any,
+    connector: str,
+    datatype: str,
+    reason: str,
+    dispatcher: AlertDispatcher | None = None,
+) -> None:
     """Persist connector-unavailable status to inout_ops_connector_health (T1 #44)."""
     try:
         async with pool.connection() as conn:
@@ -168,11 +176,37 @@ async def _mark_connector_unavailable(pool: Any, connector: str, datatype: str, 
     except Exception:
         pass  # Health table may not exist yet — never mask the polling error
 
+    if dispatcher:
+        await dispatcher.dispatch(
+            AlertEventType.connector_unavailable,
+            connector=connector,
+            datatype=datatype,
+            message=reason,
+        )
+    elif _alert_dispatcher:
+        await _alert_dispatcher.dispatch(
+            AlertEventType.connector_unavailable,
+            connector=connector,
+            datatype=datatype,
+            message=reason,
+        )
 
-async def _mark_connector_healthy(pool: Any, connector: str, datatype: str) -> None:
+
+async def _mark_connector_healthy(
+    pool: Any,
+    connector: str,
+    datatype: str,
+    dispatcher: AlertDispatcher | None = None,
+) -> None:
     """Clear unavailable status in inout_ops_connector_health (T1 #44)."""
+    was_unhealthy = False
     try:
         async with pool.connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT status FROM inout_ops_connector_health WHERE connector = %s AND datatype = %s",
+                [connector, datatype],
+            )
+            was_unhealthy = row is not None and row["status"] == "unavailable"
             await conn.execute(
                 """
                 INSERT INTO inout_ops_connector_health
@@ -190,6 +224,21 @@ async def _mark_connector_healthy(pool: Any, connector: str, datatype: str) -> N
             await conn.commit()
     except Exception:
         pass
+
+    if dispatcher and was_unhealthy:
+        await dispatcher.dispatch(
+            AlertEventType.connector_recovered,
+            connector=connector,
+            datatype=datatype,
+            message="connector is healthy again",
+        )
+    elif _alert_dispatcher and was_unhealthy:
+        await _alert_dispatcher.dispatch(
+            AlertEventType.connector_recovered,
+            connector=connector,
+            datatype=datatype,
+            message="connector is healthy again",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +577,13 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     config: IngestionToolConfig = load_ingestion_tool_config(config_path)
 
     _setup_credential_backend(config)
+
+    # Initialise alert dispatcher if configured
+    global _alert_dispatcher
+    if config.alerting and config.alerting.enabled:
+        from inandout.alerting.dispatcher import AlertDispatcher as _AlertDispatcher
+        _alert_dispatcher = _AlertDispatcher(config.alerting)
+        logger.info("alert_dispatcher_initialised")
 
     configure_logging(format=config.observability.logging.format, level=config.observability.logging.level)
     configure_metrics()

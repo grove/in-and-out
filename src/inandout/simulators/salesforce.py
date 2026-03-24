@@ -1,19 +1,18 @@
-"""Salesforce REST API simulator for testing.
+"""Salesforce CRM config factories for the config-driven simulator.
 
-Simulates the Salesforce SOQL query API (REST v59.0):
-  - POST /services/oauth2/token     → OAuth2 client_credentials token grant
-  - GET  /services/data/v59/query   → SOQL query with nextRecordsUrl cursor
-  - GET  /services/data/v59/query/<cursor> → subsequent pages
-  - PATCH /services/data/v59/sobjects/Contact/<id> → update a Contact
+Provides ``make_salesforce_connector_config`` and ``make_salesforce_sim_config``
+that together with ``GenericSimulator`` give a fully functional Salesforce stub.
+
+Salesforce-specific quirks are handled entirely in config:
+
+1. **Shared path** — ``contacts`` and ``accounts`` share ``/query``; routed by
+   ``route_discriminator`` matching the SOQL ``q`` parameter.
+2. **Cursor-as-URL** — ``cursor_url_template`` generates ``nextRecordsUrl`` paths.
+3. **Response envelope** — ``response_envelope`` injects ``totalSize`` / ``done``.
 """
 from __future__ import annotations
 
-import re
 from typing import Any
-from urllib.parse import urlencode
-
-import httpx
-import respx
 
 from inandout.config.auth import OAuth2Auth, OAuth2Config
 from inandout.config.connector import (
@@ -22,14 +21,20 @@ from inandout.config.connector import (
     DatatypeConfig,
     GenerationProfile,
 )
-from inandout.config.ingestion import (
-    HistoryMode,
-    IngestionConfig,
-    ListConfig,
-    ScheduleConfig,
+from inandout.config.ingestion import HistoryMode, IngestionConfig, ListConfig, ScheduleConfig
+from inandout.config.pagination import CursorConfig, PaginationConfig, PaginationStrategy
+from inandout.simulators.config import (
+    ExtraRoute,
+    RouteDiscriminator,
+    SimulatorAuthConfig,
+    SimulatorConfig,
+    SimulatorDatatypeConfig,
 )
-from inandout.config.pagination import PaginationConfig, PaginationStrategy, CursorConfig
+from inandout.simulators.generic import GenericSimulator
 
+# ---------------------------------------------------------------------------
+# Module-level constants (kept for backward compat — tests import them)
+# ---------------------------------------------------------------------------
 
 _BASE_URL = "https://myorg.salesforce.com"
 _API_VERSION = "v59.0"
@@ -77,117 +82,77 @@ _DEFAULT_ACCOUNTS: list[dict[str, Any]] = [
 ]
 
 
-class SalesforceSimulator:
-    """Simulates the Salesforce REST API for testing."""
+# ---------------------------------------------------------------------------
+# Config factories
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        contacts: list[dict] | None = None,
-        accounts: list[dict] | None = None,
-        page_size: int = 2,
-        access_token: str = "sim_access_token",
-    ):
-        self._contacts = contacts if contacts is not None else list(_DEFAULT_CONTACTS)
-        self._accounts = accounts if accounts is not None else list(_DEFAULT_ACCOUNTS)
-        self._page_size = page_size
-        self._access_token = access_token
-        self._mock: respx.MockRouter | None = None
-        # cursor → (records_list, offset)
-        self._cursors: dict[str, tuple[list, int]] = {}
 
-    def __enter__(self) -> "SalesforceSimulator":
-        self._mock = respx.mock(base_url=_BASE_URL, assert_all_called=False)
-        self._mock.__enter__()
-        self._register_routes()
-        return self
+def make_salesforce_sim_config(
+    contacts: list[dict] | None = None,
+    accounts: list[dict] | None = None,
+    page_size: int = 2,
+    access_token: str = "sim_access_token",
+) -> SimulatorConfig:
+    """Build a ``SimulatorConfig`` for the Salesforce simulator.
 
-    def __exit__(self, *args: object) -> None:
-        if self._mock:
-            self._mock.__exit__(*args)
+    Salesforce-specific patterns are expressed entirely in config:
 
-    def _register_routes(self) -> None:
-        assert self._mock is not None
-        # OAuth2 token endpoint
-        self._mock.post(_TOKEN_PATH).mock(side_effect=self._handle_token)
-        # SOQL query — first page
-        self._mock.get(_QUERY_PATH).mock(side_effect=self._handle_query)
-        # SOQL query — subsequent pages via nextRecordsUrl cursor
-        self._mock.get(re.compile(r"/services/data/v59\.0/query/[A-Za-z0-9]+")).mock(
-            side_effect=self._handle_query_next
-        )
-        # PATCH Contact
-        self._mock.patch(
-            re.compile(rf"/services/data/{_API_VERSION}/sobjects/Contact/[A-Za-z0-9]+")
-        ).mock(side_effect=self._handle_patch_contact)
+    * ``route_discriminator`` — routes the shared ``/query`` path to the right
+      datatype by matching the SOQL ``q`` parameter.
+    * ``cursor_url_template`` — generates ``nextRecordsUrl`` path segments for
+      cursor-as-URL pagination.
+    * ``response_envelope`` — injects ``totalSize`` and ``done`` into every page.
+    * ``extra_routes`` — PATCH ``Contact`` endpoint (no writeback config in the
+      test connector factory).
+    """
+    cursor_template = f"{_QUERY_PATH}/{{cursor_id}}"
+    envelope = {"totalSize": "${total_count}", "done": "${done}"}
 
-    # ------------------------------------------------------------------
-    # Token
-    # ------------------------------------------------------------------
-
-    def _handle_token(self, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "access_token": self._access_token,
+    return SimulatorConfig(
+        default_page_size=page_size,
+        auth=SimulatorAuthConfig(
+            token_response={
+                "access_token": access_token,
                 "instance_url": _BASE_URL,
                 "token_type": "Bearer",
                 "expires_in": 7200,
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # Query
-    # ------------------------------------------------------------------
-
-    def _handle_query(self, request: httpx.Request) -> httpx.Response:
-        q = request.url.params.get("q", "").upper()
-        if "FROM CONTACT" in q:
-            records = self._contacts
-        elif "FROM ACCOUNT" in q:
-            records = self._accounts
-        else:
-            return httpx.Response(400, json={"errorCode": "MALFORMED_QUERY", "message": "Unsupported object"})
-
-        return self._paginate(records, 0)
-
-    def _handle_query_next(self, request: httpx.Request) -> httpx.Response:
-        cursor = request.url.path.split("/")[-1]
-        entry = self._cursors.get(cursor)
-        if entry is None:
-            return httpx.Response(404, json={"errorCode": "NOT_FOUND"})
-        records, offset = entry
-        return self._paginate(records, offset)
-
-    def _paginate(self, records: list, offset: int) -> httpx.Response:
-        page = records[offset: offset + self._page_size]
-        next_offset = offset + self._page_size
-        has_more = next_offset < len(records)
-        next_records_url: str | None = None
-        if has_more:
-            cursor_id = f"cursor{next_offset:04d}"
-            self._cursors[cursor_id] = (records, next_offset)
-            next_records_url = f"/services/data/{_API_VERSION}/query/{cursor_id}"
-
-        body: dict[str, Any] = {
-            "totalSize": len(records),
-            "done": not has_more,
-            "records": page,
-        }
-        if next_records_url:
-            body["nextRecordsUrl"] = next_records_url
-
-        return httpx.Response(200, json=body)
-
-    # ------------------------------------------------------------------
-    # PATCH
-    # ------------------------------------------------------------------
-
-    def _handle_patch_contact(self, request: httpx.Request) -> httpx.Response:
-        contact_id = request.url.path.split("/")[-1]
-        for c in self._contacts:
-            if c["Id"] == contact_id:
-                return httpx.Response(204)
-        return httpx.Response(404, json={"errorCode": "NOT_FOUND"})
+            }
+        ),
+        datatypes={
+            "contacts": SimulatorDatatypeConfig(
+                fixtures=contacts if contacts is not None else list(_DEFAULT_CONTACTS),
+                page_size=page_size,
+                route_discriminator=RouteDiscriminator(
+                    param="q",
+                    pattern=r"FROM\s+Contact",
+                ),
+                cursor_url_template=cursor_template,
+                response_envelope=envelope,
+            ),
+            "accounts": SimulatorDatatypeConfig(
+                fixtures=accounts if accounts is not None else list(_DEFAULT_ACCOUNTS),
+                page_size=page_size,
+                route_discriminator=RouteDiscriminator(
+                    param="q",
+                    pattern=r"FROM\s+Account",
+                ),
+                cursor_url_template=cursor_template,
+                response_envelope=envelope,
+            ),
+        },
+        extra_routes=[
+            # PATCH /services/data/v59.0/sobjects/Contact/{id}
+            ExtraRoute(
+                method="PATCH",
+                path=rf"^/services/data/{_API_VERSION}/sobjects/Contact/[A-Za-z0-9]+$",
+                status_code=204,
+                return_fixture_datatype="contacts",
+                pk_field="Id",
+                not_found_status=404,
+                not_found_body={"errorCode": "NOT_FOUND"},
+            ),
+        ],
+    )
 
 
 def make_salesforce_connector_config(
@@ -254,3 +219,9 @@ def make_salesforce_connector_config(
             ),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible simulator class
+# ---------------------------------------------------------------------------
+

@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from inandout.simulators.hubspot import HubSpotSimulator, make_hubspot_connector_config
+from inandout.simulators import GenericSimulator, make_hubspot_connector_config, make_hubspot_sim_config
 from inandout.config.writeback import (
     WritebackConfig, ProtectionLevel, ConflictResolution,
     OperationsConfig, OperationConfig, UpdateOperationConfig,
@@ -68,7 +68,7 @@ async def test_hubspot_writeback_dispatches_patch(pool, run_migrations):
     connector = make_hubspot_connector_config()
     writeback_cfg = _make_hubspot_writeback_cfg()
 
-    with HubSpotSimulator() as sim:
+    with GenericSimulator(connector, make_hubspot_sim_config()):
         engine = WritebackEngine(pool)
         result = await engine.run_writeback_cycle(connector, "contacts", writeback_cfg, delta_table)
 
@@ -94,7 +94,7 @@ async def test_hubspot_writeback_not_found_counts_as_failure(pool, run_migration
     connector = make_hubspot_connector_config()
     writeback_cfg = _make_hubspot_writeback_cfg()
 
-    with HubSpotSimulator() as sim:
+    with GenericSimulator(connector, make_hubspot_sim_config()):
         engine = WritebackEngine(pool)
         result = await engine.run_writeback_cycle(connector, "contacts", writeback_cfg, delta_table)
 
@@ -120,7 +120,7 @@ async def test_hubspot_writeback_feedback_written(pool, run_migrations):
     connector = make_hubspot_connector_config()
     writeback_cfg = _make_hubspot_writeback_cfg()
 
-    with HubSpotSimulator() as sim:
+    with GenericSimulator(connector, make_hubspot_sim_config()):
         engine = WritebackEngine(pool)
         result = await engine.run_writeback_cycle(connector, "contacts", writeback_cfg, delta_table)
 

@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from inandout.alerting.config import AlertingConfig
 from inandout.config._duration import parse_duration
 
 
@@ -174,6 +175,7 @@ class RetentionConfig(BaseModel):
     webhook_route_seq: str = "7d"  # TTL for inout_ops_webhook_route_seq rows
     writeback_result: str = "30d"  # TTL for inout_ops_writeback_result rows
     writeback_dead_letter: str = "30d"  # TTL for inout_dl_writeback_* rows
+    desired_state_processed: str = "90d"  # TTL for processed rows in inout_dst_* tables
 
 
 class HousekeepingConfig(BaseModel):
@@ -212,6 +214,7 @@ class IngestionToolConfig(BaseModel):
     control_table: ControlTableConfig = Field(default_factory=ControlTableConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
+    alerting: AlertingConfig | None = None
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     schema_registry_dir: str | None = None
@@ -247,6 +250,7 @@ class WritebackToolConfig(BaseModel):
     control_table: ControlTableConfig = Field(default_factory=ControlTableConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     housekeeping: HousekeepingConfig = Field(default_factory=HousekeepingConfig)
+    alerting: AlertingConfig | None = None
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     replication_slot: ReplicationSlotConfig = Field(default_factory=ReplicationSlotConfig)

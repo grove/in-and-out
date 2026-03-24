@@ -1,4 +1,4 @@
-"""Tests for SalesforceSimulator and Salesforce transport integration."""
+"""Tests for the Salesforce simulator using GenericSimulator directly."""
 from __future__ import annotations
 
 import os
@@ -6,9 +6,12 @@ import os
 import pytest
 import httpx
 
-from inandout.simulators.salesforce import (
-    SalesforceSimulator,
+from inandout.simulators import (
+    GenericSimulator,
     make_salesforce_connector_config,
+    make_salesforce_sim_config,
+)
+from inandout.simulators.salesforce import (
     _BASE_URL,
     _TOKEN_PATH,
     _QUERY_PATH,
@@ -32,7 +35,8 @@ def clear_oauth2_cache():
 
 def test_token_endpoint_returns_access_token(monkeypatch):
     monkeypatch.setenv("INOUT_CREDENTIAL_SALESFORCE_APP", "my_client_id:my_client_secret")
-    with SalesforceSimulator() as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config()) as sim:
         with httpx.Client() as client:
             resp = client.post(f"{_BASE_URL}{_TOKEN_PATH}", data={
                 "grant_type": "client_credentials",
@@ -50,7 +54,8 @@ def test_token_endpoint_returns_access_token(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_list_contacts_first_page():
-    with SalesforceSimulator(page_size=2) as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config(page_size=2)) as sim:
         with httpx.Client() as client:
             resp = client.get(
                 f"{_BASE_URL}{_QUERY_PATH}",
@@ -64,7 +69,8 @@ def test_list_contacts_first_page():
 
 
 def test_list_contacts_all_pages():
-    with SalesforceSimulator(page_size=2) as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config(page_size=2)) as sim:
         with httpx.Client() as client:
             # First page
             resp1 = client.get(
@@ -89,7 +95,8 @@ def test_list_contacts_all_pages():
 
 def test_list_contacts_exact_page_boundary():
     """When total records == page_size, no nextRecordsUrl should appear."""
-    with SalesforceSimulator(contacts=[{"Id": "1"}, {"Id": "2"}], page_size=2) as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config(contacts=[{"Id": "1"}, {"Id": "2"}], page_size=2)) as sim:
         with httpx.Client() as client:
             resp = client.get(
                 f"{_BASE_URL}{_QUERY_PATH}",
@@ -106,7 +113,8 @@ def test_list_contacts_exact_page_boundary():
 # ---------------------------------------------------------------------------
 
 def test_list_accounts_first_page():
-    with SalesforceSimulator(page_size=2) as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config(page_size=2)) as sim:
         with httpx.Client() as client:
             resp = client.get(
                 f"{_BASE_URL}{_QUERY_PATH}",
@@ -120,7 +128,8 @@ def test_list_accounts_first_page():
 
 
 def test_list_unknown_object_returns_400():
-    with SalesforceSimulator() as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config()) as sim:
         with httpx.Client() as client:
             resp = client.get(
                 f"{_BASE_URL}{_QUERY_PATH}",
@@ -135,7 +144,8 @@ def test_list_unknown_object_returns_400():
 # ---------------------------------------------------------------------------
 
 def test_patch_contact_success():
-    with SalesforceSimulator() as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config()) as sim:
         with httpx.Client() as client:
             resp = client.patch(
                 f"{_BASE_URL}/services/data/{_API_VERSION}/sobjects/Contact/003A000001aAAAA",
@@ -146,7 +156,8 @@ def test_patch_contact_success():
 
 
 def test_patch_contact_not_found():
-    with SalesforceSimulator() as sim:
+    connector = make_salesforce_connector_config()
+    with GenericSimulator(connector, make_salesforce_sim_config()) as sim:
         with httpx.Client() as client:
             resp = client.patch(
                 f"{_BASE_URL}/services/data/{_API_VERSION}/sobjects/Contact/NONEXISTENT",

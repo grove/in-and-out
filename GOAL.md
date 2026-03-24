@@ -9,48 +9,20 @@
 **Architecture:**
 ```
 External APIs → [In-and-Out Ingestion] → PostgreSQL source tables
-                                    advance_watermark() after each cycle
                                          ↓
-                        [OSI-Mapping YAML + Engine]
-                        [+ pg-trickle IVM — differential refresh, DAG-ordered]
-                        - Identity resolution (transitive closure, WITH RECURSIVE)
-                        - Conflict resolution (per-field strategies)
-                        - Business filtering (filter / reverse_filter per mapping)
-                        - Field-level transforms (expression / reverse_expression)
-                        - Noop detection incl. target-centric (written_state + derive_noop)
-                        - Delta classification (insert/update/delete/noop)
-                        - Insert ID feedback (cluster_members stream table)
+                        [OSI-Mapping Engine - Identity & Conflict Resolution]
                                          ↓
-                        _delta_{mapping} stream tables — complete desired-state:
-                        _action, _cluster_id, source-shaped fields, _base
-                        (pre-computed, incremental, instant reads)
+                     [Bridge Layer - Business Logic & Desired-State Production]
                                          ↓
-           [In-and-Out Writeback] → External APIs
-           (HTTP execution + ETL feedback to written_state / cluster_members)
-                                         ↓ (CDC auto-triggers OSI re-evaluation)
+           [In-and-Out Writeback] → External APIs (writes resolved changes back)
 ```
 
-> **pg-trickle** (https://github.com/grove/pg-trickle/) is a companion PostgreSQL extension by the same team. It converts OSI's plain SQL views into automatically-refreshing stream tables using differential dataflow: only changed rows are processed per cycle (O(delta) not O(all rows)). It also automates the ETL feedback loop — writes to `_written_` and `_cluster_members_` are detected by CDC triggers and OSI views self-update without external orchestration. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the full analysis. **pg-trickle is optional for small datasets; required for production scale.**
-
-**Key Insight:** OSI-Mapping's schema covers 100% of what we previously called a "bridge layer":
-- Business filtering: `reverse_filter: "email IS NOT NULL AND status = 'active'"`
-- Multi-target routing: multiple mappings with different `reverse_filter` conditions
-- Field transforms: `expression` / `reverse_expression` per field
-- Target-centric noop: `written_state: true` + `derive_noop: true`
-- Delete propagation: `reverse_required: true` on field
-- Insert tracking: `cluster_members: true` feedback table
-
-**There is no bridge layer.** OSI-Mapping config declares all business logic. In-and-Out config declares HTTP mechanics only.
-
-**pg-trickle makes OSI production-scalable:** At large scale, plain OSI views re-execute the full 6-stage pipeline (including `WITH RECURSIVE` transitive closure) from scratch on each writeback cycle. pg-trickle converts those views into stream tables maintained by differential dataflow — only changed rows are processed per cycle. It also closes the ETL feedback loop automatically via CDC triggers. See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md).
-
-**In-and-Out's Scope:** Reliable, conflict-aware HTTP API synchronization in both directions (ingestion and writeback). Identity resolution, consolidation mapping, field-level conflict resolution, and business routing are handled by OSI-Mapping and declared in a separate `osi-mapping.yaml` file (not an in-and-out concern).
+**In-and-Out's Scope:** Reliable, conflict-aware HTTP API synchronization in both directions (ingestion and writeback). Identity resolution, consolidation mapping, and field-level conflict resolution strategies are now handled by OSI-Mapping and declared in a separate `osi-mapping.yaml` file (not an in-and-out concern).
 
 **Key Impact on This Document:**
 - Requirements T2 #1, #7, #8, #12, #34 are recontextualized (OSI handles consolidation; in-and-out executes)
 - Core T1 and T2 requirements remain valid and unchanged
 - See [REPORT_OSI_MAPPING.md](REPORT_OSI_MAPPING.md) for detailed integration analysis
-- See [REPORT_PG_TRICKLE.md](REPORT_PG_TRICKLE.md) for the pg-trickle IVM analysis (OSI view execution substrate)
 
 ---
 
@@ -129,7 +101,7 @@ This project aims to research and build two separate but related tools that act 
 ## Tool 2: The Synchronization Tool (Writeback)
 **Objective:** Read refined data from PostgreSQL desired-state tables and synchronize changes back into external HTTP APIs.
 
-**Context:** OSI-Mapping computes what unified entities should look like, resolves identity, applies per-field conflict strategies, filters which rows flow in each direction (`filter` / `reverse_filter`), transforms fields (`expression` / `reverse_expression`), handles noop detection (`written_state` + `derive_noop`), and produces per-source delta views with action classification (`_delta_{mapping}`). These delta views are the complete desired-state input — no intermediate bridge layer is needed. The writeback tool reads from them directly and executes HTTP writes.
+**Context:** OSI-Mapping computes what unified entities should look like. A bridge layer (dbt, Python, SQL) produces desired-state tables. Writeback tool executes writes with conflict detection.
 
 **Key Requirements:**
 1. **Per-Datatype Mapping (OSI-Mapped):** The mapping between MDM-produced consolidated entities and target API endpoints is declared once in OSI-Mapping's YAML file, not in in-and-out config. In-and-out reads pre-populated desired-state tables with `cluster_id`, `data`, and `base` columns. The writeback tool focuses on **HTTP write mechanics**, not consolidation logic.
@@ -191,7 +163,7 @@ This project aims to research and build two separate but related tools that act 
 31. **Delete Safety Guard:** Before processing a `delete` or `archive` action, the writeback tool must verify that the record still exists in the target system and that its current state matches the last-written state known to the tool. If the record has been externally modified since the last write, the delete must not proceed and must be routed through the conflict resolution path (requirement #30). If the record no longer exists in the target system, the delete is a no-op — it must be logged and marked as successfully processed.
 32. **Replication Slot Health Monitoring:** The logical replication slot used by the writeback trigger path (#10, #22) accumulates WAL if the consumer falls behind. An unchecked stalled slot can exhaust disk and crash PostgreSQL. The writeback tool must: continuously monitor replication slot lag (bytes behind and estimated time behind); emit this as an observability metric; log at ERROR level and increment a dedicated counter when lag exceeds a configurable warning threshold; and support a fallback mode where, if lag exceeds a configurable maximum threshold, the tool pauses replication consumption and falls back to polling the desired-state table directly until the backlog clears.
 33. **Write Batch Composition:** The mechanism by which records are assembled into write batches must be explicitly defined rather than implementation-dependent. Batches are closed by whichever threshold is reached first: (a) a configurable maximum record count, (b) a configurable maximum uncompressed payload size in bytes, or (c) a configurable maximum wait time (age of the oldest record in the forming batch). Ordering within a batch must respect requirement #28 (write ordering per record) and requirement #26 (dependency ordering). Batch composition parameters must be configurable per connector per operation type.
-34. **Cluster Merge & Split Propagation (OSI-Detected):** OSI-Mapping identity resolution can reassign records between clusters — merging two clusters into one (many-to-one), or splitting one cluster into multiple (one-to-many). **OSI-Mapping's delta views** detect these identity changes and emit `merge` and `split` action classifications in `_delta_{mapping}` (specifying the losing/surviving `cluster_id` for merges, or the originating/resulting `cluster_id` values for splits). The **writeback tool** executes these actions: For `merge`: update the target record with the surviving identity and delete or archive the losing record, then update identity mapping tables. For `split`: create new target records for each child cluster. These actions flow through the same safety-guard checks as `delete` and `insert` respectively.
+34. **Cluster Merge & Split Propagation (Bridge-Produced):** OSI-Mapping identity resolution can reassign records between clusters — merging two clusters into one (many-to-one), or splitting one cluster into multiple (one-to-many). The **bridge layer** (not in-and-out) detects this and populates the desired-state table with `merge` action (specifying the losing `cluster_id` and the surviving `cluster_id`) and `split` action (specifying the originating `cluster_id` and the resulting new `cluster_id` values). The **writeback tool** executes these actions: For `merge`: update the target record with the surviving identity and delete or archive the losing record, then update identity mapping tables. For `split`: create new target records for each child cluster. These actions flow through the same safety-guard checks as `delete` and `insert` respectively.
 35. **Writeback Scheduling:** When the writeback tool operates in polling mode — either as the primary operating mode or as a fallback when logical replication is unavailable or lagging (see requirement #32) — it must support configurable per-connector per-datatype poll intervals using the same scheduling primitives as the ingestion tool (T1 #37): cron-style expressions or fixed intervals. The scheduler must be externalizable — an operator must be able to disable internal scheduling and drive writeback cycles entirely through the runtime control table. When operating in logical replication mode, scheduling is not applicable; the tool processes changes as they arrive on the replication stream.
 36. **Per-Datatype Concurrency Control:** At most one active writeback operation may run per datatype per connector at any given time. Concurrent attempts — whether from the same instance or different instances in a multi-instance deployment — must either queue and serialize, or the later attempt must abort gracefully with a logged warning. The lock must be implemented using PostgreSQL advisory locks, consistent with the ingestion tool's approach (T1 #36) and the multi-instance high-availability strategy.
 37. **Connector Validation Mode:** Before running a writeback connector for the first time, operators must be able to validate it non-destructively: check config syntax, test connectivity to the target system, verify authentication, validate field mappings against the target API's schema, and perform a dry-run transformation of a sample desired-state record without sending any HTTP requests to the target. Output must clearly report the result of each check, including whether the target system supports conditional writes (ETags/If-Match) and the effective write-anomaly protection level per requirement #38. This mode is activated via CLI or the runtime control table, analogous to the ingestion tool's validation mode (T1 #43).

@@ -34,6 +34,8 @@ async def run_housekeeping(
     webhook_seq_interval = _to_pg_interval(getattr(retention, "webhook_route_seq", "7d"))
     writeback_result_interval = _to_pg_interval(getattr(retention, "writeback_result", "30d"))
     writeback_dl_interval = _to_pg_interval(getattr(retention, "writeback_dead_letter", "30d"))
+    _ds_raw = getattr(retention, "desired_state_processed", "90d")
+    desired_state_interval = _to_pg_interval(_ds_raw if isinstance(_ds_raw, str) else "90d")
 
     totals: dict[str, int] = {}
 
@@ -99,6 +101,22 @@ async def run_housekeeping(
                     f"DELETE FROM {wbdl_table} WHERE failed_at < NOW() - INTERVAL '{writeback_dl_interval}'"
                 )
                 totals[f"wbdl_{connector}_{datatype}"] = cur.rowcount or 0
+            except Exception:
+                pass  # Table may not exist yet
+
+        # Purge processed desired-state rows past retention — only rows that have been
+        # successfully processed (_processed_at IS NOT NULL) so unprocessed rows are never touched.
+        for connector, datatype in connector_datatypes:
+            dst_table = f"inout_dst_{connector}_{datatype}"
+            try:
+                cur = await conn.execute(
+                    f"""
+                    DELETE FROM {dst_table}
+                    WHERE _processed_at IS NOT NULL
+                      AND _processed_at < NOW() - INTERVAL '{desired_state_interval}'
+                    """
+                )
+                totals[f"dst_{connector}_{datatype}"] = cur.rowcount or 0
             except Exception:
                 pass  # Table may not exist yet
 
