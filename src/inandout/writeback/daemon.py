@@ -124,10 +124,12 @@ async def _writeback_polling_loop(
             # Update federation heartbeat after each writeback cycle
             if _federation_hb is not None:
                 import datetime
+                from inandout.observability.health_score import compute_health_score
+                _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                 _federation_hb.update(
                     connector=connector_cfg.name,
                     datatype=datatype,
-                    health_score=0.0 if result.failed > 0 else 1.0,
+                    health_score=_hs,
                     last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
                     circuit_breaker_state=_cb.state.value,
                 )
@@ -142,10 +144,12 @@ async def _writeback_polling_loop(
                     message=str(exc),
                 )
             if _federation_hb is not None:
+                from inandout.observability.health_score import compute_health_score
+                _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                 _federation_hb.update(
                     connector=connector_cfg.name,
                     datatype=datatype,
-                    health_score=0.0,
+                    health_score=_hs_exc,
                     circuit_breaker_state=_cb.state.value,
                 )
         # T2 #33: clamp sleep to batch_max_age_secs when set (close batch if oldest row exceeds age limit)

@@ -19,6 +19,7 @@ class PaginationStrategy(StrEnum):
     offset = "offset"
     link_header = "link_header"
     page_number = "page_number"
+    keyset = "keyset"  # T2 #12: keyset / seek pagination (WHERE id > :last_id ORDER BY id)
 
 
 class CursorConfig(BaseModel):
@@ -39,6 +40,24 @@ class CursorConfig(BaseModel):
         return self
 
 
+class KeysetConfig(BaseModel):
+    """Required when strategy == 'keyset'.  Enforces seek-based pagination.
+
+    Records are fetched in pages ordered by *keyset_field* with the last seen
+    value passed as a query parameter on each subsequent request.  The loop
+    stops when a page smaller than *page_size* is returned.
+
+    Example API shape:  GET /records?after=<last_id>&limit=100
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    keyset_field: str                # field in each record used as the seek key (e.g. "id")
+    request_param: str               # query param name for the seek value (e.g. "after")
+    page_size: int = 100
+    page_size_param: str = "limit"   # query param name for page size
+
+
 class PaginationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -47,6 +66,7 @@ class PaginationConfig(BaseModel):
     offset: dict[str, Any] | None = None
     link_header: dict[str, Any] | None = None
     page_number: dict[str, Any] | None = None
+    keyset: KeysetConfig | None = None  # T2 #12
     termination: list[str | dict[str, Any]] | None = None
 
     @model_validator(mode="after")

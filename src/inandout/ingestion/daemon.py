@@ -293,10 +293,12 @@ async def _polling_loop(
             # Update federation heartbeat after each sync
             if _federation_hb is not None:
                 import datetime
+                from inandout.observability.health_score import compute_health_score
+                _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                 _federation_hb.update(
                     connector=connector_cfg.name,
                     datatype=datatype,
-                    health_score=0.0 if result.status == "failed" else 1.0,
+                    health_score=_hs,
                     last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
                     circuit_breaker_state=cb.state.value,
                 )
@@ -309,10 +311,12 @@ async def _polling_loop(
                     reason=str(exc),
                 )
             if _federation_hb is not None:
+                from inandout.observability.health_score import compute_health_score
+                _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                 _federation_hb.update(
                     connector=connector_cfg.name,
                     datatype=datatype,
-                    health_score=0.0,
+                    health_score=_hs_exc,
                     circuit_breaker_state=cb.state.value,
                 )
 

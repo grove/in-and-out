@@ -358,6 +358,37 @@ class HttpTransportAdapter:
                     break
                 page += 1
 
+        elif pagination.strategy == PaginationStrategy.keyset:
+            # T2 #12: keyset / seek pagination.
+            # Each page passes the last seen keyset_field value as a query param
+            # so the server can efficiently seek to WHERE keyset_field > last_value.
+            keyset_cfg = pagination.keyset
+            if keyset_cfg is None:
+                # Fallback: yield one empty page if misconfigured
+                yield []
+                return
+            keyset_field = keyset_cfg.keyset_field
+            request_param = keyset_cfg.request_param
+            page_size = keyset_cfg.page_size
+            page_size_param = keyset_cfg.page_size_param
+            last_value: str | None = None
+            while True:
+                params = {**base_params, page_size_param: str(page_size)}
+                if last_value is not None:
+                    params[request_param] = last_value
+                resp = await self._request(method, path, params=params)
+                data = orjson.loads(resp.content)
+                records = _extract_records(data, record_selector)
+                yield records
+                if len(records) < page_size:
+                    break
+                # Advance the seek key to the last value seen in the page
+                last_record = records[-1]
+                next_val = last_record.get(keyset_field)
+                if next_val is None:
+                    break
+                last_value = str(next_val)
+
     async def _fetch_graphql_pages(
         self,
         list_config: ListConfig,
