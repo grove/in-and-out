@@ -30,7 +30,7 @@ def _make_connector(connector_name: str = _CONNECTOR):
     from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
     from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
     from inandout.config.ingestion import IngestionConfig, HistoryMode, ListConfig, ScheduleConfig
-    from inandout.config.pagination import PaginationConfig
+    from inandout.config.pagination import PaginationConfig, PaginationStrategy, CursorConfig
     from inandout.config.writeback import (
         WritebackConfig, ProtectionLevel, ConflictResolution,
         OperationsConfig, OperationConfig, UpdateOperationConfig,
@@ -58,7 +58,13 @@ def _make_connector(connector_name: str = _CONNECTOR):
                             method="GET",
                             path="/v1/contacts",
                             record_selector="contacts",
-                            pagination=PaginationConfig(strategy="none"),
+                            pagination=PaginationConfig(
+                                strategy=PaginationStrategy.cursor,
+                                cursor=CursorConfig(
+                                    request_param="cursor",
+                                    response_path="next_cursor",
+                                ),
+                            ),
                         )
                     },
                 ),

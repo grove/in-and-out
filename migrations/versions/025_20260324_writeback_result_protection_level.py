@@ -28,7 +28,11 @@ def upgrade() -> None:
             ADD COLUMN IF NOT EXISTS protection_level TEXT
     """))
     # schema version: 25
-    conn.execute(text("UPDATE inout_ops_meta SET value = '25' WHERE key = 'schema_version'"))
+    conn.execute(text("""
+        INSERT INTO inout_ops_meta (key, value)
+        VALUES ('schema_version', '25')
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    """))
 
 
 def downgrade() -> None:

@@ -8,6 +8,7 @@ Run with: pytest tests/load/test_writeback_throughput.py -v -m load
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 
@@ -80,14 +81,13 @@ def _make_connector(base_url: str = "https://api.load-test.example.com"):
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(
+            lookup=OperationConfig(method="GET", path="/items/${external_id}"),
             update=UpdateOperationConfig(
-                operation=OperationConfig(
-                    method="PATCH",
-                    path="/items/${external_id}",
-                ),
+                method="PATCH",
+                path="/items/${external_id}",
             ),
         ),
-        batch_size=100,
+        batch_size=2000,  # large enough to fetch all records in one cycle
         max_concurrent_writes=5,
     )
 
@@ -119,6 +119,7 @@ async def test_writeback_throughput_1k_records(pool, run_migrations):
     reasonable throughput on a real PostgreSQL database with mock HTTP.
     """
     import json
+    os.environ["INOUT_CREDENTIAL_LOAD_KEY"] = "dummy"
 
     from inandout.postgres.desired_state import desired_state_table_ddl
     from inandout.writeback.engine import WritebackEngine
@@ -217,6 +218,7 @@ async def test_batch_composition_respects_max_record_count(pool, run_migrations)
     n = 20
     connector_name = "batch_comp_test"
     datatype = "widgets"
+    os.environ["INOUT_CREDENTIAL_K"] = "dummy"
     delta_table = f"inout_dst_{connector_name}_{datatype}"
 
     wb_cfg = WritebackConfig(
@@ -224,11 +226,10 @@ async def test_batch_composition_respects_max_record_count(pool, run_migrations)
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(
-            update=UpdateOperationConfig(
-                operation=OperationConfig(method="PATCH", path="/widgets/${external_id}"),
-            ),
+            lookup=OperationConfig(method="GET", path="/widgets/${external_id}"),
+            update=UpdateOperationConfig(method="PATCH", path="/widgets/${external_id}"),
         ),
-        batch_size=5,        # process in batches of 5
+        batch_size=100,  # fetch all n=20 rows in one cycle
         max_concurrent_writes=1,
     )
     connector = ConnectorConfig(
@@ -318,15 +319,15 @@ async def test_concurrent_writeback_cycles_no_double_dispatch(pool, run_migratio
     datatype = "items"
     delta_table = f"inout_dst_{connector_name}_{datatype}"
     db_url = pool.conninfo.replace("postgresql://", "postgresql://")
+    os.environ["INOUT_CREDENTIAL_K"] = "dummy"
 
     wb_cfg = WritebackConfig(
         protection_level=ProtectionLevel.none,
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["update"],
         operations=OperationsConfig(
-            update=UpdateOperationConfig(
-                operation=OperationConfig(method="PATCH", path="/items/${external_id}"),
-            ),
+            lookup=OperationConfig(method="GET", path="/items/${external_id}"),
+            update=UpdateOperationConfig(method="PATCH", path="/items/${external_id}"),
         ),
         batch_size=50,
         max_concurrent_writes=2,

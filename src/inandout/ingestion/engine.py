@@ -237,7 +237,7 @@ class IngestionEngine:
                 try:
                     lock_row = await (await conn.execute(
                         """
-                        SELECT id FROM inout_ops_sync_lock
+                        SELECT connector FROM inout_ops_sync_lock
                         WHERE connector = %s AND datatype = %s
                         FOR UPDATE SKIP LOCKED
                         """,
@@ -741,7 +741,11 @@ class IngestionEngine:
                     bulk_page.append(_bulk_record)
                 # Treat the entire bulk export as one "page"
                 result.records_fetched += len(bulk_page)
-                _pages_iterable: Any = [bulk_page]
+
+                async def _bulk_pages_gen() -> Any:
+                    yield bulk_page
+
+                _pages_iterable: Any = _bulk_pages_gen()
             else:
                 _pages_iterable = transport.fetch_pages(
                     list_cfg,
@@ -1664,7 +1668,7 @@ async def _upsert_record(
                 f"""
                 UPDATE {table}
                 SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s,
-                    _deleted_at=NULL, _lineage=%s
+                    _deleted=FALSE, _deleted_at=NULL, _lineage=%s
                 WHERE external_id=%s AND _connector=%s
                 """,
                 [data, data, run_id, raw_hash, lineage_json, external_id, connector_col],
@@ -1675,7 +1679,7 @@ async def _upsert_record(
         else:
             was_tombstoned = row[1] is not None
             await conn.execute(
-                f"UPDATE {table} SET _deleted_at=NULL "
+                f"UPDATE {table} SET _deleted=FALSE, _deleted_at=NULL "
                 f"WHERE external_id=%s AND _connector=%s AND _deleted_at IS NOT NULL",
                 [external_id, connector_col],
             )
@@ -1714,7 +1718,7 @@ async def _upsert_record(
             f"""
             UPDATE {table}
             SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s,
-                _deleted_at=NULL, _lineage=%s
+                _deleted=FALSE, _deleted_at=NULL, _lineage=%s
             WHERE external_id=%s
             """,
             [data, data, run_id, raw_hash, lineage_json, external_id],
@@ -1726,7 +1730,7 @@ async def _upsert_record(
         # No-op: same hash. Clear tombstone if record reappeared.
         was_tombstoned = row[1] is not None
         await conn.execute(
-            f"UPDATE {table} SET _deleted_at=NULL WHERE external_id=%s AND _deleted_at IS NOT NULL",
+            f"UPDATE {table} SET _deleted=FALSE, _deleted_at=NULL WHERE external_id=%s AND _deleted_at IS NOT NULL",
             [external_id],
         )
         if was_tombstoned:

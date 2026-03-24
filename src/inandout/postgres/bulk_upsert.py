@@ -56,7 +56,7 @@ async def bulk_upsert_records(
         raw_hash = _compute_raw_hash(rec)
         aug = dict(rec)
         aug["_raw_hash"] = raw_hash
-        aug["_run_id"] = str(run_id)
+        aug["_sync_run_id"] = run_id  # maps to the _sync_run_id column in source tables
         augmented.append(aug)
 
     # Collect all column names (union across all records for schema flexibility).

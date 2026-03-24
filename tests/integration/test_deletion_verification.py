@@ -20,7 +20,7 @@ def _make_connector(verify_deletion: bool = True):
     from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
     from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
     from inandout.config.ingestion import IngestionConfig, HistoryMode, ListConfig, ScheduleConfig
-    from inandout.config.pagination import PaginationConfig
+    from inandout.config.pagination import PaginationConfig, PaginationStrategy, CursorConfig
 
     return ConnectorConfig(
         name=_CONNECTOR,
@@ -45,7 +45,13 @@ def _make_connector(verify_deletion: bool = True):
                             method="GET",
                             path="/v1/records",
                             record_selector="records",
-                            pagination=PaginationConfig(strategy="none"),
+                            pagination=PaginationConfig(
+                                strategy=PaginationStrategy.cursor,
+                                cursor=CursorConfig(
+                                    request_param="cursor",
+                                    response_path="next_cursor",
+                                ),
+                            ),
                             detail_path="/v1/records/${external_id}",
                         )
                     },

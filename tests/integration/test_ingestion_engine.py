@@ -283,8 +283,7 @@ async def test_no_op_same_hash(pool):
 
 @pytest.mark.anyio
 async def test_advisory_lock_prevents_concurrent_sync(pool):
-    """Acquire lock manually, run sync, verify it returns 'skipped'."""
-    import hashlib
+    """Acquire row-level lock manually, run sync, verify it returns 'skipped'."""
     os.environ["INOUT_CREDENTIAL_TEST_KEY"] = "dummy"
 
     connector = ConnectorConfig(
@@ -326,18 +325,26 @@ async def test_advisory_lock_prevents_concurrent_sync(pool):
     ingestion_cfg = connector.datatypes["items"].ingestion
     assert ingestion_cfg is not None
 
-    # Compute the advisory lock key for this connector+datatype
-    digest = hashlib.md5(b"test_locktest:items").digest()
-    lock_key = int.from_bytes(digest[:8], "big", signed=True)
+    # Ensure the sync-lock row exists in the table
+    async with pool.connection() as setup_conn:
+        await setup_conn.execute(
+            "INSERT INTO inout_ops_sync_lock (connector, datatype) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            [connector.name, "items"],
+        )
+        await setup_conn.commit()
 
     async with pool.connection() as lock_conn:
-        # Acquire the lock from a separate connection
-        await lock_conn.execute("SELECT pg_advisory_lock(%s)", [lock_key])
+        # Hold the row-level lock so the engine's SKIP LOCKED finds nothing
+        await lock_conn.execute(
+            "SELECT connector FROM inout_ops_sync_lock WHERE connector = %s AND datatype = %s FOR UPDATE",
+            [connector.name, "items"],
+        )
+        # Do NOT commit — keep the row-level lock held
 
         with respx.mock(base_url="https://api.example.com", assert_all_called=False):
             engine = IngestionEngine(pool)
             result = await engine.run_sync(connector, "items", ingestion_cfg)
 
-        await lock_conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
+        await lock_conn.rollback()  # release the row-level lock
 
     assert result.status == "skipped"

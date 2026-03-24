@@ -1,9 +1,9 @@
-"""
-Measures ingestion throughput: records/second for bulk upsert.
+"""Measures ingestion throughput: records/second for bulk upsert.
 Uses a respx mock server returning synthetic pages.
 """
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
@@ -19,7 +19,11 @@ pytestmark = [
 
 def _make_synthetic_records(count: int) -> list[dict]:
     return [
-        {"id": str(i), "name": f"Record {i}", "value": i * 1.5}
+        {
+            "external_id": str(i),
+            "data": json.dumps({"id": str(i), "name": f"Record {i}", "value": i * 1.5}),
+            "raw": json.dumps({"id": str(i)}),
+        }
         for i in range(count)
     ]
 
@@ -56,7 +60,7 @@ async def test_ingestion_throughput_10k_records(pool, run_migrations):
         batch = records[i: i + batch_size]
         async with pool.connection() as conn:
             inserted, updated = await bulk_upsert_records(
-                conn, table, batch, "id", run_id
+                conn, table, batch, "external_id", run_id
             )
             await conn.commit()
         total_inserted += inserted
@@ -100,7 +104,7 @@ async def test_ingestion_memory_stable_large_sync(pool, run_migrations):
     for i in range(0, len(records), batch_size):
         batch = records[i: i + batch_size]
         async with pool.connection() as conn:
-            await bulk_upsert_records(conn, table, batch, "id", run_id)
+            await bulk_upsert_records(conn, table, batch, "external_id", run_id)
             await conn.commit()
 
     _, peak = tracemalloc.get_traced_memory()

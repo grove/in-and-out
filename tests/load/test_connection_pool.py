@@ -1,8 +1,7 @@
-"""
-Tests connection pool behaviour under concurrent load.
-"""
+"""Tests connection pool behaviour under concurrent load."""
 from __future__ import annotations
 
+import json
 import uuid
 
 import anyio
@@ -18,7 +17,11 @@ pytestmark = [
 
 def _make_records(count: int, offset: int = 0) -> list[dict]:
     return [
-        {"id": str(offset + i), "data": f"record_{offset + i}"}
+        {
+            "external_id": str(offset + i),
+            "data": json.dumps({"id": str(offset + i), "value": f"record_{offset + i}"}),
+            "raw": json.dumps({"id": str(offset + i)}),
+        }
         for i in range(count)
     ]
 
@@ -53,7 +56,7 @@ async def test_concurrent_connectors_share_pool(pool, run_migrations):
             for i in range(0, len(records), batch_size):
                 batch = records[i: i + batch_size]
                 async with pool.connection() as conn:
-                    await bulk_upsert_records(conn, table, batch, "id", run_id)
+                    await bulk_upsert_records(conn, table, batch, "external_id", run_id)
                     await conn.commit()
             completed.append(connector_idx)
         except Exception as exc:

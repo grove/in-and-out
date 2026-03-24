@@ -10,7 +10,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
 from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
@@ -123,8 +123,8 @@ async def test_webhook_processing_inserts_log_row(pool, run_migrations):
     body = b'{"event_type": "contact.created", "id": "contact-1", "name": "Alice"}'
     sig = _make_signed_body(body, _SECRET)
 
-    with TestClient(app) as client:
-        resp = client.post(
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
             f"/webhooks/{_CONNECTOR_NAME}",
             content=body,
             headers={"X-Hub-Signature-256": sig, "Content-Type": "application/json"},
@@ -157,8 +157,8 @@ async def test_webhook_log_payload_hash_recorded(pool, run_migrations):
     expected_hash = hashlib.sha256(body).hexdigest()
     sig = _make_signed_body(body, _SECRET)
 
-    with TestClient(app) as client:
-        resp = client.post(
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
             f"/webhooks/{_CONNECTOR_NAME}",
             content=body,
             headers={"X-Hub-Signature-256": sig, "Content-Type": "application/json"},

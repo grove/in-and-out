@@ -51,6 +51,9 @@ def run_migrations(db_url):
 @pytest_asyncio.fixture(scope="function")
 async def pool(db_url, run_migrations):
     """Per-test async pool — avoids session-scoped async fixture event loop issues."""
+    # Reset global circuit-breaker state so unit tests can't contaminate integration tests.
+    from inandout.transport.circuit_breaker import reset_all
+    reset_all()
     cfg = DatabaseConfig(dsn=db_url)
     p = await create_pool(cfg)
     yield p

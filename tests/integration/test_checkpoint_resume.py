@@ -18,7 +18,7 @@ def _make_connector(checkpoint_every_n_pages: int = 1):
     from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
     from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
     from inandout.config.ingestion import IngestionConfig, HistoryMode, ListConfig, ScheduleConfig
-    from inandout.config.pagination import PaginationConfig
+    from inandout.config.pagination import PaginationConfig, PaginationStrategy, CursorConfig
 
     return ConnectorConfig(
         name="checkpoint_test",
@@ -44,9 +44,11 @@ def _make_connector(checkpoint_every_n_pages: int = 1):
                             path="/v1/items",
                             record_selector="items",
                             pagination=PaginationConfig(
-                                strategy="cursor",
-                                cursor_param="cursor",
-                                cursor_path="next_cursor",
+                                strategy=PaginationStrategy.cursor,
+                                cursor=CursorConfig(
+                                    request_param="cursor",
+                                    response_path="next_cursor",
+                                ),
                             ),
                         )
                     },

@@ -83,10 +83,9 @@ def _make_writeback_cfg() -> WritebackConfig:
         conflict_resolution=ConflictResolution.last_writer_wins,
         supported_actions=["insert", "update"],
         operations=OperationsConfig(
+            lookup=OperationConfig(method="GET", path="/v1/leads/${external_id}"),
             insert=OperationConfig(method="POST", path="/v1/leads"),
-            update=UpdateOperationConfig(
-                operation=OperationConfig(method="PATCH", path="/v1/leads/${external_id}"),
-            ),
+            update=UpdateOperationConfig(method="PATCH", path="/v1/leads/${external_id}"),
         ),
         enable_crash_recovery=True,
     )

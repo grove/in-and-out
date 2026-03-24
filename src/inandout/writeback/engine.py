@@ -111,6 +111,30 @@ def _validate_payload_schema(
     return errors
 
 
+def _extract_writeback_payload(
+    row: dict[str, Any],
+    use_desired_state_table: bool = False,
+) -> dict[str, Any]:
+    """Extract the HTTP writeback payload from a delta-table row.
+
+    When *use_desired_state_table* is True the business fields live inside the
+    ``data`` JSONB column (``inout_dst_*`` schema).  We expand that column and
+    strip internal ``_*`` keys so only the real business payload is sent.
+
+    For plain delta tables the business fields are top-level columns, so we
+    keep the existing behaviour of dropping underscore-prefixed columns.
+    """
+    if use_desired_state_table and "data" in row:
+        raw_data = row.get("data") or {}
+        if isinstance(raw_data, (str, bytes)):
+            try:
+                raw_data = orjson.loads(raw_data)
+            except Exception:
+                raw_data = {}
+        return {k: v for k, v in raw_data.items() if not k.startswith("_")}
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
 def _apply_writeback_transforms(
     payload: dict[str, Any],
     row: dict[str, Any],
@@ -429,33 +453,9 @@ class WritebackEngine:
         """
         try:
             async with self._pool.connection() as conn:
-                if run_id:
-                    import uuid as _uuid
-                    try:
-                        run_uuid = _uuid.UUID(run_id)
-                        audit_rows = await (await conn.execute(
-                            """
-                            SELECT external_id, action
-                            FROM inout_ops_writeback_result
-                            WHERE connector = %s AND datatype = %s AND delta_table = %s
-                              AND run_id = %s
-                              AND status = 'ok'
-                            """,
-                            [connector, datatype, delta_table, run_uuid],
-                        )).fetchall()
-                    except Exception:
-                        # run_id column may not exist on pre-022 DBs — fall back
-                        audit_rows = await (await conn.execute(
-                            """
-                            SELECT external_id, action
-                            FROM inout_ops_writeback_result
-                            WHERE connector = %s AND datatype = %s AND delta_table = %s
-                              AND processed_at > NOW() - INTERVAL '1 hour'
-                              AND status = 'ok'
-                            """,
-                            [connector, datatype, delta_table],
-                        )).fetchall()
-                else:
+                # Deduplicate using both same-run rows AND recent rows from any run.
+                # This covers crash-recovery (same run_id) and cross-run deduplication.
+                try:
                     audit_rows = await (await conn.execute(
                         """
                         SELECT external_id, action
@@ -466,6 +466,8 @@ class WritebackEngine:
                         """,
                         [connector, datatype, delta_table],
                     )).fetchall()
+                except Exception:
+                    audit_rows = []
         except Exception:
             # If the audit table doesn't exist yet, skip deduplication
             return rows
@@ -738,7 +740,9 @@ class WritebackEngine:
                 if ops.insert is None:
                     result.skipped += 1
                     return
-                payload = {k: v for k, v in row.items() if not k.startswith("_")}
+                payload = _extract_writeback_payload(
+                    row, use_desired_state_table=writeback_cfg.use_desired_state_table
+                )
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
                 # T2 #23: pre-write payload validation
                 _pw_schema = getattr(writeback_cfg, "payload_schema", None)
@@ -827,7 +831,9 @@ class WritebackEngine:
                 if ops.update is None:
                     result.skipped += 1
                     return
-                payload = {k: v for k, v in row.items() if not k.startswith("_")}
+                payload = _extract_writeback_payload(
+                    row, use_desired_state_table=writeback_cfg.use_desired_state_table
+                )
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
                 # T2 #23: pre-write payload validation
                 _pw_schema_upd = getattr(writeback_cfg, "payload_schema", None)
@@ -881,8 +887,19 @@ class WritebackEngine:
                                 lw_conn_3way, connector.name, result.datatype, external_id
                             )
 
-                        # Get base from row dict
-                        base_3way: dict[str, Any] = row.get("_base") or row.get("base") or {}
+                        # Get base from row dict: check dedicated 'base' column
+                        # first, then fall back to '_base' embedded inside the
+                        # 'data' JSONB (used when desired_state_table=True).
+                        _base_col = row.get("base")
+                        if not _base_col:
+                            _data_col = row.get("data") or {}
+                            if isinstance(_data_col, (str, bytes)):
+                                try:
+                                    _data_col = orjson.loads(_data_col)
+                                except Exception:
+                                    _data_col = {}
+                            _base_col = _data_col.get("_base") if isinstance(_data_col, dict) else None
+                        base_3way: dict[str, Any] = _base_col or row.get("_base") or {}
 
                         # T2 #12: normalize GET response field names to write-path names
                         _resp_map = getattr(writeback_cfg, "response_field_map", None) or {}
@@ -1092,7 +1109,7 @@ class WritebackEngine:
                                     remote_data = orjson.loads(lookup_resp.content)
                             except Exception:
                                 remote_data = {}
-                        except httpx.HTTPError:
+                        except Exception:
                             etag = ""
                             remote_data = {}
 

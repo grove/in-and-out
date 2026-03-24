@@ -44,7 +44,18 @@ def upgrade() -> None:
         CREATE INDEX IF NOT EXISTS idx_writeback_result_processed_at
             ON inout_ops_writeback_result (processed_at)
     """))
-    conn.execute(text(f"UPDATE inout_ops_meta SET schema_version = {SCHEMA_VERSION}"))
+    # Create meta table if it doesn't exist, then record schema version.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS inout_ops_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """))
+    conn.execute(text(f"""
+        INSERT INTO inout_ops_meta (key, value)
+        VALUES ('schema_version', '{SCHEMA_VERSION}')
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    """))
 
 
 def downgrade() -> None:
@@ -52,4 +63,8 @@ def downgrade() -> None:
     conn.execute(text("""
         DROP INDEX IF EXISTS idx_writeback_result_processed_at
     """))
-    conn.execute(text(f"UPDATE inout_ops_meta SET schema_version = {SCHEMA_VERSION - 1}"))
+    conn.execute(text(f"""
+        INSERT INTO inout_ops_meta (key, value)
+        VALUES ('schema_version', '{SCHEMA_VERSION - 1}')
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    """))
