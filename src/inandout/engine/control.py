@@ -477,10 +477,56 @@ class ControlDispatcher:
         payload: dict,
         engine: Any | None,
     ) -> dict:
-        """B3: Validate writeback connectivity, auth, field mappings, and ETag support."""
+        """B3: Validate writeback connectivity, auth, field mappings, and ETag support (T2 #37)."""
         if not connector:
             raise ValueError("validate requires 'connector'")
 
+        # Try to load the connector config from the registry / payload path
+        connector_cfg = None
+        connector_path = payload.get("connector_path") or payload.get("connector")
+        if connector_path:
+            try:
+                from pathlib import Path
+                from inandout.config.loader import load_connector
+                loaded = load_connector(Path(connector_path))
+                connector_cfg = loaded.connector
+            except Exception as load_exc:
+                logger.warning("validate_connector_load_failed", path=connector_path, error=str(load_exc))
+
+        # Fall back to engine's connector registry if available
+        if connector_cfg is None and engine is not None:
+            registry = getattr(engine, "_connector_registry", {})
+            connector_cfg = registry.get(connector)
+
+        if connector_cfg is not None:
+            # Use the rich validation module
+            from inandout.writeback.validate import validate_writeback_connector
+
+            datatype_names = [datatype] if datatype else None
+            vr = await validate_writeback_connector(connector_cfg, datatype_names=datatype_names)
+
+            raw_datatypes = []
+            for dt in vr.datatypes:
+                raw_datatypes.append({
+                    "datatype": dt.datatype,
+                    "configured_protection_level": dt.configured_protection_level,
+                    "effective_protection_level": dt.effective_protection_level,
+                    "etag_support": dt.etag_support,
+                    "if_match_support": dt.if_match_support,
+                    "operations_ok": dt.operations_ok,
+                    "errors": dt.errors,
+                    "warnings": dt.warnings,
+                })
+            return {
+                "connector": vr.connector,
+                "connectivity": vr.connectivity,
+                "auth": vr.auth,
+                "ok": vr.ok,
+                "datatypes": raw_datatypes,
+                "errors": vr.errors,
+            }
+
+        # Fallback: shallow probe using base_url from payload
         result: dict = {
             "connectivity": "unknown",
             "auth": "unknown",
@@ -490,51 +536,52 @@ class ControlDispatcher:
             "errors": [],
         }
 
-        # Look up connector config from payload or registry
         base_url = payload.get("base_url", "")
         if not base_url:
-            result["errors"].append("base_url not provided in payload")
+            result["errors"].append(
+                "connector config not found and base_url not provided — "
+                "pass connector_path in payload or ensure connector is registered"
+            )
             return result
 
         try:
             import httpx
             async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
-                # Connectivity check
                 try:
                     resp = await client.get("/")
                     result["connectivity"] = "ok"
-                    # Auth check
                     if resp.status_code == 401:
                         result["auth"] = "failed"
                         result["errors"].append(f"401 Unauthorized from {base_url}")
+                    elif resp.status_code == 403:
+                        result["auth"] = "failed"
+                        result["errors"].append(f"403 Forbidden from {base_url}")
                     else:
                         result["auth"] = "ok"
                 except Exception as conn_exc:
                     result["connectivity"] = "failed"
                     result["errors"].append(f"connection failed: {conn_exc}")
 
-                # ETag support check via HEAD request
                 if result["connectivity"] == "ok":
                     try:
-                        head_resp = await client.head("/", headers={"If-None-Match": "*"})
-                        etag = head_resp.headers.get("ETag") or head_resp.headers.get("etag")
+                        etag_header = payload.get("etag_header", "ETag")
+                        head_resp = await client.head("/")
+                        etag = head_resp.headers.get(etag_header) or head_resp.headers.get(etag_header.lower())
                         result["etag_support"] = bool(etag)
-                        result["protection_level"] = "full" if etag else "practical"
+                        result["protection_level"] = "optimistic" if etag else "none"
                     except Exception:
                         result["etag_support"] = False
-                        result["protection_level"] = "practical"
+                        result["protection_level"] = "none"
 
         except Exception as outer_exc:
             result["errors"].append(f"validate_error: {outer_exc}")
 
-        # Field mapping validation from payload
+        # Field mapping / operation path validation from payload
         operations = payload.get("operations", {})
         field_errors = []
         for op_name, op_cfg in operations.items():
-            if isinstance(op_cfg, dict):
-                path = op_cfg.get("path", "")
-                if not path:
-                    field_errors.append(f"operation.{op_name}.path is empty")
+            if isinstance(op_cfg, dict) and not op_cfg.get("path"):
+                field_errors.append(f"operation.{op_name}.path is empty")
         result["field_mappings"] = "ok" if not field_errors else f"errors: {field_errors}"
         if field_errors:
             result["errors"].extend(field_errors)

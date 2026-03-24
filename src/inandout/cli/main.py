@@ -383,6 +383,89 @@ def writeback_run(
     anyio.run(run_writeback_daemon, cfg_path)
 
 
+@writeback_app.command("validate-connector")
+def writeback_validate_connector(
+    connector: str = typer.Option(
+        ...,
+        "--connector",
+        help="Path to a single connector YAML file.",
+    ),
+    datatype: str = typer.Option(
+        None,
+        "--datatype",
+        help="Validate only this datatype (default: all writeback datatypes).",
+    ),
+) -> None:
+    """Validate a writeback connector: schema, connectivity, auth, ETag probe (T2 #37).
+
+    Performs non-destructive checks and reports the effective write-anomaly
+    protection level per datatype.
+    """
+    import anyio
+    from inandout.config.loader import load_connector
+    from inandout.writeback.validate import validate_writeback_connector
+
+    connector_path = Path(connector)
+    if not connector_path.exists():
+        err_console.print(f"Connector file not found: {connector_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = load_connector(connector_path)
+    except Exception as exc:
+        err_console.print(f"[red]Schema validation failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    connector_cfg = cfg.connector
+    datatype_names = [datatype] if datatype else None
+
+    async def _run() -> None:
+        return await validate_writeback_connector(connector_cfg, datatype_names=datatype_names)
+
+    try:
+        result = anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"[red]Validation error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    # Print summary table
+    from rich.table import Table
+
+    table = Table(title=f"Writeback Validation — {connector_cfg.name}")
+    table.add_column("Check", style="cyan")
+    table.add_column("Result", style="bold")
+    table.add_column("Details")
+
+    connectivity_style = "[green]OK[/green]" if result.connectivity == "ok" else "[red]FAIL[/red]"
+    auth_style = "[green]OK[/green]" if result.auth == "ok" else "[red]FAIL[/red]"
+    table.add_row("Connectivity", connectivity_style, connector_cfg.connection.base_url)
+    table.add_row("Auth", auth_style, "")
+
+    for dt in result.datatypes:
+        errors_str = "; ".join(dt.errors) if dt.errors else ""
+        warn_str = "; ".join(dt.warnings) if dt.warnings else ""
+        status = "[green]OK[/green]" if not dt.errors else "[red]FAIL[/red]"
+        detail_parts = [
+            f"configured={dt.configured_protection_level}",
+            f"effective={dt.effective_protection_level}",
+            f"etag={dt.etag_support}",
+        ]
+        if errors_str:
+            detail_parts.append(f"errors: {errors_str}")
+        if warn_str:
+            detail_parts.append(f"warnings: {warn_str}")
+        table.add_row(f"  {dt.datatype}", status, " | ".join(detail_parts))
+
+    console.print(table)
+
+    if result.errors:
+        for err in result.errors:
+            err_console.print(f"[red]Error:[/red] {err}")
+
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
 # ---------------------------------------------------------------------------
 # Operator audit trail helper
 # ---------------------------------------------------------------------------

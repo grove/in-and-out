@@ -614,6 +614,18 @@ class WritebackEngine:
                                         await ctrl_conn.commit()
                                 except Exception:
                                     pass
+                                # Also fire in-process bus for same-process ingestion daemons
+                                try:
+                                    from inandout.events import EventType, get_event_bus
+                                    await get_event_bus().publish(
+                                        EventType.REINGEST_SIGNAL,
+                                        connector=connector.name,
+                                        datatype=result.datatype,
+                                        external_id=external_id,
+                                        reason="three_way_conflict",
+                                    )
+                                except Exception:
+                                    pass
                                 result.skipped += 1
                                 result.conflicts += 1
                                 return
@@ -1155,6 +1167,18 @@ class WritebackEngine:
                             ],
                         )
                         await ctrl_conn.commit()
+                except Exception:
+                    pass
+                # Also fire in-process bus for same-process ingestion daemons
+                try:
+                    from inandout.events import EventType, get_event_bus
+                    await get_event_bus().publish(
+                        EventType.REINGEST_SIGNAL,
+                        connector=connector.name,
+                        datatype=result.datatype,
+                        external_id=external_id,
+                        reason="post_write_verify_conflict",
+                    )
                 except Exception:
                     pass
             elif resolution == ConflictResolution.dead_letter:

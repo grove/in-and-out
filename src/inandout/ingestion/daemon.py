@@ -820,6 +820,38 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # A6: Check API version deprecation dates for all loaded connectors
     _check_api_version_deprecations(connector_configs)
 
+    # Subscribe to in-process REINGEST_SIGNAL events from the writeback engine (T2 #39).
+    # When writeback detects a conflict with resolution=re_ingest_and_recompute,
+    # it publishes this event so that a co-located ingestion daemon can react
+    # immediately without waiting for the next DB control-table poll.
+    async def _on_reingest_signal(connector: str, datatype: str, external_id: str, **kwargs: Any) -> None:
+        _log = logger.bind(connector=connector, datatype=datatype, external_id=external_id)
+        _log.info("reingest_signal_received", reason=kwargs.get("reason", "unknown"))
+        connector_cfg_obj = None
+        ingestion_cfg_obj = None
+        dtype_cfg_obj = None
+        for cfg in connector_configs:
+            if cfg.connector.name == connector:
+                connector_cfg_obj = cfg.connector
+                dt = cfg.connector.datatypes.get(datatype)
+                if dt:
+                    dtype_cfg_obj = dt
+                    ingestion_cfg_obj = dt.ingestion
+                break
+        if connector_cfg_obj is None or ingestion_cfg_obj is None:
+            _log.warning("reingest_signal_connector_not_found")
+            return
+        try:
+            await engine.run_sync_single_record(
+                connector_cfg_obj, datatype, ingestion_cfg_obj, external_id, dtype_cfg=dtype_cfg_obj
+            )
+            _log.info("reingest_signal_completed")
+        except Exception as exc:
+            _log.error("reingest_signal_failed", error=str(exc))
+
+    from inandout.events import EventType, get_event_bus
+    get_event_bus().subscribe(EventType.REINGEST_SIGNAL, _on_reingest_signal)
+
     log.info("daemon_started")
 
     async def _run_webhook_server() -> None:

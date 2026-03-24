@@ -139,7 +139,7 @@ async def test_validate_etag_support_true_when_etag_header_present():
         )
 
     assert result["etag_support"] is True
-    assert result["protection_level"] == "full"
+    assert result["protection_level"] == "optimistic"
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_validate_etag_support_false_when_no_etag():
         )
 
     assert result["etag_support"] is False
-    assert result["protection_level"] == "practical"
+    assert result["protection_level"] == "none"
 
 
 @pytest.mark.asyncio
