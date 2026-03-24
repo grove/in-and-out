@@ -119,6 +119,42 @@ class IngestionEngine:
 
             log.info("sync_started", mode=mode, watermark=existing_wm)
 
+            # T1 #44: skip sync if connector is currently marked unavailable
+            # and the cooldown period (default 300 s) has not yet elapsed.
+            try:
+                import datetime as _dt_health
+                async with self._pool.connection() as _hc_check_conn:
+                    _hc_row = await (await _hc_check_conn.execute(
+                        """
+                        SELECT status, marked_unhealthy_at
+                        FROM inout_ops_connector_health
+                        WHERE connector = %s AND datatype = %s
+                        """,
+                        [connector.name, datatype],
+                    )).fetchone()
+                if _hc_row and _hc_row[0] == "unhealthy":
+                    _unhealthy_since = _hc_row[1]
+                    _cooldown_secs: float = float(
+                        getattr(ingestion_cfg, "unavailability_cooldown_secs", 300)
+                    )
+                    if _unhealthy_since is not None:
+                        _now_utc = _dt_health.datetime.now(_dt_health.timezone.utc)
+                        _since = _unhealthy_since
+                        if _since.tzinfo is None:
+                            _since = _since.replace(tzinfo=_dt_health.timezone.utc)
+                        _elapsed = (_now_utc - _since).total_seconds()
+                        if _elapsed < _cooldown_secs:
+                            result.status = "skipped"
+                            log.warning(
+                                "sync_skipped_connector_unavailable",
+                                unhealthy_since=str(_unhealthy_since),
+                                cooldown_secs=_cooldown_secs,
+                                elapsed_secs=round(_elapsed, 1),
+                            )
+                            return result
+            except Exception:
+                pass  # health table not yet created or other transient error
+
             async with self._pool.connection() as conn:
                 try:
                     await conn.execute(
@@ -276,6 +312,64 @@ class IngestionEngine:
                             result.status = "failed"
                             result.error_message = str(exc)
                             log.error("sync_failed", error=str(exc))
+                            # T1 #44: record failure in circuit breaker; if the
+                            # breaker opens, mark this connector/datatype as
+                            # source-unavailable in the health table.
+                            try:
+                                from inandout.transport.circuit_breaker import (
+                                    get_circuit_breaker,
+                                    CircuitState,
+                                )
+                                _cb = get_circuit_breaker(connector.name, datatype)
+                                _cb.record_failure()
+                                if _cb.state == CircuitState.open:
+                                    from inandout.observability.metrics import (
+                                        source_unavailable_total,
+                                    )
+                                    try:
+                                        source_unavailable_total.labels(
+                                            connector=connector.name,
+                                            datatype=datatype,
+                                        ).inc()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        async with self._pool.connection() as _hc_conn:
+                                            await _hc_conn.execute(
+                                                """
+                                                INSERT INTO inout_ops_connector_health
+                                                    (connector, datatype, status,
+                                                     marked_unhealthy_at, reason,
+                                                     updated_at)
+                                                VALUES (%s, %s, 'unhealthy',
+                                                        NOW(), %s, NOW())
+                                                ON CONFLICT (connector, datatype)
+                                                DO UPDATE SET
+                                                    status = 'unhealthy',
+                                                    marked_unhealthy_at = COALESCE(
+                                                        inout_ops_connector_health.marked_unhealthy_at,
+                                                        NOW()
+                                                    ),
+                                                    reason     = EXCLUDED.reason,
+                                                    updated_at = NOW()
+                                                """,
+                                                [
+                                                    connector.name,
+                                                    datatype,
+                                                    str(exc)[:500],
+                                                ],
+                                            )
+                                            await _hc_conn.commit()
+                                        log.error(
+                                            "connector_marked_unavailable",
+                                            connector=connector.name,
+                                            datatype=datatype,
+                                            reason=str(exc)[:200],
+                                        )
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                         finally:
                             _hb_scope.cancel()  # stop heartbeat as soon as sync ends
                 except Exception:
@@ -403,6 +497,31 @@ class IngestionEngine:
 
             if result.status == "running":
                 result.status = "completed"
+
+            # T1 #44: on successful sync, clear any prior source-unavailable mark.
+            if result.status == "completed":
+                try:
+                    async with self._pool.connection() as _hc_ok_conn:
+                        await _hc_ok_conn.execute(
+                            """
+                            UPDATE inout_ops_connector_health
+                            SET status          = 'healthy',
+                                last_healthy_at = NOW(),
+                                updated_at      = NOW()
+                            WHERE connector = %s AND datatype = %s
+                            """,
+                            [connector.name, datatype],
+                        )
+                        await _hc_ok_conn.commit()
+                    # Reset circuit breaker on successful sync
+                    try:
+                        from inandout.transport.circuit_breaker import get_circuit_breaker
+                        get_circuit_breaker(connector.name, datatype).record_success()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
             log.info(
                 "sync_finished",
                 status=result.status,
@@ -631,6 +750,54 @@ class IngestionEngine:
 
                 if not page:
                     continue
+
+                # T1 #9: id_list strategy — fetch detail records for each stub ID.
+                # When fetch_strategy == "id_list" the list endpoint returns only
+                # stub objects (often just IDs).  We expand each stub into a full
+                # detail record by GETting the configured detail_path concurrently
+                # (up to detail_concurrency parallel requests).
+                if list_cfg.fetch_strategy == "id_list":
+                    _detail_tpl = (
+                        list_cfg.detail_path
+                        or f"{list_cfg.path}/${{external_id}}"
+                    )
+                    _id_field = list_cfg.id_field  # default "id"
+                    _sem = anyio.Semaphore(list_cfg.detail_concurrency)
+                    _enriched: list[dict] = []
+
+                    async def _fetch_detail_record(
+                        _stub: dict,
+                        _tpl: str = _detail_tpl,
+                        _idf: str = _id_field,
+                    ) -> None:
+                        _raw_id = _stub.get(_idf)
+                        if _raw_id is None:
+                            return
+                        _str_id = str(_raw_id)
+                        _path = _tpl.replace("${external_id}", _str_id)
+                        async with _sem:
+                            try:
+                                _resp = await transport._raw_request("GET", _path)
+                                if _resp.status_code == 200:
+                                    _enriched.append(_resp.json())
+                                else:
+                                    log.warning(
+                                        "id_list_detail_fetch_failed",
+                                        external_id=_str_id,
+                                        status=_resp.status_code,
+                                    )
+                            except Exception as _det_exc:
+                                log.warning(
+                                    "id_list_detail_fetch_error",
+                                    external_id=_str_id,
+                                    error=str(_det_exc),
+                                )
+
+                    async with anyio.create_task_group() as _detail_tg:
+                        for _stub_record in page:
+                            _detail_tg.start_soon(_fetch_detail_record, _stub_record)
+
+                    page = _enriched
 
                 # Pre-process records: field mapping + hooks + quality checks
                 processed_records: list[tuple[str, dict, str]] = []  # (external_id, record, raw_hash)
