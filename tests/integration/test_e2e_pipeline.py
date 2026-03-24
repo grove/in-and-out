@@ -13,7 +13,7 @@ import os
 import pytest
 import respx
 import httpx
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
 from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
@@ -190,7 +190,7 @@ async def test_ingestion_to_writeback_full_pipeline(pool, run_migrations):
 
 @pytest.mark.anyio
 async def test_health_endpoint_responds(pool):
-    """The Starlette health app returns 200 OK on /health."""
+    """The FastAPI health app returns 200 OK on /health."""
     connector = _make_connector()
     engine = IngestionEngine(pool)
 

@@ -9,12 +9,10 @@ from typing import Any
 import anyio
 import structlog
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
 from prometheus_client import make_asgi_app as prometheus_make_asgi_app
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
 
 from inandout.alerting.dispatcher import AlertDispatcher, AlertEventType
 from inandout.config._duration import parse_duration
@@ -93,14 +91,13 @@ def _build_app(
     connector_configs: list,
     pool: Any = None,
 ) -> Any:
-    from fastapi import FastAPI
     from inandout.api import build_api_router
 
-    routes = [
-        Route("/health", _health),
-        Route("/ready", _ready),
-        Mount("/metrics", prometheus_make_asgi_app(registry=REGISTRY)),
-    ]
+    app = FastAPI(title="in-and-out", docs_url="/api/docs")
+    app.add_api_route("/health", _health)
+    app.add_api_route("/ready", _ready)
+    app.mount("/metrics", prometheus_make_asgi_app(registry=REGISTRY))
+
     for connector_file_cfg in connector_configs:
         connector_cfg = connector_file_cfg.connector
         webhook_cfg = getattr(connector_cfg, "webhook", None)
@@ -112,15 +109,12 @@ def _build_app(
                 return await handle_webhook(request, c_cfg, w_cfg, engine)
             return _webhook_handler
 
-        routes.append(Route(webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"]))
+        app.add_api_route(webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"])
 
-    # Mount FastAPI management API
+    # Include management API router directly on the root app
     api_router = build_api_router(pool=pool)
-    api_app = FastAPI(title="in-and-out management API", docs_url="/api/docs")
-    api_app.include_router(api_router, prefix="/api")
-    routes.append(Mount("/api", app=api_app))
+    app.include_router(api_router, prefix="/api")
 
-    app = Starlette(routes=routes)
     otel_app = OpenTelemetryMiddleware(app)
     return otel_app
 

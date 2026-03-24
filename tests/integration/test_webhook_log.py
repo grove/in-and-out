@@ -8,11 +8,9 @@ import uuid
 
 import httpx
 import pytest
-from starlette.requests import Request
-from starlette.responses import Response
-from starlette.testclient import TestClient
-from starlette.applications import Starlette
-from starlette.routing import Route
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+from fastapi.testclient import TestClient
 
 from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
 from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
@@ -101,8 +99,8 @@ def _make_signed_body(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def _build_webhook_app(pool) -> Starlette:
-    """Build a minimal Starlette app with the webhook route for testing."""
+def _build_webhook_app(pool) -> FastAPI:
+    """Build a minimal FastAPI app with the webhook route for testing."""
     connector = _make_connector()
     webhook_cfg = _make_webhook_cfg()
     engine = IngestionEngine(pool)
@@ -110,9 +108,8 @@ def _build_webhook_app(pool) -> Starlette:
     async def _webhook_handler(request: Request) -> Response:
         return await handle_webhook(request, connector, webhook_cfg, engine)
 
-    app = Starlette(routes=[
-        Route(f"/webhooks/{_CONNECTOR_NAME}", _webhook_handler, methods=["POST"]),
-    ])
+    app = FastAPI()
+    app.add_api_route(f"/webhooks/{_CONNECTOR_NAME}", _webhook_handler, methods=["POST"])
     return app
 
 
