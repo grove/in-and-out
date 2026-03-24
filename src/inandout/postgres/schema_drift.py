@@ -61,6 +61,69 @@ async def detect_schema_drift(
     return orphans
 
 
+async def detect_new_fields(
+    conn: psycopg.AsyncConnection,
+    table_name: str,
+    observed_keys: set[str],
+    _reserved: frozenset[str] = frozenset({"external_id", "data", "raw"}),
+) -> list[str]:
+    """Return field names present in *observed_keys* but absent from the DB table columns.
+
+    System columns (prefixed ``_``) and reserved fixed columns (``external_id``,
+    ``data``, ``raw``) are excluded from the comparison — they are not user-data
+    fields added by the external API.
+
+    Returns a list of new field names (T1 #31 schema drift — new-field direction).
+    """
+    if "." in table_name:
+        schema_part, table_part = table_name.split(".", 1)
+    else:
+        schema_part = "public"
+        table_part = table_name
+
+    cur = await conn.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s
+          AND table_name  = %s
+        """,
+        [schema_part, table_part],
+    )
+    rows = await cur.fetchall()
+    db_columns = {row[0] for row in rows}
+
+    new_fields = [
+        key
+        for key in sorted(observed_keys)
+        if not key.startswith("_")
+        and key not in db_columns
+        and key not in _reserved
+    ]
+    return new_fields
+
+
+async def bump_schema_version(
+    conn: psycopg.AsyncConnection,
+    table_name: str,
+) -> None:
+    """Increment ``_schema_version`` on every row in *table_name* by 1.
+
+    Called when T1 #31 detects new fields (or type changes) in the external
+    API response that weren't present in the previous sync.
+    """
+    from psycopg import sql as pgsql
+
+    stmt = pgsql.SQL(
+        "UPDATE {} SET _schema_version = _schema_version + 1"
+    ).format(
+        pgsql.Identifier(*table_name.split(".")) if "." in table_name
+        else pgsql.Identifier(table_name)
+    )
+    await conn.execute(stmt)
+    logger.info("schema_version_bumped", table=table_name)
+
+
 async def prune_orphan_columns(
     conn: psycopg.AsyncConnection,
     table_name: str,

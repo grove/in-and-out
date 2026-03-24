@@ -265,6 +265,7 @@ class WritebackEngine:
                 rows = await self._fetch_delta_rows(
                     delta_table, log, result, batch_size=writeback_cfg.batch_size,
                     batch_max_bytes=getattr(writeback_cfg, "batch_max_bytes", None),
+                    batch_max_age_secs=getattr(writeback_cfg, "batch_max_age_secs", None),
                 )
                 if rows is None:
                     return result
@@ -497,6 +498,7 @@ class WritebackEngine:
         result: WritebackResult,
         batch_size: int = 50,
         batch_max_bytes: int | None = None,
+        batch_max_age_secs: float | None = None,
     ) -> list[dict] | None:
         """Fetch up to *batch_size* non-noop rows from the delta table. Returns None if table doesn't exist.
 
@@ -504,6 +506,11 @@ class WritebackEngine:
         cumulative uncompressed JSON payload size would exceed the limit, then
         the remainder is dropped from the in-memory batch (remaining rows stay
         in the delta table for the next cycle).
+
+        When *batch_max_age_secs* is set (T2 #33), a warning is emitted if the
+        oldest row's available timestamp column shows the row has been waiting
+        longer than the configured threshold. The daemon loop's sleep-clamping
+        is the primary flush mechanism; this provides observability.
         """
         try:
             async with self._pool.connection() as fetch_conn:
@@ -537,6 +544,32 @@ class WritebackEngine:
                         trimmed.append(row)
                         cumulative_bytes += row_bytes
                     rows = trimmed
+
+                # T2 #33: stale-row detection — warn when oldest row exceeds batch_max_age_secs
+                if batch_max_age_secs is not None and rows:
+                    import datetime as _dt_mod
+                    _ts_candidates = ("_queued_at", "_ingested_at", "_created_at", "_produced_at")
+                    _now = _dt_mod.datetime.now(_dt_mod.timezone.utc)
+                    for _ts_col in _ts_candidates:
+                        _oldest_ts = rows[0].get(_ts_col)
+                        if _oldest_ts is not None:
+                            try:
+                                if not isinstance(_oldest_ts, _dt_mod.datetime):
+                                    _oldest_ts = _dt_mod.datetime.fromisoformat(str(_oldest_ts))
+                                if _oldest_ts.tzinfo is None:
+                                    _oldest_ts = _oldest_ts.replace(tzinfo=_dt_mod.timezone.utc)
+                                age_secs = (_now - _oldest_ts).total_seconds()
+                                if age_secs > batch_max_age_secs:
+                                    logger.warning(
+                                        "writeback_batch_stale_rows",
+                                        delta_table=delta_table,
+                                        oldest_age_secs=round(age_secs, 1),
+                                        batch_max_age_secs=batch_max_age_secs,
+                                        rows_in_batch=len(rows),
+                                    )
+                            except Exception:
+                                pass
+                            break
 
                 return rows
         except psycopg.errors.UndefinedTable:

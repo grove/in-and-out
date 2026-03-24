@@ -25,7 +25,12 @@ from inandout.observability.metrics import (
     records_resurrected_total,
     sync_lag_seconds,
 )
-from inandout.postgres.schema_drift import detect_schema_drift, prune_orphan_columns
+from inandout.postgres.schema_drift import (
+    bump_schema_version,
+    detect_new_fields,
+    detect_schema_drift,
+    prune_orphan_columns,
+)
 from inandout.postgres.schema import (
     dead_letter_table_name,
     ensure_dead_letter_table,
@@ -573,6 +578,7 @@ class IngestionEngine:
         dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
         new_watermark: str | None = None
         seen_ids: set[str] = set()
+        seen_fields: set[str] = set()   # T1 #31: field names observed across all records
         in_run_seen: set[str] = set()  # intra-sync deduplication tracker (per run)
         # Per-batch unique-value tracker for quality rules
         quality_seen: dict[str, set] = {}
@@ -877,6 +883,8 @@ class IngestionEngine:
 
                             in_run_seen.add(external_id)
                             seen_ids.add(external_id)
+                            # T1 #31: track all field keys to detect new API fields
+                            seen_fields.update(k for k in record if not k.startswith("_"))
 
                             if use_bulk:
                                 # Bulk path: accumulate into buffer
@@ -1019,16 +1027,51 @@ class IngestionEngine:
                 ingestion_cfg=ingestion_cfg,
             )
 
-        # Schema drift detection: warn about (and optionally drop) orphan columns.
-        if watermark is None and seen_ids:
+        # Schema drift detection: warn about (and optionally drop) orphan columns,
+        # and detect new fields in the external API response (T1 #31).
+        if watermark is None and seen_fields:
             async with self._pool.connection() as drift_conn:
-                orphans = await detect_schema_drift(drift_conn, table, seen_ids)
+                # Orphan columns: in DB but no longer in the API response
+                orphans = await detect_schema_drift(drift_conn, table, seen_fields)
                 for col in orphans:
                     log.warning("schema_drift_orphan_column", table=table, column=col)
+                    try:
+                        from inandout.observability.metrics import schema_changes_total
+                        schema_changes_total.labels(
+                            connector=connector.name,
+                            datatype=datatype,
+                            change_type="orphan_column",
+                        ).inc()
+                    except Exception:
+                        pass
                 if ingestion_cfg.prune_orphan_columns and orphans:
                     dropped = await prune_orphan_columns(drift_conn, table, orphans)
                     await drift_conn.commit()
                     log.info("orphan_columns_pruned", count=dropped)
+
+                # New fields: present in API response but not yet in the DB schema
+                new_fields = await detect_new_fields(drift_conn, table, seen_fields)
+                if new_fields:
+                    log.warning(
+                        "schema_drift_new_fields",
+                        table=table,
+                        new_fields=new_fields,
+                    )
+                    try:
+                        from inandout.observability.metrics import schema_changes_total
+                        schema_changes_total.labels(
+                            connector=connector.name,
+                            datatype=datatype,
+                            change_type="new_fields",
+                        ).inc()
+                    except Exception:
+                        pass
+                    # T1 #31: bump _schema_version on all rows to signal consumers
+                    try:
+                        await bump_schema_version(drift_conn, table)
+                        await drift_conn.commit()
+                    except Exception as _bsv_exc:
+                        log.warning("schema_version_bump_failed", error=str(_bsv_exc))
 
         result.status = "completed"
 

@@ -128,6 +128,13 @@ federation_routed_total: Counter = _counter(
     ["connector", "datatype", "destination"],
 )
 
+# Schema change events counter (T1 #31)
+schema_changes_total: Counter = _counter(
+    "inout_schema_changes_total",
+    "Total schema change events detected (new fields, removed fields) per connector/datatype",
+    ["connector", "datatype", "change_type"],
+)
+
 
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""
