@@ -139,6 +139,48 @@ def _apply_writeback_transforms(
     return payload
 
 
+def _check_batch_response(
+    resp_content: bytes | None,
+    external_id: str | None,
+    writeback_cfg: Any,
+    result: "WritebackResult",
+    action: str,
+) -> bool:
+    """T2 #29: parse a batch HTTP response and check whether *external_id* succeeded.
+
+    Returns True when the record succeeded (or when batch_response is not configured).
+    Returns False and updates *result* when the record is reported as failed.
+    """
+    batch_cfg = getattr(writeback_cfg, "batch_response", None)
+    if batch_cfg is None or external_id is None:
+        return True
+    try:
+        from inandout.writeback.batch_response import extract_batch_errors, parse_batch_response
+        body: dict[str, Any] = {}
+        try:
+            body = orjson.loads(resp_content) if resp_content else {}
+        except Exception:
+            return True  # Can't parse; assume success
+        outcomes = parse_batch_response(body, batch_cfg)
+        if external_id in outcomes and not outcomes[external_id]:
+            errors = extract_batch_errors(body, batch_cfg)
+            err_msg = errors.get(external_id, "batch_record_failed")
+            logger.warning(
+                "writeback_batch_record_failed",
+                external_id=external_id,
+                action=action,
+                error=err_msg,
+            )
+            result.failed += 1
+            result.processed = max(0, result.processed - 1)
+            result._failed_external_ids.add(external_id)
+            result._failed_entries.append((external_id, action, f"batch_response:{err_msg}"))
+            return False
+    except Exception:
+        pass  # Parse failure must not block writeback
+    return True
+
+
 @dataclass
 class WritebackResult:
     connector: str
@@ -698,6 +740,8 @@ class WritebackEngine:
 
                 _http_write_ok = True
                 result.processed += 1
+                # T2 #29: parse batch response to detect per-record failure
+                _check_batch_response(insert_resp.content, external_id, writeback_cfg, result, action)
 
             elif action == "update":
                 if ops.update is None:
@@ -723,6 +767,8 @@ class WritebackEngine:
                         )
                         return
                 path = interpolate_path(ops.update.path)
+                # T2 #29: initialise response content holder (set when _upd_resp is captured)
+                _upd_resp_content: bytes | None = None
 
                 # T2 #5: sentinel for remote data fetched during preflight
                 # (set inside the three-way block, then reused for diff_fields)
@@ -757,6 +803,11 @@ class WritebackEngine:
 
                         # Get base from row dict
                         base_3way: dict[str, Any] = row.get("_base") or row.get("base") or {}
+
+                        # T2 #12: normalize GET response field names to write-path names
+                        _resp_map = getattr(writeback_cfg, "response_field_map", None) or {}
+                        if _resp_map:
+                            current_state = {_resp_map.get(k, k): v for k, v in current_state.items()}
 
                         # Field-scoped three-way comparison
                         payload_fields = set(payload.keys())
@@ -1102,6 +1153,7 @@ class WritebackEngine:
                     if extra_headers:
                         _upd_resp = await transport._raw_request(ops.update.method.upper(), path, json=payload, headers=extra_headers)
                         _upd_resp.raise_for_status()
+                        _upd_resp_content = getattr(_upd_resp, "content", None)
                     else:
                         await transport._request(ops.update.method.upper(), path, json=payload)
                     sent_payload = payload
@@ -1164,6 +1216,8 @@ class WritebackEngine:
 
                 _http_write_ok = True
                 result.processed += 1
+                # T2 #29: parse batch response to detect per-record failure in update
+                _check_batch_response(_upd_resp_content, external_id, writeback_cfg, result, action)
 
             elif action == "delete":
                 if ops.delete is None:
@@ -1370,6 +1424,11 @@ class WritebackEngine:
                 remote = orjson.loads(verify_resp.content) if verify_resp.content else {}
             except Exception:
                 return
+
+            # T2 #12: normalize GET response field names to write-path names before comparison
+            _resp_map_v = getattr(writeback_cfg, "response_field_map", None) or {}
+            if _resp_map_v:
+                remote = {_resp_map_v.get(k, k): v for k, v in remote.items()}
 
             # Compare only the fields we sent
             mismatch_fields: list[str] = [

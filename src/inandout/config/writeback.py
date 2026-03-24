@@ -119,6 +119,9 @@ class WritebackConfig(BaseModel):
     required_fields: list[str] = []
     # T2 #24: dead-letter queue — move permanently failed rows after this many failures
     max_retry_count: int = Field(default=3, ge=0)  # 0 = never auto-dead-letter
+    # T2 #12: rename map for GET response fields → write payload field names before conflict compare
+    # e.g. {"accountId": "account_id"} when GET returns camelCase but PATCH expects snake_case
+    response_field_map: dict[str, str] | None = None
     # T2 #16: inject MDM cluster_id into outgoing payload under this field name
     external_reference_field: str | None = None
     # T2 #17: field mappings for pre-write data transformation (rename, cast, default)

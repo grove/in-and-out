@@ -1080,7 +1080,7 @@ class IngestionEngine:
                         # 2. Timestamp normalisation (if configured)
                         if dtype_cfg is not None and getattr(dtype_cfg, "timestamp_fields", None):
                             try:
-                                from inandout.ingestion.timestamp import apply_timestamp_normalization
+                                from inandout.ingestion.timestamp_normalizer import apply_timestamp_normalization
                                 record = apply_timestamp_normalization(record, dtype_cfg.timestamp_fields)
                             except Exception:
                                 pass
