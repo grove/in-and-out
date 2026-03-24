@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from inandout.config.field_mapping import FieldMapping
+
 
 class ProtectionLevel(IntEnum):
     none = 0
@@ -117,6 +119,15 @@ class WritebackConfig(BaseModel):
     required_fields: list[str] = []
     # T2 #24: dead-letter queue — move permanently failed rows after this many failures
     max_retry_count: int = Field(default=3, ge=0)  # 0 = never auto-dead-letter
+    # T2 #16: inject MDM cluster_id into outgoing payload under this field name
+    external_reference_field: str | None = None
+    # T2 #17: field mappings for pre-write data transformation (rename, cast, default)
+    field_mappings: list[FieldMapping] = []
+    # if True, only mapped fields appear in the outbound payload (drop un-mapped fields)
+    field_mappings_strict: bool = False
+    # T2 #23: JSON Schema (dict) to validate the outbound payload before HTTP dispatch.
+    # Supports: required (list), properties ({field: {type}}), additionalProperties (bool)
+    payload_schema: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_crdt_ts_field_requires_lww(self) -> "WritebackConfig":

@@ -60,6 +60,85 @@ def _compute_field_diff(
     return {"added": added, "removed": removed, "changed": changed}
 
 
+_JSON_SCHEMA_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+    "null": type(None),
+}
+
+
+def _validate_payload_schema(
+    payload: dict[str, Any],
+    schema: dict[str, Any],
+) -> list[str]:
+    """T2 #23: validate *payload* against a JSON-Schema-subset *schema*.
+
+    Supported keywords: ``required``, ``properties`` (with ``type``),
+    ``additionalProperties`` (bool).  Returns a list of error strings (empty
+    means valid).
+    """
+    errors: list[str] = []
+    required: list[str] = schema.get("required") or []
+    properties: dict[str, Any] = schema.get("properties") or {}
+    additional_props: bool | None = schema.get("additionalProperties")
+
+    for field in required:
+        if field not in payload:
+            errors.append(f"required field '{field}' is missing")
+
+    for field, field_schema in properties.items():
+        if field not in payload:
+            continue
+        expected_type = field_schema.get("type")
+        if expected_type:
+            py_type = _JSON_SCHEMA_TYPE_MAP.get(expected_type)
+            if py_type is not None and not isinstance(payload[field], py_type):
+                actual = type(payload[field]).__name__
+                errors.append(
+                    f"field '{field}' expected type '{expected_type}', got '{actual}'"
+                )
+
+    if additional_props is False:
+        allowed = set(properties.keys())
+        for field in payload:
+            if field not in allowed:
+                errors.append(f"field '{field}' is not allowed by payload_schema")
+
+    return errors
+
+
+def _apply_writeback_transforms(
+    payload: dict[str, Any],
+    row: dict[str, Any],
+    writeback_cfg: Any,
+) -> dict[str, Any]:
+    """T2 #16/#17: apply pre-write transforms to *payload*.
+
+    Steps (in order):
+    1. Inject MDM ``cluster_id`` under ``external_reference_field`` (T2 #16).
+    2. Apply declarative ``field_mappings`` — rename, cast, default (T2 #17).
+    """
+    # T2 #16: populate external reference field with MDM cluster_id
+    ext_ref = getattr(writeback_cfg, "external_reference_field", None)
+    if ext_ref:
+        cluster_id = row.get("_cluster_id") or row.get("cluster_id")
+        if cluster_id:
+            payload = {**payload, ext_ref: cluster_id}
+
+    # T2 #17: field mappings (rename / cast / default)
+    mappings = getattr(writeback_cfg, "field_mappings", [])
+    if mappings:
+        from inandout.ingestion.field_mapper import apply_field_mappings
+        strict = getattr(writeback_cfg, "field_mappings_strict", False)
+        payload = apply_field_mappings(payload, mappings, strict=strict)
+
+    return payload
+
+
 @dataclass
 class WritebackResult:
     connector: str
@@ -538,6 +617,24 @@ class WritebackEngine:
                     result.skipped += 1
                     return
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
+                payload = _apply_writeback_transforms(payload, row, writeback_cfg)
+                # T2 #23: pre-write payload validation
+                _pw_schema = getattr(writeback_cfg, "payload_schema", None)
+                if _pw_schema:
+                    _pw_errors = _validate_payload_schema(payload, _pw_schema)
+                    if _pw_errors:
+                        logger.warning(
+                            "writeback_payload_validation_failed",
+                            external_id=external_id,
+                            action=action,
+                            errors=_pw_errors,
+                        )
+                        result.failed += 1
+                        result._failed_external_ids.add(external_id)
+                        result._failed_entries.append(
+                            (external_id, action, f"payload_validation:{_pw_errors[0]}")
+                        )
+                        return
                 path = interpolate_path(ops.insert.path)
                 extra_headers = _make_extra_headers(payload)
 
@@ -607,6 +704,24 @@ class WritebackEngine:
                     result.skipped += 1
                     return
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
+                payload = _apply_writeback_transforms(payload, row, writeback_cfg)
+                # T2 #23: pre-write payload validation
+                _pw_schema_upd = getattr(writeback_cfg, "payload_schema", None)
+                if _pw_schema_upd:
+                    _pw_errors_upd = _validate_payload_schema(payload, _pw_schema_upd)
+                    if _pw_errors_upd:
+                        logger.warning(
+                            "writeback_payload_validation_failed",
+                            external_id=external_id,
+                            action=action,
+                            errors=_pw_errors_upd,
+                        )
+                        result.failed += 1
+                        result._failed_external_ids.add(external_id)
+                        result._failed_entries.append(
+                            (external_id, action, f"payload_validation:{_pw_errors_upd[0]}")
+                        )
+                        return
                 path = interpolate_path(ops.update.path)
 
                 # T2 #5: sentinel for remote data fetched during preflight
