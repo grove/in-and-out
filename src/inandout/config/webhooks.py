@@ -70,3 +70,5 @@ class WebhookConfig(BaseModel):
     registration: WebhookRegistrationConfig | None = None  # A1: lifecycle management
     event_id_field: str | None = None              # A5: dedup — field holding event ID
     dedup_ttl: str = "24h"                         # A5: how long to remember seen event IDs
+    ip_allowlist: list[str] = []           # T1 #42: per-connector IP allowlist (CIDR); restricts beyond server-wide list
+    rate_limit_per_minute: int | None = None  # T1 #42: per-connector rate limit (None = inherit server-wide)

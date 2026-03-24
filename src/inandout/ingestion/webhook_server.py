@@ -27,26 +27,40 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _parse_networks(allowlist: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse a list of CIDR strings into network objects, discarding invalid entries."""
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for entry in allowlist:
+        try:
+            nets.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("ip_allowlist_invalid_entry", entry=entry)
+    return nets
+
+
+def _is_ip_allowed(
+    client_ip: str,
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> bool:
+    """Return True when client_ip is covered by at least one network (or networks is empty)."""
+    if not networks:
+        return True
+    try:
+        addr = ipaddress.ip_address(client_ip)
+        return any(addr in net for net in networks)
+    except ValueError:
+        return False
+
+
 class IpAllowlistMiddleware(BaseHTTPMiddleware):
     """Reject requests from IPs not in the allowlist. Supports CIDR notation."""
 
     def __init__(self, app: Any, allowlist: list[str]) -> None:
         super().__init__(app)
-        self._networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-        for entry in allowlist:
-            try:
-                self._networks.append(ipaddress.ip_network(entry, strict=False))
-            except ValueError:
-                logger.warning("ip_allowlist_invalid_entry", entry=entry)
+        self._networks = _parse_networks(allowlist)
 
     def _is_allowed(self, client_ip: str) -> bool:
-        if not self._networks:
-            return True  # Empty allowlist = allow all
-        try:
-            addr = ipaddress.ip_address(client_ip)
-            return any(addr in net for net in self._networks)
-        except ValueError:
-            return False
+        return _is_ip_allowed(client_ip, self._networks)
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
         client_ip = (
@@ -129,7 +143,44 @@ def build_webhook_app(
             continue
 
         def _make_handler(c_cfg: Any, w_cfg: Any) -> Any:
+            # T1 #42: per-connector IP allowlist + rate limit (applied before server-wide middleware)
+            _conn_networks = _parse_networks(getattr(w_cfg, "ip_allowlist", None) or [])
+            _conn_rate_limit: int | None = getattr(w_cfg, "rate_limit_per_minute", None)
+            _conn_rate_windows: dict[str, list[float]] = defaultdict(list)
+
             async def _webhook_handler(request: Request) -> Any:
+                client_ip = (
+                    request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                    or (request.client.host if request.client else "")
+                )
+                # Per-connector IP allowlist check
+                if _conn_networks and not _is_ip_allowed(client_ip, _conn_networks):
+                    logger.warning(
+                        "connector_ip_allowlist_blocked",
+                        connector=c_cfg.name, client_ip=client_ip,
+                    )
+                    return JSONResponse(
+                        {"error": "forbidden", "reason": "IP not in allowlist"},
+                        status_code=403,
+                    )
+                # Per-connector rate limit check
+                if _conn_rate_limit is not None and _conn_rate_limit > 0:
+                    now = time.monotonic()
+                    window_start = now - 60.0
+                    timestamps = _conn_rate_windows[client_ip]
+                    timestamps[:] = [t for t in timestamps if t > window_start]
+                    if len(timestamps) >= _conn_rate_limit:
+                        retry_after = max(1, int(60 - (now - timestamps[0])) + 1)
+                        logger.warning(
+                            "connector_rate_limit_exceeded",
+                            connector=c_cfg.name, client_ip=client_ip,
+                        )
+                        return JSONResponse(
+                            {"error": "rate limit exceeded"},
+                            status_code=429,
+                            headers={"Retry-After": str(retry_after)},
+                        )
+                    timestamps.append(now)
                 return await handle_webhook(request, c_cfg, w_cfg, engine)
             return _webhook_handler
 

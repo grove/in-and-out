@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/webhooks.py
+# hypothesis_version: 6.151.9
+
+['24h', '7d', 'allow', 'callback_url', 'forbid', 'hmac-sha1', 'hmac-sha256', 'id', 'log_and_discard', 'reject_400', 'rsa-sha256']

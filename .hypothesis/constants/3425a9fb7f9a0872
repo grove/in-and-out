@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/connector.py
+# hypothesis_version: 6.151.9
+
+[3600.0, 1000, '1.0.0', 'ConnectorConfig', 'ConnectorFileConfig', 'DatatypeConfig', '\\$\\{([^}]+)\\}', '^[A-Z][A-Z0-9_]*$', '^[a-z][a-z0-9_-]*$', 'after', 'auth.', 'auto', 'before', 'child.id', 'cluster_id', 'connection.base_url', 'credential.', 'data.', 'entity', 'external_id', 'forbid', 'full_duplex', 'iso8601', 'job.id', 'pre_flight.', 'pre_flight.etag', 'pre_flight.version', 'python', 'record.', 'relationship', 'rfc2822', 'runtime.', 'schema_version', 'subscription.', 'unix_millis', 'unix_seconds', 'watermark', 'writeback_patch']

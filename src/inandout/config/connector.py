@@ -182,6 +182,7 @@ class LinkedObject(BaseModel):
     datatype: str        # target datatype to ingest children into
     detail_path: str     # path for child GET, ${id} interpolated
     concurrency: int = 3
+    primary_key: str = "id"  # field in child response used as external_id
 
 
 class TimestampFieldConfig(BaseModel):

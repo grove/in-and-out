@@ -994,6 +994,12 @@ class IngestionEngine:
                         # Track committed count for checkpointing
                         records_committed_so_far += result.records_inserted + result.records_updated
 
+                # T1 #16: linked/nested object resolution — fan out child GETs per page
+                if dtype_cfg and dtype_cfg.linked_objects and page:
+                    await self._resolve_linked_objects(
+                        transport, connector, ns, dtype_cfg.linked_objects, page, result, log
+                    )
+
                 # Save checkpoint every N pages (outside the per-page conn transaction)
                 if checkpoint_n > 0 and page_number % checkpoint_n == 0:
                     try:
@@ -1094,6 +1100,116 @@ class IngestionEngine:
                         log.warning("schema_version_bump_failed", error=str(_bsv_exc))
 
         result.status = "completed"
+
+    async def _resolve_linked_objects(
+        self,
+        transport: Any,
+        connector: Any,
+        namespace: str,
+        linked_objects: list[Any],
+        parent_records: list[dict],
+        result: Any,
+        log: Any,
+    ) -> None:
+        """T1 #16: Fan out child-ID lookups for each LinkedObject and upsert into child tables.
+
+        For each ``LinkedObject`` declared on a datatype, reads the child-ID list
+        from each parent record, fires concurrent GET requests to ``detail_path``
+        (up to ``concurrency`` in parallel), and upserts the responses into the
+        child datatype's source table.
+        """
+        from inandout.postgres.schema import source_table_name, ensure_source_table
+
+        for linked_obj in linked_objects:
+            child_table = source_table_name(connector.name, linked_obj.datatype, namespace)
+
+            # Ensure the child table exists (idempotent)
+            try:
+                async with self._pool.connection() as setup_conn:
+                    await ensure_source_table(setup_conn, connector.name, linked_obj.datatype, namespace)
+                    await setup_conn.commit()
+            except Exception as exc:
+                log.warning(
+                    "linked_object_table_setup_failed",
+                    linked_datatype=linked_obj.datatype,
+                    error=str(exc),
+                )
+                continue
+
+            # Collect unique child IDs from the page's parent records
+            unique_ids: list[str] = []
+            seen_child_ids: set[str] = set()
+            for parent in parent_records:
+                raw_ids = parent.get(linked_obj.field)
+                if raw_ids is None:
+                    continue
+                candidates = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+                for cid in candidates:
+                    s = str(cid) if cid is not None else ""
+                    if s and s not in seen_child_ids:
+                        seen_child_ids.add(s)
+                        unique_ids.append(s)
+
+            if not unique_ids:
+                continue
+
+            sem = anyio.Semaphore(linked_obj.concurrency)
+            fetched_children: list[dict] = []
+
+            async def _fetch_child(child_id: str) -> None:
+                path = linked_obj.detail_path.replace("${id}", child_id)
+                async with sem:
+                    try:
+                        resp = await transport._raw_request("GET", path)
+                        if resp.status_code == 200:
+                            fetched_children.append(resp.json())
+                        else:
+                            log.warning(
+                                "linked_object_fetch_failed",
+                                child_id=child_id,
+                                status=resp.status_code,
+                                linked_datatype=linked_obj.datatype,
+                            )
+                    except Exception as exc:
+                        log.warning(
+                            "linked_object_fetch_error",
+                            child_id=child_id,
+                            error=str(exc),
+                            linked_datatype=linked_obj.datatype,
+                        )
+
+            async with anyio.create_task_group() as tg:
+                for cid in unique_ids:
+                    tg.start_soon(_fetch_child, cid)
+
+            if not fetched_children:
+                continue
+
+            # Upsert child records into child table
+            primary_key = getattr(linked_obj, "primary_key", "id")
+            try:
+                async with self._pool.connection() as child_conn:
+                    async with child_conn.transaction():
+                        for child in fetched_children:
+                            child_ext_id = str(child.get(primary_key) or child.get("id") or "")
+                            if not child_ext_id:
+                                continue
+                            child_hash = _compute_raw_hash(child)
+                            await _upsert_record(
+                                child_conn, child_table, child_ext_id, child,
+                                child_hash, result.run_id,
+                            )
+                log.debug(
+                    "linked_objects_resolved",
+                    linked_datatype=linked_obj.datatype,
+                    child_count=len(fetched_children),
+                )
+            except Exception as exc:
+                log.warning(
+                    "linked_object_upsert_failed",
+                    linked_datatype=linked_obj.datatype,
+                    error=str(exc),
+                )
 
     async def _run_cdc_sync(
         self,

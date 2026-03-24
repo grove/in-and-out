@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/webhook_server.py
+# hypothesis_version: 6.151.9
+
+[60.0, 300, 403, 404, 429, ',', '/', 'IP not in allowlist', 'POST', 'Retry-After', 'error', 'forbidden', 'ip_allowlist', 'ip_allowlist_blocked', 'rate limit exceeded', 'rate_limit_exceeded', 'reason', 'status', 'unknown', 'webhook', 'x-forwarded-for']

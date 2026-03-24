@@ -1330,6 +1330,16 @@ class WritebackEngine:
                 if ops.archive is None:
                     result.skipped += 1
                     return
+                # T2 #20: guard — skip archive if source record has been deleted/superseded
+                if await self._is_source_record_deleted(connector, result.datatype, external_id):
+                    logger.info(
+                        "archive_skipped_superseded",
+                        connector=connector.name,
+                        datatype=result.datatype,
+                        external_id=external_id,
+                    )
+                    result.skipped += 1
+                    return
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.archive.path)
                 extra_headers = _make_extra_headers(payload)
@@ -1609,6 +1619,30 @@ class WritebackEngine:
             else:
                 status = "skipped"
             await update_desired_state_status(self._pool, connector, datatype, ext_id, status)
+
+    async def _is_source_record_deleted(
+        self,
+        connector: ConnectorConfig,
+        datatype: str,
+        external_id: str,
+    ) -> bool:
+        """T2 #20: Return True when the source-table record is already deleted/superseded.
+
+        A deleted (or merge-tombstoned) record has ``_deleted = TRUE``.  Archiving
+        such a record in the target system is a no-op at best and corrupt at worst,
+        so callers should skip the write.
+        """
+        try:
+            from inandout.postgres.schema import source_table_name
+            src_table = source_table_name(connector.name, datatype)
+            async with self._pool.connection() as conn:
+                row = await (await conn.execute(
+                    f"SELECT _deleted FROM {src_table} WHERE external_id = %s",
+                    [external_id],
+                )).fetchone()
+            return bool(row and row[0])
+        except Exception:
+            return False  # On error, allow the operation
 
     async def _record_identity_map(
         self,
