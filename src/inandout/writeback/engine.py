@@ -198,6 +198,12 @@ class WritebackEngine:
                             grouped[ext_id] = []
                         grouped[ext_id].append(row_data)
 
+                    # T2 #21: group-abort tracking — shared across all concurrent
+                    # _dispatch_group coroutines.  When any member of a _group_id
+                    # group fails, remaining members in the same group are
+                    # immediately moved to dead-letter and counted as failed.
+                    _aborted_groups: dict[str, str] = {}  # group_id → abort reason
+
                     async def _dispatch_group(
                         group_rows: list[dict[str, Any]],
                     ) -> None:
@@ -205,10 +211,58 @@ class WritebackEngine:
                             for row_data in group_rows:
                                 action = row_data.get("_action", "")
                                 external_id = row_data.get("external_id") or row_data.get("_cluster_id", "")
+                                gid = row_data.get("_group_id")
+
+                                # T2 #21: abort this member if its group has already failed
+                                if gid and gid in _aborted_groups:
+                                    abort_reason = _aborted_groups[gid]
+                                    log.warning(
+                                        "writeback_group_member_aborted",
+                                        external_id=external_id,
+                                        group_id=gid,
+                                        reason=abort_reason,
+                                    )
+                                    result.failed += 1
+                                    result._failed_entries.append((
+                                        external_id, action,
+                                        f"group_partial_failure:{gid}:{abort_reason}",
+                                    ))
+                                    try:
+                                        from inandout.deadletter.writeback import move_to_dead_letter
+                                        await move_to_dead_letter(
+                                            self._pool,
+                                            connector.name,
+                                            result.datatype,
+                                            external_id=external_id,
+                                            action="group_partial_failure",
+                                            payload_snapshot={
+                                                k: v for k, v in row_data.items()
+                                                if not k.startswith("_")
+                                            },
+                                            error_message=(
+                                                f"Group {gid} aborted: "
+                                                f"member failed ({abort_reason})"
+                                            ),
+                                            delta_table=result.delta_table,
+                                        )
+                                    except Exception:
+                                        pass
+                                    continue
+
+                                _failed_before = result.failed
                                 await self._dispatch_row(
                                     transport, connector, writeback_cfg,
                                     action, external_id, row_data, log, result
                                 )
+                                # T2 #21: mark group aborted when a member fails
+                                if (
+                                    gid
+                                    and result.failed > _failed_before
+                                    and gid not in _aborted_groups
+                                ):
+                                    _aborted_groups[gid] = (
+                                        f"member {external_id} action={action} failed"
+                                    )
 
                     async with anyio.create_task_group() as tg:
                         for group_rows in grouped.values():
@@ -555,6 +609,10 @@ class WritebackEngine:
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
                 path = interpolate_path(ops.update.path)
 
+                # T2 #5: sentinel for remote data fetched during preflight
+                # (set inside the three-way block, then reused for diff_fields)
+                _preflight_remote_data: dict[str, Any] | None = None
+
                 # Three-way conflict detection (field-scoped)
                 # Only runs when use_desired_state_table=True AND lookup is configured
                 if (
@@ -571,6 +629,8 @@ class WritebackEngine:
                         try:
                             if preflight_resp.is_success:
                                 current_state = orjson.loads(preflight_resp.content) if preflight_resp.content else {}
+                                # T2 #5: capture remote data so diff_fields can reuse this GET
+                                _preflight_remote_data = current_state if current_state else None
                         except Exception:
                             pass
 
@@ -728,23 +788,36 @@ class WritebackEngine:
 
                 # Incremental writeback: only send changed fields
                 if writeback_cfg.diff_fields and external_id:
-                    try:
-                        from inandout.postgres.schema import source_table_name
-                        src_table = source_table_name(connector.name, result.datatype)
-                        async with self._pool.connection() as diff_conn:
-                            lw_row = await (await diff_conn.execute(
-                                f"SELECT _last_written FROM {src_table} WHERE external_id = %s",
-                                [external_id],
-                            )).fetchone()
-                        if lw_row and lw_row[0]:
-                            last_written = lw_row[0] if isinstance(lw_row[0], dict) else {}
-                            payload = {k: v for k, v in payload.items() if last_written.get(k) != v}
+                    if _preflight_remote_data is not None:
+                        # T2 #5: single GET serves both conflict detection and diff
+                        # computation — no extra DB query needed.
+                        payload = {k: v for k, v in payload.items() if _preflight_remote_data.get(k) != v}
                         if not payload:
                             result.skipped += 1
                             return
-                    except Exception:
-                        pass  # Fall through to full payload if diff fails
-
+                        logger.debug(
+                            "writeback_diff_via_preflight_get",
+                            external_id=external_id,
+                            fields_changed=len(payload),
+                        )
+                    else:
+                        # Fall back: query DB for _last_written to compute diff
+                        try:
+                            from inandout.postgres.schema import source_table_name
+                            src_table = source_table_name(connector.name, result.datatype)
+                            async with self._pool.connection() as diff_conn:
+                                lw_row = await (await diff_conn.execute(
+                                    f"SELECT _last_written FROM {src_table} WHERE external_id = %s",
+                                    [external_id],
+                                )).fetchone()
+                            if lw_row and lw_row[0]:
+                                last_written = lw_row[0] if isinstance(lw_row[0], dict) else {}
+                                payload = {k: v for k, v in payload.items() if last_written.get(k) != v}
+                                if not payload:
+                                    result.skipped += 1
+                                    return
+                        except Exception:
+                            pass  # Fall through to full payload if diff fails
                 sent_payload: dict[str, Any] | None = None
                 sent_diff: dict[str, Any] | None = None
 
