@@ -243,6 +243,7 @@ class ConnectorConfig(BaseModel):
     description: str | None = None
     api_version: str = Field(min_length=1)
     version: str = "1.0.0"
+    api_version_header: str | None = None            # A6: HTTP header name for injecting api_version, e.g. "Salesforce-Version"
     api_deprecation_deadline: str | None = None
     api_version_deprecation_date: str | None = None  # A6: ISO date string e.g. "2026-12-01"
     api_version_warning_days: int = 60               # A6: warn when within this many days

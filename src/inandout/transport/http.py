@@ -58,12 +58,16 @@ class HttpTransportAdapter:
         self,
         connector: ConnectorConfig,
         max_retries: int = 5,
+        api_version: str | None = None,
     ) -> None:
         self._connector = connector
         self._auth = build_auth_provider(connector.auth)
         self._limiter: AsyncLimiter | None = None
         self._token_bucket: TokenBucket | None = None
         self._max_retries = max_retries
+        # T1 #39: effective API version for this adapter instance; when set together with
+        # connector.api_version_header, it is injected as a header on every request.
+        self._api_version = api_version
         rate_limit = connector.rate_limit
         if rate_limit and rate_limit.requests_per_second:
             self._limiter = AsyncLimiter(
@@ -123,6 +127,17 @@ class HttpTransportAdapter:
             )
 
         resp: httpx.Response
+        # T1 #39: inject api_version header when configured
+        _version_header = getattr(self._connector, "api_version_header", None)
+        if _version_header and self._api_version:
+            existing_headers = kwargs.get("headers") or {}
+            if isinstance(existing_headers, dict):
+                existing_headers = dict(existing_headers)
+            else:
+                existing_headers = dict(existing_headers)
+            existing_headers.setdefault(_version_header, self._api_version)
+            kwargs = {**kwargs, "headers": existing_headers}
+
         for attempt in range(self._max_retries + 1):
             # Token-bucket rate limiting (our own implementation)
             if self._token_bucket is not None:

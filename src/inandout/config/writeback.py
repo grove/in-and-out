@@ -119,6 +119,8 @@ class WritebackConfig(BaseModel):
     required_fields: list[str] = []
     # T2 #24: dead-letter queue — move permanently failed rows after this many failures
     max_retry_count: int = Field(default=3, ge=0)  # 0 = never auto-dead-letter
+    # T2 #39: conflict-driven re-ingestion feedback loop cap — prevent infinite resync cycles
+    max_feedback_iterations: int = Field(default=3, ge=1)  # max re-ingest signals per record per hour
     # T2 #12: rename map for GET response fields → write payload field names before conflict compare
     # e.g. {"accountId": "account_id"} when GET returns camelCase but PATCH expects snake_case
     response_field_map: dict[str, str] | None = None

@@ -698,14 +698,14 @@ class IngestionEngine:
                 pass  # Checkpoint load failure → start from scratch
 
         # A6: build connector/datatype-level HTTP headers with effective api_version
-        # (used by HttpTransportAdapter when it honours the api_version header)
-        _api_version_used = effective_api_version  # noqa: F841 — reserved for future transport use
+        # (injected as connector.api_version_header on each request when configured)
+        _api_version_used = effective_api_version
 
         # A2: snapshot_param injection for full syncs
         snapshot_param = getattr(list_cfg, "snapshot_param", None)
         snapshot_value = str(result.run_id) if snapshot_param else None
 
-        async with HttpTransportAdapter(connector) as transport:
+        async with HttpTransportAdapter(connector, api_version=_api_version_used) as transport:
             # A5: bulk export path — full syncs only, when bulk_export is configured
             _use_bulk_export = (
                 watermark is None

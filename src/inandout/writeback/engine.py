@@ -209,6 +209,10 @@ class WritebackResult:
 class WritebackEngine:
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
+        # T2 #39: track resync signal counts per (connector, datatype, external_id) to cap
+        # the feedback loop at max_feedback_iterations.  The window resets every hour.
+        # Structure: {(connector, datatype, external_id): (count, window_start_epoch)}
+        self._reingest_counters: dict[tuple[str, str, str], tuple[int, float]] = {}
 
     async def run_writeback_cycle(
         self,
@@ -577,6 +581,49 @@ class WritebackEngine:
             result.skipped = 1
             return None
 
+    def _check_reingest_allowed(
+        self,
+        connector: str,
+        datatype: str,
+        external_id: str,
+        max_iterations: int,
+    ) -> bool:
+        """Return True if a re-ingest signal is allowed under the iteration cap (T2 #39).
+
+        Counts signals emitted per (connector, datatype, external_id) within a 1-hour
+        rolling window.  When the count reaches *max_iterations* the signal is suppressed
+        and a warning is logged.  The window resets automatically after 3600 seconds.
+        """
+        import time as _time_mod
+
+        # Lazily initialise the counter dict — handles pre-existing engine instances
+        # that were constructed via __new__ without __init__ (common in unit tests).
+        if not hasattr(self, "_reingest_counters"):
+            self._reingest_counters = {}
+
+        key = (connector, datatype, external_id)
+        now = _time_mod.monotonic()
+        count, window_start = self._reingest_counters.get(key, (0, now))
+
+        # Reset window if it has been open for more than an hour
+        if now - window_start >= 3600.0:
+            count = 0
+            window_start = now
+
+        if count >= max_iterations:
+            logger.warning(
+                "writeback_reingest_cap_reached",
+                connector=connector,
+                datatype=datatype,
+                external_id=external_id,
+                count=count,
+                max_feedback_iterations=max_iterations,
+            )
+            return False
+
+        self._reingest_counters[key] = (count + 1, window_start)
+        return True
+
     async def _get_last_written(
         self,
         connector: ConnectorConfig,
@@ -910,35 +957,39 @@ class WritebackEngine:
                                     "writeback_conflict_re_ingest",
                                     action=action, external_id=external_id,
                                 )
-                                try:
-                                    async with self._pool.connection() as ctrl_conn:
-                                        await ctrl_conn.execute(
-                                            """
-                                            INSERT INTO inout_ops_control
-                                                (connector, datatype, command, payload, status)
-                                            VALUES (%s, %s, 'resync', %s, 'pending')
-                                            """,
-                                            [
-                                                connector.name,
-                                                result.datatype,
-                                                orjson.dumps({"external_id": external_id}).decode(),
-                                            ],
+                                _max_iter = getattr(writeback_cfg, "max_feedback_iterations", 3)
+                                if self._check_reingest_allowed(
+                                    connector.name, result.datatype, external_id, _max_iter
+                                ):
+                                    try:
+                                        async with self._pool.connection() as ctrl_conn:
+                                            await ctrl_conn.execute(
+                                                """
+                                                INSERT INTO inout_ops_control
+                                                    (connector, datatype, command, payload, status)
+                                                VALUES (%s, %s, 'resync', %s, 'pending')
+                                                """,
+                                                [
+                                                    connector.name,
+                                                    result.datatype,
+                                                    orjson.dumps({"external_id": external_id}).decode(),
+                                                ],
+                                            )
+                                            await ctrl_conn.commit()
+                                    except Exception:
+                                        pass
+                                    # Also fire in-process bus for same-process ingestion daemons
+                                    try:
+                                        from inandout.events import EventType, get_event_bus
+                                        await get_event_bus().publish(
+                                            EventType.REINGEST_SIGNAL,
+                                            connector=connector.name,
+                                            datatype=result.datatype,
+                                            external_id=external_id,
+                                            reason="three_way_conflict",
                                         )
-                                        await ctrl_conn.commit()
-                                except Exception:
-                                    pass
-                                # Also fire in-process bus for same-process ingestion daemons
-                                try:
-                                    from inandout.events import EventType, get_event_bus
-                                    await get_event_bus().publish(
-                                        EventType.REINGEST_SIGNAL,
-                                        connector=connector.name,
-                                        datatype=result.datatype,
-                                        external_id=external_id,
-                                        reason="three_way_conflict",
-                                    )
-                                except Exception:
-                                    pass
+                                    except Exception:
+                                        pass
                                 result.skipped += 1
                                 result.conflicts += 1
                                 return
@@ -1490,36 +1541,40 @@ class WritebackEngine:
 
             resolution = writeback_cfg.conflict_resolution
             if resolution in (ConflictResolution.re_ingest_and_recompute,):
-                # Signal ingestion to re-fetch this record
-                try:
-                    async with self._pool.connection() as ctrl_conn:
-                        await ctrl_conn.execute(
-                            """
-                            INSERT INTO inout_ops_control
-                                (target_tool, connector, datatype, command, payload, status)
-                            VALUES ('ingestion', %s, %s, 'resync', %s, 'pending')
-                            """,
-                            [
-                                connector.name,
-                                result.datatype,
-                                orjson.dumps({"external_id": external_id}).decode(),
-                            ],
+                # Signal ingestion to re-fetch this record (T2 #39 cap applies)
+                _max_iter = getattr(writeback_cfg, "max_feedback_iterations", 3)
+                if self._check_reingest_allowed(
+                    connector.name, result.datatype, external_id, _max_iter
+                ):
+                    try:
+                        async with self._pool.connection() as ctrl_conn:
+                            await ctrl_conn.execute(
+                                """
+                                INSERT INTO inout_ops_control
+                                    (target_tool, connector, datatype, command, payload, status)
+                                VALUES ('ingestion', %s, %s, 'resync', %s, 'pending')
+                                """,
+                                [
+                                    connector.name,
+                                    result.datatype,
+                                    orjson.dumps({"external_id": external_id}).decode(),
+                                ],
+                            )
+                            await ctrl_conn.commit()
+                    except Exception:
+                        pass
+                    # Also fire in-process bus for same-process ingestion daemons
+                    try:
+                        from inandout.events import EventType, get_event_bus
+                        await get_event_bus().publish(
+                            EventType.REINGEST_SIGNAL,
+                            connector=connector.name,
+                            datatype=result.datatype,
+                            external_id=external_id,
+                            reason="post_write_verify_conflict",
                         )
-                        await ctrl_conn.commit()
-                except Exception:
-                    pass
-                # Also fire in-process bus for same-process ingestion daemons
-                try:
-                    from inandout.events import EventType, get_event_bus
-                    await get_event_bus().publish(
-                        EventType.REINGEST_SIGNAL,
-                        connector=connector.name,
-                        datatype=result.datatype,
-                        external_id=external_id,
-                        reason="post_write_verify_conflict",
-                    )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
             elif resolution == ConflictResolution.dead_letter:
                 result.failed += 1
                 result.processed -= 1  # undo the processed increment

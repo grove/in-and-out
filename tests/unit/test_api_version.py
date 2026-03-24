@@ -159,3 +159,122 @@ def test_check_api_version_deprecations_skips_connectors_without_date():
         _check_api_version_deprecations([mock_file_cfg])
     except Exception as exc:
         pytest.fail(f"_check_api_version_deprecations raised: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# T1 #39: api_version_header + transport injection
+# ---------------------------------------------------------------------------
+
+def test_connector_config_has_api_version_header_field():
+    """ConnectorConfig must have api_version_header field (T1 #39)."""
+    from inandout.config.connector import ConnectorConfig
+
+    fields = ConnectorConfig.model_fields
+    assert "api_version_header" in fields
+    assert fields["api_version_header"].default is None
+
+
+def test_http_transport_adapter_accepts_api_version_param():
+    """HttpTransportAdapter.__init__ must accept an api_version keyword arg."""
+    import inspect
+    from inandout.transport.http import HttpTransportAdapter
+
+    sig = inspect.signature(HttpTransportAdapter.__init__)
+    assert "api_version" in sig.parameters
+
+
+def test_http_transport_adapter_stores_api_version():
+    """HttpTransportAdapter stores api_version on self._api_version."""
+    from unittest.mock import MagicMock, patch
+    from inandout.transport.http import HttpTransportAdapter
+
+    mock_connector = MagicMock()
+    mock_connector.rate_limit = None
+
+    with patch("inandout.transport.http.build_auth_provider", return_value=None):
+        adapter = object.__new__(HttpTransportAdapter)
+        HttpTransportAdapter.__init__(adapter, mock_connector, api_version="v3.0")
+
+    assert adapter._api_version == "v3.0"
+
+
+@pytest.mark.anyio
+async def test_http_transport_injects_version_header_when_configured():
+    """_raw_request injects api_version_header when both header name and version are set."""
+    from inandout.transport.http import HttpTransportAdapter
+    from unittest.mock import MagicMock
+    import httpx
+
+    adapter = object.__new__(HttpTransportAdapter)
+    adapter._connector = MagicMock()
+    adapter._connector.name = "test"
+    adapter._connector.api_version_header = "Salesforce-Version"
+    adapter._connector.connection.retry_budget = None
+    adapter._api_version = "58.0"
+    adapter._max_retries = 0
+    adapter._token_bucket = None
+    adapter._limiter = None
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+
+    captured_kwargs: list[dict] = []
+
+    async def fake_request(method, path, **kwargs):
+        captured_kwargs.append(kwargs)
+        return mock_resp
+
+    adapter._client = MagicMock()
+    adapter._client.request = fake_request
+
+    await adapter._raw_request("GET", "/contacts")
+
+    assert captured_kwargs, "request was not called"
+    headers = captured_kwargs[0].get("headers", {})
+    assert "Salesforce-Version" in headers
+    assert headers["Salesforce-Version"] == "58.0"
+
+
+@pytest.mark.anyio
+async def test_http_transport_does_not_inject_header_when_not_configured():
+    """No api_version_header injection when api_version_header is None."""
+    from inandout.transport.http import HttpTransportAdapter
+    from unittest.mock import MagicMock
+    import httpx
+
+    adapter = object.__new__(HttpTransportAdapter)
+    adapter._connector = MagicMock()
+    adapter._connector.name = "test"
+    adapter._connector.api_version_header = None
+    adapter._connector.connection.retry_budget = None
+    adapter._api_version = "v1"
+    adapter._max_retries = 0
+    adapter._token_bucket = None
+    adapter._limiter = None
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+
+    captured_kwargs: list[dict] = []
+
+    async def fake_request(method, path, **kwargs):
+        captured_kwargs.append(kwargs)
+        return mock_resp
+
+    adapter._client = MagicMock()
+    adapter._client.request = fake_request
+
+    await adapter._raw_request("GET", "/contacts")
+
+    headers = captured_kwargs[0].get("headers", {})
+    # No special api-version header should have been injected
+    assert "Salesforce-Version" not in headers
+
+
+def test_engine_passes_api_version_to_transport():
+    """Ingestion engine must pass api_version= when constructing HttpTransportAdapter."""
+    import inspect
+    from inandout.ingestion import engine as engine_module
+
+    src = inspect.getsource(engine_module)
+    assert "api_version=_api_version_used" in src
