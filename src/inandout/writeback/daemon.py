@@ -148,7 +148,10 @@ async def _writeback_polling_loop(
                     health_score=0.0,
                     circuit_breaker_state=_cb.state.value,
                 )
-        await anyio.sleep(interval_secs)
+        # T2 #33: clamp sleep to batch_max_age_secs when set (close batch if oldest row exceeds age limit)
+        _bma = getattr(writeback_cfg, "batch_max_age_secs", None)
+        _effective_sleep = min(interval_secs, float(_bma)) if _bma is not None else interval_secs
+        await anyio.sleep(_effective_sleep)
         if _draining:
             log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
             break

@@ -1178,6 +1178,127 @@ def dead_letter_inspect(
         raise typer.Exit(code=1)
 
 
+@dead_letter_app.command("writeback-inspect")
+def dead_letter_writeback_inspect(
+    connector: str = typer.Option(..., "--connector", help="Connector name."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name."),
+    config: str = typer.Option(
+        "config/writeback.yaml",
+        "--config", "-c",
+        help="Path to writeback tool config YAML.",
+    ),
+    limit: int = typer.Option(20, "--limit", help="Maximum number of rows to display."),
+) -> None:
+    """Inspect writeback dead-letter rows for a connector/datatype (T2 #24)."""
+    import anyio
+    from inandout.config.loader import load_writeback_tool_config
+    from inandout.deadletter.writeback import fetch_writeback_dead_letter_rows
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_writeback_tool_config(cfg_path)
+
+    async def _run() -> None:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            rows = await fetch_writeback_dead_letter_rows(pool, connector, datatype, limit=limit)
+        finally:
+            await pool.close()
+
+        if not rows:
+            console.print(f"[green]No writeback dead-letter rows for {connector}/{datatype}[/green]")
+            return
+
+        dl_table = Table(title=f"Writeback Dead Letter: {connector}/{datatype} ({len(rows)} rows)")
+        dl_table.add_column("ID", style="cyan")
+        dl_table.add_column("External ID")
+        dl_table.add_column("Action", style="bold")
+        dl_table.add_column("Error Message")
+        dl_table.add_column("Failed At")
+        dl_table.add_column("Requeue Count")
+
+        for row in rows:
+            dl_table.add_row(
+                str(row["id"]),
+                str(row.get("external_id") or ""),
+                str(row.get("error_class") or ""),   # error_class stores the action
+                str(row.get("error_message") or ""),
+                str(row.get("failed_at") or ""),
+                str(row.get("requeue_count") or 0),
+            )
+
+        console.print(dl_table)
+
+    try:
+        anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Inspect failed: {exc}")
+        raise typer.Exit(code=1)
+
+
+@dead_letter_app.command("writeback-replay")
+def dead_letter_writeback_replay(
+    connector: str = typer.Option(..., "--connector", help="Connector name."),
+    datatype: str = typer.Option(..., "--datatype", help="Datatype name."),
+    config: str = typer.Option(
+        "config/writeback.yaml",
+        "--config", "-c",
+        help="Path to writeback tool config YAML.",
+    ),
+    limit: int = typer.Option(50, "--limit", help="Maximum rows to replay."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be replayed without requeuing."),
+) -> None:
+    """Replay writeback dead-letter rows back into the delta table (T2 #24)."""
+    import anyio
+    from inandout.config.loader import load_writeback_tool_config
+    from inandout.deadletter.writeback import fetch_writeback_dead_letter_rows, replay_writeback_dead_letter_rows
+    from inandout.postgres.pool import create_pool
+
+    cfg_path = Path(config)
+    if not cfg_path.exists():
+        err_console.print(f"Config file not found: {cfg_path}")
+        raise typer.Exit(code=1)
+
+    tool_cfg = load_writeback_tool_config(cfg_path)
+    delta_table = f"_delta_{connector}_{datatype}"
+
+    async def _run() -> dict:
+        pool = await create_pool(tool_cfg.database)
+        try:
+            if dry_run:
+                rows = await fetch_writeback_dead_letter_rows(pool, connector, datatype, limit=limit)
+                return {"would_replay": len(rows), "dry_run": True}
+            return await replay_writeback_dead_letter_rows(
+                pool, connector, datatype, delta_table, limit=limit
+            )
+        finally:
+            await pool.close()
+
+    try:
+        result = anyio.run(_run)
+    except Exception as exc:
+        err_console.print(f"Replay failed: {exc}")
+        raise typer.Exit(code=1)
+
+    suffix = " (DRY RUN)" if dry_run else ""
+    table = Table(title=f"Writeback Dead-Letter Replay{suffix}: {connector}/{datatype}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Count", style="bold")
+    if dry_run:
+        table.add_row("Would replay", str(result.get("would_replay", 0)))
+    else:
+        table.add_row("Replayed", str(result.get("replayed", 0)))
+        table.add_row("Errors", str(result.get("errors", 0)))
+    console.print(table)
+
+    if result.get("errors", 0) > 0:
+        raise typer.Exit(code=1)
+
+
 @dead_letter_app.command("transform")
 def dead_letter_transform(
     connector: str = typer.Option(..., "--connector", help="Connector name."),

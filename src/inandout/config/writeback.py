@@ -115,6 +115,8 @@ class WritebackConfig(BaseModel):
     batch_max_age_secs: float | None = Field(default=None, ge=0.0)  # max age of oldest row in forming batch
     # T2 #35: payload required-fields guard — route to dead-letter when any field is absent
     required_fields: list[str] = []
+    # T2 #24: dead-letter queue — move permanently failed rows after this many failures
+    max_retry_count: int = Field(default=3, ge=0)  # 0 = never auto-dead-letter
 
     @model_validator(mode="after")
     def validate_crdt_ts_field_requires_lww(self) -> "WritebackConfig":

@@ -215,6 +215,7 @@ class WritebackEngine:
                             tg.start_soon(_dispatch_group, group_rows)
 
                 await self._write_feedback(rows, result, log)
+                await self._auto_dead_letter_exceeded_rows(result, writeback_cfg)
                 if writeback_cfg.use_desired_state_table:
                     await self._update_desired_state_statuses(
                         rows, result, connector.name, datatype
@@ -1491,3 +1492,48 @@ class WritebackEngine:
             logger.debug("writeback_result_table_not_found_skipping_feedback")
         except Exception as exc:
             logger.warning("writeback_feedback_write_failed", error=str(exc))
+
+    async def _auto_dead_letter_exceeded_rows(
+        self,
+        result: WritebackResult,
+        writeback_cfg: WritebackConfig,
+    ) -> None:
+        """T2 #24: Move failed rows that have exceeded max_retry_count to the dead-letter table."""
+        max_retries = getattr(writeback_cfg, "max_retry_count", 3)
+        if max_retries <= 0 or not result._failed_entries:
+            return
+
+        from inandout.deadletter.writeback import failure_count_for_row, move_to_dead_letter
+        from inandout.postgres.schema import dead_letter_table_name
+
+        # Get payload snapshots from audit entries indexed by (external_id, action)
+        audit_payloads: dict[tuple[str, str], dict | None] = {
+            (str(ext_id), str(act)): payload
+            for ext_id, act, payload, *_ in result._audit_entries
+        }
+
+        for ext_id, act, error_msg in result._failed_entries:
+            count = await failure_count_for_row(
+                self._pool, result.connector, result.datatype, result.delta_table, ext_id
+            )
+            if count >= max_retries:
+                payload_snap = audit_payloads.get((str(ext_id), str(act)))
+                logger.warning(
+                    "writeback_row_exceeded_max_retries",
+                    connector=result.connector,
+                    datatype=result.datatype,
+                    external_id=ext_id,
+                    action=act,
+                    failure_count=count,
+                    max_retry_count=max_retries,
+                )
+                await move_to_dead_letter(
+                    self._pool,
+                    result.connector,
+                    result.datatype,
+                    external_id=ext_id,
+                    action=act,
+                    payload_snapshot=payload_snap,
+                    error_message=error_msg,
+                    delta_table=result.delta_table,
+                )
