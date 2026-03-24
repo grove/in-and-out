@@ -16,39 +16,40 @@ else is noise.
 
 ## Summary
 
-| Priority | Candidate | Source files | Test files | Effort |
-|----------|-----------|:---:|:---:|--------|
-| P1 | `registry/` — connector marketplace | 2 | 2 | Low |
-| P1 | `generator/` — OpenAPI scaffold generator | 2 | 2 | Low |
-| P1 | `ui/` — SPA web UI mount | 1 | 1 | Low |
-| P1 | `diff/` — sync-run comparison engine | 1 | 1 | Low |
-| P1 | `ingestion/backfill.py` — time-windowed historical load | 1 | 1 | Low |
-| P1 | `migrations/connector_schema.py` + `connector_migrations/` — YAML format migration | 2 | 1 | Low |
-| P1 | `observability/health_score.py` — composite numeric health score | 1 | 1 | Low |
-| P1 | `api/auth.py` — Bearer-token middleware on mgmt API | 1 | 1 | Low |
-| P2 | `alerting/` — Slack/PagerDuty alert dispatching | 2 | 1 | Low–Medium |
-| P2 | `federation/reporter.py` — cross-instance health aggregation table | 1 | 1 | Low |
-| P2 | `writeback/fan_in.py` — join enrichment before write | 1 | 2 | Low |
-| P2 | `writeback/merge_hooks.py` — custom merge callback registry | 1 | 2 | Low |
-| P3 | `ingestion/cdc.py` — Kafka/Kinesis/pg_logical stubs | 1 | 3 | Medium |
-| P3 | `events/` — outbound event publishing (Kafka/Kinesis/pg_notify) | 2 | 1 | Medium |
-| P3 | `plugins/` — runtime Python hook system | 5 | 5 | Medium–High |
+All 15 scope-creep candidates have been removed across three commits:
+- **P1** — committed `df79edc` (8 removals)
+- **P2/P3** — committed `defd68d` (7 removals)
 
-**Total:** 15 removals · ~26 source files · ~25 test files · ~4 000+ lines of non-goal code.
+| Priority | Candidate | Status |
+|----------|-----------|--------|
+| P1 | `registry/` — connector marketplace | ✅ Done |
+| P1 | `generator/` — OpenAPI scaffold generator | ✅ Done |
+| P1 | `ui/` — SPA web UI mount | ✅ Done |
+| P1 | `diff/` — sync-run comparison engine | ✅ Done |
+| P1 | `ingestion/backfill.py` — time-windowed historical load | ✅ Done |
+| P1 | `migrations/connector_schema.py` + `connector_migrations/` — YAML format migration | ✅ Done |
+| P1 | `observability/health_score.py` — composite numeric health score | ✅ Done |
+| P1 | `api/auth.py` — Bearer-token middleware on mgmt API | ✅ Done |
+| P2 | `alerting/` — Slack/PagerDuty alert dispatching | ✅ Done |
+| P2 | `federation/reporter.py` — cross-instance health aggregation table | ✅ Done |
+| P2 | `writeback/fan_in.py` — join enrichment before write | ✅ Done |
+| P2 | `writeback/merge_hooks.py` — custom merge callback registry | ✅ Done |
+| P3 | `ingestion/cdc.py` — Kafka/Kinesis/pg_logical stubs | ✅ Done |
+| P3 | `events/` — outbound event publishing (Kafka/Kinesis/pg_notify) | ✅ Done |
+| P3 | `plugins/` — runtime Python hook system | ✅ Done |
 
-Also noted: `fastapi` is a core dependency but the management API routes could be rewritten in
-plain Starlette, which is already a hard dependency. See §16.
+**Net result:** ~26 source files deleted, ~25 test files deleted/cleaned, −7 900+ lines across both commits.
 
 ---
 
-## Priority 1 — Standalone, Zero GOAL.md Justification, Remove First
+## Priority 1 — ✅ All Removed
 
 These modules have no imports into core engine logic. Removal is a clean filesystem delete +
 a few CLI command removals. No engine changes required.
 
 ---
 
-### P1-1 · `src/inandout/registry/` — Connector Marketplace
+### ✅ P1-1 · `src/inandout/registry/` — Connector Marketplace
 
 **What it does:** Fetches a remote GitHub-hosted connector index, downloads connector YAML and
 Python hook files, and POSTs submissions to a marketplace API.
@@ -69,7 +70,7 @@ for a public connector ecosystem that was never requested.
 
 ---
 
-### P1-2 · `src/inandout/generator/` — OpenAPI Scaffold Generator
+### ✅ P1-2 · `src/inandout/generator/` — OpenAPI Scaffold Generator
 
 **What it does:** Probes a remote URL for an OpenAPI/Swagger spec, extracts list endpoints, and
 renders a starter connector YAML template.
@@ -90,7 +91,7 @@ OpenAPI specs is a developer-experience add-on that was never in scope.
 
 ---
 
-### P1-3 · `src/inandout/ui/__init__.py` — SPA Web UI Mount
+### ✅ P1-3 · `src/inandout/ui/__init__.py` — SPA Web UI Mount
 
 **What it does:** Returns a Starlette `Mount` pointing at a `ui/static/` directory, serving a
 single-page application under `/ui`.
@@ -111,7 +112,7 @@ plan.
 
 ---
 
-### P1-4 · `src/inandout/diff/` — Sync-Run Comparison Engine
+### ✅ P1-4 · `src/inandout/diff/` — Sync-Run Comparison Engine
 
 **What it does:** Queries the `_history` table to compare two sync run IDs for a given
 connector/datatype, returning added, removed, and changed records with field-level diffs.
@@ -131,7 +132,7 @@ surface area around the history tables without a corresponding business requirem
 
 ---
 
-### P1-5 · `src/inandout/ingestion/backfill.py` — Time-Windowed Historical Load
+### ✅ P1-5 · `src/inandout/ingestion/backfill.py` — Time-Windowed Historical Load
 
 **What it does:** Splits a user-specified date range into time windows, runs a sync per window
 into a Postgres staging table, then promotes results to the live source table. Invoked via a
@@ -153,7 +154,7 @@ The GOAL.md full-sync path already handles initial loads.
 
 ---
 
-### P1-6 · `src/inandout/migrations/connector_schema.py` + `connector_migrations/` — YAML Format Migrations
+### ✅ P1-6 · `src/inandout/migrations/connector_schema.py` + `connector_migrations/` — YAML Format Migrations
 
 **What it does:** Maintains an ordered registry of connector YAML *config file format*
 migrations (currently v1.0→v1.1: renames `webhook.signature_header` to
@@ -178,7 +179,7 @@ a programmatic migration system.
 
 ---
 
-### P1-7 · `src/inandout/observability/health_score.py` — Composite Numeric Health Score
+### ✅ P1-7 · `src/inandout/observability/health_score.py` — Composite Numeric Health Score
 
 **What it does:** Computes a weighted 0–1 composite health score from three components:
 circuit-breaker state (40%), recent sync error rate (40%), dead-letter depth (20%). Exposed
@@ -202,7 +203,7 @@ exposed as dedicated Prometheus gauges — that is the correct observability mec
 
 ---
 
-### P1-8 · `src/inandout/api/auth.py` — Bearer-Token Middleware on Management API
+### ✅ P1-8 · `src/inandout/api/auth.py` — Bearer-Token Middleware on Management API
 
 **What it does:** Starlette middleware that enforces a Bearer token or API-key check on all
 management API routes except `/health`, `/ready`, and `/metrics`.
@@ -226,14 +227,14 @@ deployments.
 
 ---
 
-## Priority 2 — Wired into Core, No GOAL.md Justification
+## Priority 2 — ✅ All Removed
 
 These are slightly more coupled but still have clean removal paths. Each requires targeted
 edits to 1–2 core files.
 
 ---
 
-### P2-1 · `src/inandout/alerting/` — Slack/PagerDuty Alert Dispatching
+### ✅ P2-1 · `src/inandout/alerting/` — Slack/PagerDuty Alert Dispatching
 
 **What it does:** Dispatches alert events over HTTP to Slack incoming webhooks or PagerDuty
 Events v2 API when configured alert rules fire.
@@ -257,7 +258,7 @@ surface for third-party API contracts (Slack/PagerDuty API changes).
 
 ---
 
-### P2-2 · `src/inandout/federation/reporter.py` — Cross-Instance Health Aggregation Table
+### ✅ P2-2 · `src/inandout/federation/reporter.py` — Cross-Instance Health Aggregation Table
 
 **What it does:** Upserts per-instance health snapshots (health score, circuit state, DL depth)
 into an `inout_ops_federation` PostgreSQL table, making all running instances visible in one
@@ -283,7 +284,7 @@ observability channel per GOAL.md.
 
 ---
 
-### P2-3 · `src/inandout/writeback/fan_in.py` — Join Enrichment Before Write
+### ✅ P2-3 · `src/inandout/writeback/fan_in.py` — Join Enrichment Before Write
 
 **What it does:** Enriches a writeback delta row by querying other PostgreSQL source tables
 and merging in additional fields before the HTTP write is dispatched.
@@ -306,7 +307,7 @@ duplicates logic that should be declared in `osi-mapping.yaml`.
 
 ---
 
-### P2-4 · `src/inandout/writeback/merge_hooks.py` — Custom Merge Callback Registry
+### ✅ P2-4 · `src/inandout/writeback/merge_hooks.py` — Custom Merge Callback Registry
 
 **What it does:** A module-level `MergeHookRegistry` singleton that accepts user-supplied async
 Python functions keyed by `(connector, datatype)` for custom conflict-merge logic during
@@ -330,14 +331,14 @@ consolidation logic (which GOAL.md explicitly assigns to OSI-Mapping) back insid
 
 ---
 
-## Priority 3 — More Coupled, but Still Not In Scope
+## Priority 3 — ✅ All Removed
 
 These require more surgical removals because references are deeper in engine logic. Still
 recommended, but higher coordination cost.
 
 ---
 
-### P3-1 · `src/inandout/ingestion/cdc.py` — Non-HTTP CDC Source Stubs
+### ✅ P3-1 · `src/inandout/ingestion/cdc.py` — Non-HTTP CDC Source Stubs
 
 **What it does:** Defines abstract `CdcSource` plus concrete (but stub) implementations for
 Kafka (`aiokafka`), Kinesis (`aioboto3`), and `pg_logical`. The `get_cdc_source()` factory is
@@ -367,7 +368,7 @@ adding to CI noise.
 
 ---
 
-### P3-2 · `src/inandout/events/` — Outbound Event Publishing
+### ✅ P3-2 · `src/inandout/events/` — Outbound Event Publishing
 
 **What it does:** After each successful ingestion upsert, publishes a structured event to one
 of four backends: stdout, PostgreSQL `NOTIFY`, Kafka (stub), or Kinesis (stub). The
@@ -394,7 +395,7 @@ requested.
 
 ---
 
-### P3-3 · `src/inandout/plugins/` — Runtime Python Hook System
+### ✅ P3-3 · `src/inandout/plugins/` — Runtime Python Hook System
 
 **What it does:** Provides a `ConnectorHooks` dataclass (transform/filter/enrich async
 callbacks), a module-level `HookRegistry` singleton, `apply_hooks()` pipeline function,
