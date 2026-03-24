@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/transport/auth.py
+# hypothesis_version: 6.151.9
+
+[401, 3600, ':', 'Authorization', '__pending__', 'access_token', 'client_credentials', 'client_id', 'client_secret', 'expires_at', 'expires_in', 'grant_type', 'header', 'scope']

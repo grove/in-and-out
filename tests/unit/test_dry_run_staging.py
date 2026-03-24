@@ -7,7 +7,6 @@ import httpx
 from typer.testing import CliRunner
 
 from inandout.cli.main import app
-from inandout.plugins.hooks import _registry
 
 runner = CliRunner()
 
@@ -79,13 +78,6 @@ connector:
               offset_param: offset
               limit_param: limit
 """
-
-
-@pytest.fixture(autouse=True)
-def clear_hooks():
-    _registry.clear()
-    yield
-    _registry.clear()
 
 
 # ---------------------------------------------------------------------------

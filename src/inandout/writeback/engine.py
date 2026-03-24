@@ -19,7 +19,6 @@ from inandout.config.writeback import ConflictResolution, ProtectionLevel, Write
 from inandout.observability.metrics import conflicts_detected_total
 from inandout.postgres.desired_state import get_lwstate, update_desired_state_status, upsert_lwstate
 from inandout.transport.http import HttpTransportAdapter
-from inandout.writeback.merge_hooks import merge_hook_registry
 
 logger = structlog.get_logger(__name__)
 _tracer = trace.get_tracer("inandout.writeback")
@@ -389,11 +388,6 @@ class WritebackEngine:
             )
             result.skipped += 1
             return
-
-        # Fan-in join enrichment before dispatching
-        if writeback_cfg.join_sources:
-            from inandout.writeback.fan_in import enrich_with_join_sources
-            row = await enrich_with_join_sources(self._pool, row, writeback_cfg.join_sources)
 
         ops = writeback_cfg.operations
         dry_run = getattr(writeback_cfg, "dry_run", False)
@@ -780,33 +774,6 @@ class WritebackEngine:
                                 pass
                         final_payload = merged
 
-                    elif conflict_resolution == ConflictResolution.custom_merge:
-                        hook = merge_hook_registry.get(connector.name, result.datatype)
-                        last_written = await self._get_last_written(connector, result.datatype, external_id)
-                        if hook is not None:
-                            logger.info(
-                                "writeback_custom_merge",
-                                action=action,
-                                external_id=external_id,
-                            )
-                            final_payload = await hook(payload, remote_data, last_written)
-                        else:
-                            # Fall back to merge_fields
-                            logger.warning(
-                                "writeback_custom_merge_no_hook",
-                                connector=connector.name,
-                                datatype=result.datatype,
-                            )
-                            merged = {}
-                            for field_name, local_val in payload.items():
-                                last_val = last_written.get(field_name)
-                                remote_val = remote_data.get(field_name)
-                                if remote_val is not None and remote_val != last_val:
-                                    merged[field_name] = remote_val
-                                else:
-                                    merged[field_name] = local_val
-                            final_payload = merged
-
                     else:
                         # last_writer_wins (default) — use local payload as-is
                         final_payload = payload
@@ -1002,14 +969,6 @@ class WritebackEngine:
                 surviving_id = external_id
                 losing_ids: list[str] = row.get("_losing_ids") or []
                 payload = {k: v for k, v in row.items() if not k.startswith("_")}
-
-                # Allow a plugin hook to modify the merged payload before writing
-                hook = merge_hook_registry.get(connector.name, result.datatype)
-                if hook is not None:
-                    try:
-                        payload = await hook(payload, {}, {})
-                    except Exception as exc:
-                        logger.warning("merge_hook_failed", error=str(exc))
 
                 if dry_run:
                     base_url = connector.connection.base_url.rstrip("/")

@@ -268,7 +268,6 @@ def ingest_dry_run(
     async def _run_dry_run() -> list[dict]:
         """Run the dry-run fetches and return preview rows."""
         from inandout.ingestion.dry_run import _patch_base_url
-        from inandout.plugins.hooks import apply_hooks
         from inandout.transport.http import HttpTransportAdapter
 
         previews: list[dict] = []
@@ -297,14 +296,8 @@ def ingest_dry_run(
                 async for page in transport.fetch_pages(ingestion_cfg.list, watermark=None):
                     records = page[:limit]
                     for record in records:
-                        # Apply transform/filter hooks (dry-run mode — no pool)
-                        result = await apply_hooks(record, connector_cfg.name, pool=None)
-                        if result is None:
-                            action = "filtered"
-                            rec = record
-                        else:
-                            action = "insert"
-                            rec = result
+                        action = "insert"
+                        rec = record
 
                         preview_fields = list(rec.keys())[:3]
                         preview_vals = {k: rec[k] for k in preview_fields}

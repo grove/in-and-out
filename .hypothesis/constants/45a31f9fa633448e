@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/field_mapping.py
+# hypothesis_version: 6.151.9
+
+['bool', 'date', 'datetime', 'float', 'forbid', 'int', 'str']

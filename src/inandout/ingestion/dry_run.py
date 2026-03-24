@@ -74,7 +74,6 @@ async def dry_run_connector(
 
     from inandout.ingestion.field_mapper import apply_field_mappings
     from inandout.ingestion.engine import _extract_external_id
-    from inandout.plugins.hooks import apply_hooks
     from inandout.transport.http import HttpTransportAdapter
 
     result = DryRunResult(datatype=datatype, env=env)
@@ -95,14 +94,6 @@ async def dry_run_connector(
                     result.applied_mappings += 1
 
                 # Apply plugin hooks (no DB pool in dry-run)
-                hooked = await apply_hooks(record, connector_cfg.name, pool=None)
-                if hooked is not None and hooked is not record:
-                    result.applied_hooks += 1
-                if hooked is None:
-                    # Filter hook dropped this record
-                    continue
-
-                record = hooked
                 result.records.append(record)
 
                 ext_id = _extract_external_id(record, ingestion_cfg.primary_key)

@@ -25,7 +25,6 @@ from inandout.observability.metrics import (
     records_resurrected_total,
     sync_lag_seconds,
 )
-from inandout.plugins.hooks import apply_hooks
 from inandout.postgres.schema_drift import detect_schema_drift, prune_orphan_columns
 from inandout.postgres.schema import (
     dead_letter_table_name,
@@ -78,13 +77,11 @@ class IngestionEngine:
         pool: AsyncConnectionPool,
         namespace: str = "public",
         read_pool: AsyncConnectionPool | None = None,
-        publisher: Any = None,  # EventPublisher | None
     ) -> None:
         self._pool = pool
         self._namespace = namespace
         self._debouncer = None
         self._read_pool = read_pool  # used for read-heavy queries when available
-        self._publisher = publisher  # EventPublisher | None
 
     def _read_conn_pool(self) -> AsyncConnectionPool:
         """Return the read pool if available, else the primary pool."""
@@ -436,16 +433,6 @@ class IngestionEngine:
         log: Any,
         dtype_cfg: DatatypeConfig | None = None,
     ) -> None:
-        # CDC mode: consume from the CDC source instead of HTTP polling
-        if ingestion_cfg.source_mode == "cdc" and ingestion_cfg.cdc is not None:
-            from inandout.ingestion.cdc import get_cdc_source
-            cdc_source = get_cdc_source(ingestion_cfg.cdc, self._pool)
-            await self._run_cdc_sync(
-                connector, datatype, ingestion_cfg, result, log, cdc_source, dtype_cfg=dtype_cfg
-            )
-            result.status = "completed"
-            return
-
         history_mode = ingestion_cfg.history_mode
         ns = self._namespace
 
@@ -671,12 +658,6 @@ class IngestionEngine:
                                     dtype_cfg.field_mappings,
                                     strict=dtype_cfg.strict_field_mapping,
                                 )
-                            # Apply plugin hooks: transform → filter → enrich
-                            record = await apply_hooks(record, connector.name, self._pool)
-                            if record is None:
-                                # filter hook dropped this record
-                                continue
-
                             # Data quality validation
                             if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
                                 violations = validate_record(record, dtype_cfg.quality_rules, quality_seen)
@@ -787,21 +768,6 @@ class IngestionEngine:
                                     await _write_history_record(
                                         conn, hist_table, external_id, record, raw_hash, result.run_id
                                     )
-
-                                # Event publishing
-                                if self._publisher is not None and (inserted or updated):
-                                    try:
-                                        from inandout.events.publisher import build_event
-                                        event = build_event(
-                                            connector=connector.name,
-                                            datatype=datatype,
-                                            external_id=external_id,
-                                            action="upsert",
-                                            run_id=str(result.run_id),
-                                        )
-                                        await self._publisher.publish(event)
-                                    except Exception:
-                                        pass  # publishing failure must not block ingestion
 
                             # Track latest watermark from cursor field (both paths)
                             inc = ingestion_cfg.list.incremental
@@ -952,11 +918,6 @@ class IngestionEngine:
                             except Exception:
                                 pass
 
-                        # 3. Plugin hooks
-                        record = await apply_hooks(record, connector.name, self._pool)
-                        if record is None:
-                            continue
-
                         # 4. Quality rules
                         if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
                             violations = validate_record(record, dtype_cfg.quality_rules, quality_seen)
@@ -1018,21 +979,6 @@ class IngestionEngine:
                             await _write_history_record(
                                 conn, hist_table, external_id, record, raw_hash, result.run_id
                             )
-
-                        # 8. Event publishing
-                        if self._publisher is not None and (inserted or updated):
-                            try:
-                                from inandout.events.publisher import build_event
-                                event = build_event(
-                                    connector=connector.name,
-                                    datatype=datatype,
-                                    external_id=external_id,
-                                    action="upsert",
-                                    run_id=str(result.run_id),
-                                )
-                                await self._publisher.publish(event)
-                            except Exception:
-                                pass
 
                     # 9. Watermark update after batch
                     if cdc_cursor is not None:
@@ -1257,13 +1203,9 @@ class IngestionEngine:
                 import orjson as _orjson_sr
                 record: dict[str, Any] = _orjson_sr.loads(resp.content) if resp.content else {}
 
-            # Apply field mappings + hooks + quality checks
+            # Apply field mappings + quality checks
             if dtype_cfg is not None and dtype_cfg.field_mappings:
                 record = apply_field_mappings(record, dtype_cfg.field_mappings, strict=dtype_cfg.strict_field_mapping)
-            record = await apply_hooks(record, connector.name, self._pool)
-            if record is None:
-                result.status = "completed"
-                return result
 
             if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
                 violations = validate_record(record, dtype_cfg.quality_rules, {})

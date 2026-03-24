@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/timestamp_normalizer.py
+# hypothesis_version: 6.151.9
+
+[1000.0, 10000000000.0, '%Y-%m-%dT%H:%M:%SZ', '+00:00', 'Z', 'auto', 'iso8601', 'rfc2822', 'unix_millis', 'unix_seconds']

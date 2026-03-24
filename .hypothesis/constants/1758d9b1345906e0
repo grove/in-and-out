@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/writeback/crdt.py
+# hypothesis_version: 6.151.9
+
+[0.0, '_', '_updated_at', 'g_counter', 'lww_register']

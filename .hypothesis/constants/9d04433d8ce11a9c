@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/transport/errors.py
+# hypothesis_version: 6.151.9
+
+[0.0, 60.0, 400, 401, 403, 404, 409, 422, 429, 500, 600, 'Retry-After', 'auth', 'config_error', 'data_error', 'rate_limit', 'transient']

@@ -104,12 +104,3 @@ def test_engine_stores_read_pool():
     replica = MagicMock()
     engine = IngestionEngine(pool=primary, read_pool=replica)
     assert engine._read_pool is replica
-
-
-def test_engine_stores_publisher():
-    from inandout.ingestion.engine import IngestionEngine
-
-    primary = MagicMock()
-    mock_publisher = MagicMock()
-    engine = IngestionEngine(pool=primary, publisher=mock_publisher)
-    assert engine._publisher is mock_publisher

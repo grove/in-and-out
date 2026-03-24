@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/postgres/__init__.py
+# hypothesis_version: 6.151.9
+
+['create_pool', 'ensure_source_table', 'get_watermark', 'set_watermark', 'source_table_ddl', 'source_table_name']

@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from inandout.alerting.config import AlertingConfig
 from inandout.config._duration import parse_duration
 
 
@@ -200,14 +199,6 @@ class ChangeDetectionConfig(BaseModel):
     poll_interval: str = "5s"
 
 
-class FederationConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-    report_interval_secs: float = 30.0
-    stale_threshold_secs: float = 300.0
-
-
 class IngestionToolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -224,9 +215,6 @@ class IngestionToolConfig(BaseModel):
     credential_backend: Literal["env", "vault", "aws_sm", "gcp_sm"] = "env"
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     schema_registry_dir: str | None = None
-    alerting: AlertingConfig = Field(default_factory=AlertingConfig)
-    event_output: Any = Field(default_factory=lambda: None)  # EventOutputConfig | None
-    federation: FederationConfig = Field(default_factory=FederationConfig)
     drain_timeout_secs: float = 30.0  # B8: max time to drain in-flight ops on SIGTERM
 
 

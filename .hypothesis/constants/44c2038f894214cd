@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/cdc.py
+# hypothesis_version: 6.151.9
+
+[5.0, 100, 1000, '1', 'Data', 'LATEST', 'NextShardIterator', 'Records', 'ShardId', 'ShardIterator', 'Shards', 'database', 'forbid', 'inandout', 'kafka', 'kinesis', 'orjson', 'pg_logical', 'proto_version', 'publication_names']

@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/observability/logging.py
+# hypothesis_version: 6.151.9
+
+['%(message)s', 'debug', 'error', 'info', 'iso', 'json', 'text', 'warn']

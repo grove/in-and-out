@@ -26,10 +26,6 @@ class OutOfOrderConfig(BaseModel):
     timestamp_field: str = "updated_at"   # field in payload to compare
     sequence_field: str | None = None     # field for sequence number comparison
 
-if TYPE_CHECKING:
-    from inandout.ingestion.cdc import CdcSourceConfig
-
-
 class HistoryMode(StrEnum):
     overwrite = "overwrite"
     append = "append"
@@ -169,8 +165,6 @@ class IngestionConfig(BaseModel):
     list: ListConfig = Field(alias="list")
     webhook_events: WebhookEventsConfig | None = None
     prune_orphan_columns: bool = False
-    source_mode: Literal["polling", "cdc"] = "polling"
-    cdc: Any | None = None  # CdcSourceConfig | None — imported lazily to avoid circular imports
     max_concurrent_fetches: int = 1  # parallelism for fan-out fetch (1 = no parallelism)
     bulk_upsert_batch_size: int = 1  # 1 = single-record path; >1 = bulk batch path
     verify_deletion: bool = True  # confirm each tombstone via detail_path GET before marking deleted

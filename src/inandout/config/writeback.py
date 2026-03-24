@@ -28,7 +28,6 @@ class ConflictResolution(StrEnum):
     re_ingest_and_recompute = "re_ingest_and_recompute"
     server_wins = "server_wins"
     merge_fields = "merge_fields"
-    custom_merge = "custom_merge"
 
 
 class OperationConfig(BaseModel):
@@ -74,15 +73,6 @@ class OperationsConfig(BaseModel):
     upsert: OperationConfig | None = None
 
 
-class JoinSource(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    connector: str
-    datatype: str
-    join_key: str  # column in both this source and the primary delta table
-    fields: list[str]  # columns to pull from this source into the payload
-
-
 class BatchResponseConfig(BaseModel):
     """Config for parsing partial-success batch API responses (T2 #29)."""
 
@@ -111,7 +101,6 @@ class WritebackConfig(BaseModel):
     if_match_header: str = "If-Match"
     diff_fields: bool = False
     streaming: bool = False
-    join_sources: list[JoinSource] = []
     idempotency_key_header: str | None = None  # e.g. "Idempotency-Key"
     enable_crash_recovery: bool = True  # skip already-sent rows from audit log on restart
     use_desired_state_table: bool = False  # read delta rows from inout_dst_* instead of _delta_*

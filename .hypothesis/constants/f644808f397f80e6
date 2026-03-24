@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/alerting/dispatcher.py
+# hypothesis_version: 6.151.9
+
+[10.0, 'AlertDispatcher', 'condition', 'context', 'custom_details', 'event_action', 'inandout', 'pagerduty', 'payload', 'routing_key', 'rule', 'severity', 'slack', 'source', 'summary', 'text', 'trigger', 'webhook']

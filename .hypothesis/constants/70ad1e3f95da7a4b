@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/secrets/backend.py
+# hypothesis_version: 6.151.9
+
+[10.0, '-', '/', 'INOUT_CREDENTIAL_', 'SecretString', 'X-Vault-Token', '_', 'data', 'name', 'secret', 'secretsmanager', 'utf-8', 'value']
