@@ -5,6 +5,8 @@ import hashlib
 import uuid
 from typing import Any
 
+import anyio
+
 import orjson
 import psycopg
 import structlog
@@ -38,6 +40,9 @@ from inandout.transport.http import HttpTransportAdapter
 
 logger = structlog.get_logger(__name__)
 _tracer = trace.get_tracer("inandout.ingestion")
+
+# How frequently (seconds) the lock heartbeat extends locked_until during a sync.
+_LOCK_HEARTBEAT_INTERVAL_SECS: float = 900.0  # 15 minutes
 
 
 def _advisory_lock_key(connector: str, datatype: str) -> int:
@@ -243,12 +248,41 @@ class IngestionEngine:
                 except Exception:
                     pass  # Table may not exist yet
 
+                # Heartbeat: extend locked_until every 15 min so crashed-worker
+                # expiry doesn't evict a legitimately long-running sync.
+                _hb_scope = anyio.CancelScope()
+
+                async def _lock_heartbeat() -> None:
+                    with _hb_scope:
+                        while True:
+                            await anyio.sleep(_LOCK_HEARTBEAT_INTERVAL_SECS)
+                            try:
+                                async with self._pool.connection() as _hb_conn:
+                                    await _hb_conn.execute(
+                                        """
+                                        UPDATE inout_ops_sync_lock
+                                        SET locked_until = NOW() + INTERVAL '1 hour'
+                                        WHERE connector = %s AND datatype = %s
+                                        """,
+                                        [connector.name, datatype],
+                                    )
+                                    await _hb_conn.commit()
+                            except Exception:
+                                pass  # heartbeat failure must never abort the sync
+
                 try:
-                    await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log, dtype_cfg=dtype_cfg)
-                except Exception as exc:
-                    result.status = "failed"
-                    result.error_message = str(exc)
-                    log.error("sync_failed", error=str(exc))
+                    async with anyio.create_task_group() as _sync_tg:
+                        _sync_tg.start_soon(_lock_heartbeat)
+                        try:
+                            await self._do_sync(connector, datatype, ingestion_cfg, result, existing_wm, log, dtype_cfg=dtype_cfg)
+                        except Exception as exc:
+                            result.status = "failed"
+                            result.error_message = str(exc)
+                            log.error("sync_failed", error=str(exc))
+                        finally:
+                            _hb_scope.cancel()  # stop heartbeat as soon as sync ends
+                except Exception:
+                    pass  # anyio task-group edge-case guard — errors already captured above
                 finally:
                     # Update sync_run record — lock is released when the transaction commits/rolls back
                     # migration 020 adds 'aborted' to the CHECK constraint; fall back to 'failed' on older DBs
@@ -350,7 +384,7 @@ class IngestionEngine:
                                 ],
                             )
                     # Upsert connector version on successful full sync
-                    if status == "completed" and mode == "full":
+                    if _raw_status == "completed" and mode == "full":
                         try:
                             await conn.execute(
                                 """

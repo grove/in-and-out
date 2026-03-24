@@ -346,6 +346,68 @@ async def _sla_check_loop(
 
 
 # ---------------------------------------------------------------------------
+# Webhook dedup TTL cleanup
+# ---------------------------------------------------------------------------
+
+async def _webhook_dedup_cleanup_loop(
+    pool: Any,
+    connector_configs: list,
+    interval_secs: float = 3600.0,
+) -> None:
+    """Periodically delete expired rows from inout_ops_webhook_seen.
+
+    Runs every *interval_secs* (default 1 h).  For each connector that has
+    ``event_id_field`` configured, rows older than its ``dedup_ttl`` are
+    removed.  Errors are swallowed so a missing table never crashes the daemon.
+    """
+    from inandout.config._duration import parse_duration
+
+    log = logger.bind(component="webhook_dedup_cleanup_loop")
+    log.info("webhook_dedup_cleanup_loop_started")
+    while True:
+        if _draining:
+            log.info("webhook_dedup_cleanup_loop_draining")
+            break
+        await anyio.sleep(interval_secs)
+        if _draining:
+            break
+        for connector_file_cfg in connector_configs:
+            connector_cfg = connector_file_cfg.connector
+            wh_cfg = connector_cfg.webhooks
+            if wh_cfg is None or wh_cfg.event_id_field is None:
+                continue
+            try:
+                ttl_secs = parse_duration(wh_cfg.dedup_ttl)
+            except Exception:
+                ttl_secs = 86400.0  # 24 h fallback
+            try:
+                async with pool.connection() as conn:
+                    cur = await conn.execute(
+                        """
+                        DELETE FROM inout_ops_webhook_seen
+                        WHERE connector = %s
+                          AND received_at < NOW() - INTERVAL '1 second' * %s
+                        """,
+                        [connector_cfg.name, ttl_secs],
+                    )
+                    await conn.commit()
+                    deleted = cur.rowcount if cur.rowcount is not None else 0
+                    if deleted:
+                        log.info(
+                            "webhook_dedup_cleanup",
+                            connector=connector_cfg.name,
+                            deleted=deleted,
+                            ttl_secs=ttl_secs,
+                        )
+            except Exception as exc:
+                log.warning(
+                    "webhook_dedup_cleanup_failed",
+                    connector=connector_cfg.name,
+                    error=str(exc),
+                )
+
+
+# ---------------------------------------------------------------------------
 # SIGHUP hot-reload support
 # ---------------------------------------------------------------------------
 
@@ -842,6 +904,12 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             )
             tg.start_soon(_sla_check_loop, pool, connector_configs)
             tg.start_soon(_plugin_reload_loop)
+            if any(
+                cfg.connector.webhooks is not None
+                and cfg.connector.webhooks.event_id_field is not None
+                for cfg in connector_configs
+            ):
+                tg.start_soon(_webhook_dedup_cleanup_loop, pool, connector_configs)
             if config.federation.enabled:
                 tg.start_soon(_federation_loop)
             await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
