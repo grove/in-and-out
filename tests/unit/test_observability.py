@@ -67,3 +67,32 @@ def test_http_errors_labels():
         namespace="public",
     )
     counter.inc()  # should not raise
+
+
+def test_prometheus_generate_latest_contains_all_custom_metric_names():
+    """All custom metrics must appear by name in generate_latest(REGISTRY) output."""
+    from prometheus_client import generate_latest
+    from inandout.observability.metrics import REGISTRY
+
+    output = generate_latest(REGISTRY).decode()
+
+    expected = [
+        "inout_records_processed_total",
+        "inout_sync_lag_seconds",
+        "inout_http_errors_total",
+        "inout_circuit_breaker_state",
+        "inout_dead_letter_depth",
+        "inout_connector_health_score",
+        "inout_sync_sla_violated",
+        "inout_quality_violations_total",
+        "inout_conflicts_detected_total",
+        "inout_intra_sync_duplicates_total",
+        "inout_replication_slot_lag_bytes",
+        "inout_records_resurrected_total",
+        "inout_source_unavailable_total",
+        "inout_pagination_drift_events_total",
+        "inout_federation_routed_total",
+    ]
+
+    missing = [name for name in expected if name not in output]
+    assert not missing, f"Metrics absent from Prometheus /metrics output: {missing}"
