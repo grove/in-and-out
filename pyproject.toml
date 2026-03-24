@@ -19,13 +19,10 @@ dependencies = [
     "pyyaml>=6.0",
     # Expression evaluation
     "jmespath>=1.0",
-    "jsonpath-ng>=1.6",
     # Data processing
     "orjson>=3.10",
     "deepdiff>=8.0",
     # Scheduling
-    # apscheduler 4.x (async-native rewrite) — use croniter fallback if 4.x unavailable
-    "apscheduler>=3.10",
     "croniter>=3.0",
     # Rate limiting
     "aiolimiter>=1.2",
@@ -68,10 +65,6 @@ dev = [
     "mypy>=1.14",
     "ruff>=0.9",
 
-    # YAML round-tripping (for config tooling)
-    "ruamel.yaml>=0.18",
-
-    # pyyaml for existing scripts/fixtures validation
     "pyyaml>=6.0",
 ]
 
@@ -101,7 +94,6 @@ dev = [
     "factory-boy>=3.3",
     "mypy>=1.14",
     "ruff>=0.9",
-    "ruamel.yaml>=0.18",
 ]
 
 # ---------------------------------------------------------------------------
