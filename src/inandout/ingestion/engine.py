@@ -87,6 +87,8 @@ class IngestionEngine:
         self._namespace = namespace
         self._debouncer = None
         self._read_pool = read_pool  # used for read-heavy queries when available
+        # T1 #44: track consecutive skip counts for exponential back-off per connector/datatype
+        self._unavailability_skip_counts: dict[tuple[str, str], int] = {}
 
     def _read_conn_pool(self) -> AsyncConnectionPool:
         """Return the read pool if available, else the primary pool."""
@@ -139,9 +141,20 @@ class IngestionEngine:
                     )).fetchone()
                 if _hc_row and _hc_row[0] == "unhealthy":
                     _unhealthy_since = _hc_row[1]
-                    _cooldown_secs: float = float(
+                    # T1 #44: exponential back-off — doubles each consecutive skip up to ceiling
+                    _base: float = float(
                         getattr(ingestion_cfg, "unavailability_cooldown_secs", 300)
                     )
+                    _mult: float = float(
+                        getattr(ingestion_cfg, "unavailability_backoff_multiplier", 2.0)
+                    )
+                    _ceil: float = float(
+                        getattr(ingestion_cfg, "unavailability_backoff_ceiling_secs", 3600.0)
+                    )
+                    _skip_n = self._unavailability_skip_counts.get(
+                        (connector.name, datatype), 0
+                    )
+                    _cooldown_secs: float = min(_base * (_mult ** _skip_n), _ceil)
                     if _unhealthy_since is not None:
                         _now_utc = _dt_health.datetime.now(_dt_health.timezone.utc)
                         _since = _unhealthy_since
@@ -149,12 +162,17 @@ class IngestionEngine:
                             _since = _since.replace(tzinfo=_dt_health.timezone.utc)
                         _elapsed = (_now_utc - _since).total_seconds()
                         if _elapsed < _cooldown_secs:
+                            # Increment skip counter so next wait is longer
+                            self._unavailability_skip_counts[
+                                (connector.name, datatype)
+                            ] = _skip_n + 1
                             result.status = "skipped"
                             log.warning(
                                 "sync_skipped_connector_unavailable",
                                 unhealthy_since=str(_unhealthy_since),
-                                cooldown_secs=_cooldown_secs,
+                                cooldown_secs=round(_cooldown_secs, 1),
                                 elapsed_secs=round(_elapsed, 1),
+                                skip_n=_skip_n,
                             )
                             return result
             except Exception:
@@ -518,6 +536,8 @@ class IngestionEngine:
                             [connector.name, datatype],
                         )
                         await _hc_ok_conn.commit()
+                    # Reset exponential back-off skip counter on recovery
+                    self._unavailability_skip_counts.pop((connector.name, datatype), None)
                     # Reset circuit breaker on successful sync
                     try:
                         from inandout.transport.circuit_breaker import get_circuit_breaker
@@ -1164,10 +1184,14 @@ class IngestionEngine:
                                 cdc_cursor = candidate
 
                         # 6. CDC delete events → tombstone, not upsert
+                        # T1 #32: set data/raw to empty JSONB so the row becomes an observable
+                        # "empty payload" tombstone for downstream CDC consumers.
                         cdc_op = record.get("_cdc_op", "")
                         if cdc_op == "DELETE":
                             await conn.execute(
-                                f"UPDATE {table} SET _deleted_at = NOW() "
+                                f"UPDATE {table} "
+                                f"SET _deleted_at = NOW(), _deleted = TRUE, "
+                                f"    data = '{{}}', raw = '{{}}' "
                                 f"WHERE external_id = %s AND _deleted_at IS NULL",
                                 [external_id],
                             )
@@ -1350,8 +1374,12 @@ class IngestionEngine:
 
             async with conn.transaction():
                 for ext_id in confirmed_missing:
+                    # T1 #32: null out data/raw to create an explicit empty-payload tombstone
                     await conn.execute(
-                        f"UPDATE {table} SET _deleted_at = NOW() WHERE external_id = %s AND _deleted_at IS NULL",
+                        f"UPDATE {table} "
+                        f"SET _deleted_at = NOW(), _deleted = TRUE, "
+                        f"    data = '{{}}', raw = '{{}}' "
+                        f"WHERE external_id = %s AND _deleted_at IS NULL",
                         [ext_id],
                     )
             result.records_deleted = len(confirmed_missing)

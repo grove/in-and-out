@@ -169,3 +169,7 @@ class IngestionConfig(BaseModel):
     bulk_upsert_batch_size: int = 1  # 1 = single-record path; >1 = bulk batch path
     verify_deletion: bool = True  # confirm each tombstone via detail_path GET before marking deleted
     checkpoint_every_n_pages: int = 0  # 0 = disabled; >0 = save checkpoint every N pages
+    # T1 #44: exponential back-off for source unavailability
+    unavailability_cooldown_secs: float = 300.0        # base back-off window (seconds)
+    unavailability_backoff_multiplier: float = 2.0     # cooldown doubles on each consecutive skip
+    unavailability_backoff_ceiling_secs: float = 3600.0  # max back-off cap (1 hour)

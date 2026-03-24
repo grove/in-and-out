@@ -396,6 +396,9 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                             )
                         else:
                             dtype_max_writes = getattr(dtype_cfg, "max_concurrent_writes", None)
+                            # T2 #35: use per-datatype poll_interval when configured
+                            _dtype_interval = getattr(dtype_cfg.writeback, "poll_interval", None)
+                            _loop_interval = float(_dtype_interval) if _dtype_interval else default_interval_secs
                             tg.start_soon(
                                 _writeback_polling_loop,
                                 engine,
@@ -403,7 +406,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                                 dtype_name,
                                 dtype_cfg.writeback,
                                 delta_table,
-                                default_interval_secs,
+                                _loop_interval,
                                 dtype_max_writes,
                             )
     finally:

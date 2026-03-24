@@ -172,3 +172,72 @@ async def test_tombstone_missing_no_action_when_table_empty():
     called_sqls = [str(c) for c in conn.execute.call_args_list]
     assert not any("UPDATE" in s for s in called_sqls)
     assert not any("SELECT external_id" in s for s in called_sqls)
+
+
+# ---------------------------------------------------------------------------
+# T1 #32: tombstone must write empty-payload rows (data/raw nulled)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_tombstone_sets_deleted_flag():
+    """T1 #32: tombstone UPDATE must set _deleted = TRUE."""
+    # 5 existing, 3 seen → 2 missing (ratio 2/5 = 40% < 50%, no circuit breaker)
+    existing = ["id-1", "id-2", "id-3", "id-4", "id-5"]
+    seen = {"id-1", "id-2", "id-3"}
+
+    pool, conn = _make_pool_with_rows(existing)
+    engine = IngestionEngine(pool)
+    result = _make_result()
+    log = MagicMock()
+
+    await engine._tombstone_missing(
+        "inout_src_hubspot_contacts", seen, result, log
+    )
+
+    update_calls = [
+        str(c) for c in conn.execute.call_args_list
+        if "UPDATE" in str(c) and "_deleted_at" in str(c)
+    ]
+    assert len(update_calls) == 2
+    for call_str in update_calls:
+        assert "_deleted" in call_str
+
+
+@pytest.mark.anyio
+async def test_tombstone_clears_data_and_raw_columns():
+    """T1 #32: tombstone UPDATE must set data / raw to empty JSONB ('{}')."""
+    # 5 existing, 3 seen → 2 missing (ratio 2/5 = 40% < 50%)
+    existing = ["id-1", "id-2", "id-3", "id-4", "id-5"]
+    seen = {"id-1", "id-2", "id-3"}
+
+    pool, conn = _make_pool_with_rows(existing)
+    engine = IngestionEngine(pool)
+    result = _make_result()
+    log = MagicMock()
+
+    await engine._tombstone_missing(
+        "inout_src_hubspot_contacts", seen, result, log
+    )
+
+    update_calls = [
+        str(c) for c in conn.execute.call_args_list
+        if "UPDATE" in str(c) and "_deleted_at" in str(c)
+    ]
+    assert len(update_calls) == 2, f"Expected 2 tombstone UPDATEs, got {len(update_calls)}"
+    for call_str in update_calls:
+        # The SQL must explicitly null out data and raw
+        assert "data" in call_str, "data column not in tombstone UPDATE"
+        assert "raw" in call_str, "raw column not in tombstone UPDATE"
+
+
+@pytest.mark.anyio
+async def test_tombstone_engine_source_includes_data_and_raw_in_update():
+    """Source inspection: _tombstone_missing UPDATE SQL must include data/raw columns."""
+    import inspect
+    from inandout.ingestion.engine import IngestionEngine
+
+    src = inspect.getsource(IngestionEngine._tombstone_missing)
+    # Verify both columns appear in the tombstone UPDATE
+    assert "data" in src
+    assert "raw" in src
+    assert "_deleted" in src

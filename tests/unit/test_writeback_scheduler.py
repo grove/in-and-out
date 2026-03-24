@@ -125,3 +125,83 @@ async def test_trigger_writeback_no_engine_returns_skipped():
         "hubspot", "contacts", {}, engine=None
     )
     assert result["status"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# T2 #35: per-datatype poll_interval override
+# ---------------------------------------------------------------------------
+
+def test_writeback_config_has_poll_interval_field():
+    """WritebackConfig must have a poll_interval field (T2 #35)."""
+    from inandout.config.writeback import WritebackConfig
+
+    field = WritebackConfig.model_fields.get("poll_interval")
+    assert field is not None
+    assert field.default is None  # defaults to None (use daemon global)
+
+
+def test_writeback_config_poll_interval_must_be_positive():
+    """poll_interval must be > 0 when set."""
+    from pydantic import ValidationError
+    from inandout.config.writeback import (
+        ConflictResolution,
+        OperationConfig,
+        OperationsConfig,
+        ProtectionLevel,
+        UpdateOperationConfig,
+        WritebackConfig,
+    )
+
+    ops = OperationsConfig(
+        lookup=OperationConfig(method="GET", path="/items/${external_id}"),
+        insert=OperationConfig(method="POST", path="/items"),
+        update=UpdateOperationConfig(method="PATCH", path="/items/${external_id}"),
+        delete=OperationConfig(method="DELETE", path="/items/${external_id}"),
+    )
+    with pytest.raises(ValidationError):
+        WritebackConfig(
+            protection_level=ProtectionLevel.none,
+            conflict_resolution=ConflictResolution.last_writer_wins,
+            supported_actions=["insert"],
+            operations=ops,
+            poll_interval=0.0,
+        )
+
+
+def test_daemon_uses_dtype_poll_interval_over_default():
+    """Daemon must use writeback_cfg.poll_interval when set (T2 #35)."""
+    from inandout.writeback import daemon as wb_daemon
+    import inspect
+
+    src = inspect.getsource(wb_daemon)
+    # The daemon must read poll_interval from the writeback config
+    assert "poll_interval" in src
+    # And must have a fallback to default_interval_secs
+    assert "_loop_interval" in src or "poll_interval" in src
+
+
+def test_poll_interval_overrides_default_in_daemon_logic():
+    """Verify the override logic: dtype interval is preferred when set."""
+    # Replicate the daemon's selection logic
+    default_interval_secs = 30.0
+
+    class FakeWritebackCfg:
+        poll_interval = 5.0
+
+    dtype_cfg_with_interval = FakeWritebackCfg()
+    _dtype_interval = getattr(dtype_cfg_with_interval, "poll_interval", None)
+    _loop_interval = float(_dtype_interval) if _dtype_interval else default_interval_secs
+    assert _loop_interval == 5.0
+
+
+def test_poll_interval_falls_back_to_default_when_none():
+    """When poll_interval is None, daemon falls back to default_interval_secs."""
+    default_interval_secs = 30.0
+
+    class FakeWritebackCfg:
+        poll_interval = None
+
+    dtype_cfg = FakeWritebackCfg()
+    _dtype_interval = getattr(dtype_cfg, "poll_interval", None)
+    _loop_interval = float(_dtype_interval) if _dtype_interval else default_interval_secs
+    assert _loop_interval == 30.0

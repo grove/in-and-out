@@ -115,6 +115,8 @@ class WritebackConfig(BaseModel):
     # T2 #33: write batch composition — close batch when any threshold is reached first
     batch_max_bytes: int | None = Field(default=None, ge=1)   # max uncompressed payload bytes per batch
     batch_max_age_secs: float | None = Field(default=None, ge=0.0)  # max age of oldest row in forming batch
+    # T2 #35: per-datatype polling interval override (seconds); falls back to daemon default when None
+    poll_interval: float | None = Field(default=None, gt=0.0)
     # T2 #35: payload required-fields guard — route to dead-letter when any field is absent
     required_fields: list[str] = []
     # T2 #24: dead-letter queue — move permanently failed rows after this many failures
