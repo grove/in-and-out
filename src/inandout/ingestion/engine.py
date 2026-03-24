@@ -105,6 +105,10 @@ class IngestionEngine:
             span.set_attribute("connector", connector.name)
             span.set_attribute("datatype", datatype)
 
+            # Resolve dtype_cfg from the connector if not supplied explicitly.
+            if dtype_cfg is None:
+                dtype_cfg = connector.datatypes.get(datatype)
+
             run_id = uuid.uuid4()
             log = logger.bind(connector=connector.name, datatype=datatype, run_id=str(run_id))
 
@@ -855,6 +859,13 @@ class IngestionEngine:
                                     dtype_cfg.field_mappings,
                                     strict=dtype_cfg.strict_field_mapping,
                                 )
+                            # T1 #45: Timestamp normalisation (if configured)
+                            if dtype_cfg is not None and getattr(dtype_cfg, "timestamp_fields", None):
+                                try:
+                                    from inandout.ingestion.timestamp_normalizer import apply_timestamp_normalization
+                                    record = apply_timestamp_normalization(record, dtype_cfg.timestamp_fields)
+                                except Exception:
+                                    pass
                             # Data quality validation
                             if dtype_cfg is not None and dtype_cfg.quality_rules is not None:
                                 violations = validate_record(record, dtype_cfg.quality_rules, quality_seen)
