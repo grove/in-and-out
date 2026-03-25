@@ -33,15 +33,21 @@ class CircuitBreaker:
         datatype: str,
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,
+        backoff_multiplier: float = 2.0,
+        max_recovery_timeout: float = 3600.0,
     ) -> None:
         self.connector = connector
         self.datatype = datatype
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
+        self.backoff_multiplier = backoff_multiplier  # Exponential backoff on repeated opens
+        self.max_recovery_timeout = max_recovery_timeout  # Cap backoff at 1 hour
 
         self._state = CircuitState.closed
         self._consecutive_failures = 0
         self._opened_at: float | None = None
+        self._current_recovery_timeout = recovery_timeout  # Current timeout (grows with backoff)
+        self._open_count = 0  # Number of times opened (for backoff calculation)
 
         self._log = logger.bind(connector=connector, datatype=datatype)
 
@@ -71,16 +77,20 @@ class CircuitBreaker:
             self._log.info("circuit_breaker_closed", previous=self._state)
             self._state = CircuitState.closed
             self._opened_at = None
+            # Reset backoff on successful recovery
+            self._current_recovery_timeout = self.recovery_timeout
+            self._open_count = 0
             self._emit_metric()
 
     def record_failure(self) -> None:
         """Record a failed request; may trip CLOSED → OPEN or keep OPEN."""
         self._consecutive_failures += 1
         if self._state == CircuitState.half_open:
-            self._trip_open()
+            # Half-open probe failed → re-open with exponential backoff
+            self._trip_open(apply_backoff=True)
         elif self._state == CircuitState.closed:
             if self._consecutive_failures >= self.failure_threshold:
-                self._trip_open()
+                self._trip_open(apply_backoff=False)
 
     def reset(self) -> None:
         """Force the circuit breaker back to CLOSED state (used by control commands)."""
@@ -88,6 +98,8 @@ class CircuitBreaker:
         self._state = CircuitState.closed
         self._consecutive_failures = 0
         self._opened_at = None
+        self._current_recovery_timeout = self.recovery_timeout
+        self._open_count = 0
         self._log.info("circuit_breaker_reset", previous=previous)
         self._emit_metric()
 
@@ -95,13 +107,24 @@ class CircuitBreaker:
     # Internals
     # ------------------------------------------------------------------
 
-    def _trip_open(self) -> None:
+    def _trip_open(self, apply_backoff: bool = False) -> None:
         self._state = CircuitState.open
         self._opened_at = time.monotonic()
+        self._open_count += 1
+        
+        # Apply exponential backoff if reopening from half_open
+        if apply_backoff and self._open_count > 1:
+            self._current_recovery_timeout = min(
+                self._current_recovery_timeout * self.backoff_multiplier,
+                self.max_recovery_timeout,
+            )
+        
         self._log.warning(
             "circuit_breaker_opened",
             failures=self._consecutive_failures,
-            recovery_timeout=self.recovery_timeout,
+            recovery_timeout=self._current_recovery_timeout,
+            open_count=self._open_count,
+            backoff_applied=apply_backoff,
         )
         self._emit_metric()
 
@@ -109,10 +132,14 @@ class CircuitBreaker:
         if (
             self._state == CircuitState.open
             and self._opened_at is not None
-            and time.monotonic() - self._opened_at >= self.recovery_timeout
+            and time.monotonic() - self._opened_at >= self._current_recovery_timeout
         ):
             self._state = CircuitState.half_open
-            self._log.info("circuit_breaker_half_open")
+            self._log.info(
+                "circuit_breaker_half_open",
+                recovery_timeout=self._current_recovery_timeout,
+                open_count=self._open_count,
+            )
             self._emit_metric()
 
     def _emit_metric(self) -> None:
@@ -137,12 +164,15 @@ def get_circuit_breaker(
     datatype: str,
     failure_threshold: int = 5,
     recovery_timeout: float = 60.0,
+    backoff_multiplier: float = 2.0,
+    max_recovery_timeout: float = 3600.0,
 ) -> CircuitBreaker:
     """Return (creating if needed) the circuit breaker for a connector/datatype pair."""
     key = (connector, datatype)
     if key not in _registry:
         _registry[key] = CircuitBreaker(
-            connector, datatype, failure_threshold, recovery_timeout
+            connector, datatype, failure_threshold, recovery_timeout,
+            backoff_multiplier, max_recovery_timeout
         )
     return _registry[key]
 

@@ -274,6 +274,13 @@ class HttpTransportAdapter:
         snapshot_param: str | None = None,
         snapshot_value: str | None = None,
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
+        # Check for streaming mode
+        streaming = getattr(list_config, "streaming", False)
+        if streaming:
+            async for page in self._fetch_streaming_pages(list_config, watermark):
+                yield page
+            return
+        
         # GraphQL mode: detect by presence of graphql_query
         graphql_query = getattr(list_config, "graphql_query", None)
         if graphql_query is not None:
@@ -485,6 +492,101 @@ class HttpTransportAdapter:
                 if next_val is None:
                     break
                 last_value = str(next_val)
+
+    async def _fetch_streaming_pages(
+        self,
+        list_config: ListConfig,
+        watermark: str | None = None,
+    ) -> AsyncGenerator[list[dict[str, Any]], None]:
+        """
+        Fetch streaming responses (NDJSON, SSE, chunked JSON arrays).
+        
+        Supports:
+        - NDJSON: newline-delimited JSON objects
+        - SSE: Server-Sent Events with data: lines
+        - json_array: streaming JSON array with incremental parsing
+        """
+        import orjson
+        
+        streaming_format = getattr(list_config, "streaming_format", "ndjson")
+        method = list_config.method.upper()
+        path = list_config.path
+        
+        # Build params (for incremental watermark if configured)
+        params: dict[str, str] = {}
+        incremental = list_config.incremental
+        if incremental and incremental.enabled and watermark and incremental.request_filter:
+            rf = incremental.request_filter
+            if rf.mode == "query_param":
+                extra = rf.model_extra or {}
+                param_name = str(extra.get("param", "since"))
+                param_value = _substitute(str(extra.get("value", "${watermark}")), watermark)
+                params[param_name] = param_value
+        
+        # Make streaming request
+        async with self._client.stream(method, path, params=params) as response:
+            response.raise_for_status()
+            
+            if streaming_format == "ndjson":
+                # NDJSON: each line is a complete JSON object
+                buffer = b""
+                async for chunk in response.aiter_bytes():
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        line = line.strip()
+                        if line:
+                            try:
+                                record = orjson.loads(line)
+                                yield [record]  # Yield one record at a time
+                            except Exception:
+                                pass  # Skip malformed lines
+                
+                # Process remaining buffer
+                if buffer.strip():
+                    try:
+                        record = orjson.loads(buffer)
+                        yield [record]
+                    except Exception:
+                        pass
+            
+            elif streaming_format == "sse":
+                # Server-Sent Events: data: lines
+                buffer = b""
+                async for chunk in response.aiter_bytes():
+                    buffer += chunk
+                    while b"\n\n" in buffer:  # SSE event delimiter
+                        event, buffer = buffer.split(b"\n\n", 1)
+                        for line in event.split(b"\n"):
+                            if line.startswith(b"data: "):
+                                data = line[6:].strip()
+                                if data:
+                                    try:
+                                        record = orjson.loads(data)
+                                        yield [record]
+                                    except Exception:
+                                        pass
+            
+            elif streaming_format == "json_array":
+                # Streaming JSON array - accumulate and yield in batches
+                # This is a simplified implementation; full streaming JSON parsing
+                # would need ijson or similar
+                content = b""
+                async for chunk in response.aiter_bytes():
+                    content += chunk
+                
+                # Parse the complete array
+                try:
+                    records = orjson.loads(content)
+                    if isinstance(records, list):
+                        # Yield in batches of 100
+                        batch_size = 100
+                        for i in range(0, len(records), batch_size):
+                            yield records[i:i+batch_size]
+                    else:
+                        yield [records]
+                except Exception:
+                    pass
 
     async def _fetch_graphql_pages(
         self,

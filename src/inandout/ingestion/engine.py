@@ -1068,6 +1068,14 @@ class IngestionEngine:
                 result.status = "aborted"
                 return  # Do NOT proceed with deletion detection
 
+        # T1 #38: Reconciliation pass (optional) — re-query a sample of records
+        # to detect changes that occurred during the pagination process.
+        reconciliation_pass = getattr(list_cfg, "reconciliation_pass", False)
+        if reconciliation_pass and watermark is None and seen_ids:
+            await self._reconciliation_pass(
+                connector, datatype, ingestion_cfg, table, seen_ids, log, result
+            )
+
         # Full-sync deletion detection: tombstone records not seen in this run.
         # Guarded by a circuit breaker: skip if deletion would affect > 50% of existing
         # records (signals a partial or failed fetch rather than genuine deletions).
@@ -1435,6 +1443,111 @@ class IngestionEngine:
             )
         except Exception as exc:
             log.warning("schema_migration_check_failed", error=str(exc))
+
+    async def _reconciliation_pass(
+        self,
+        connector: Any,
+        datatype: str,
+        ingestion_cfg: Any,
+        table: str,
+        seen_ids: set[str],
+        log: Any,
+        result: Any,
+    ) -> None:
+        """
+        T1 #38: Reconciliation pass after full-sync pagination.
+        
+        Re-queries a sample of records to detect if they changed during the multi-page fetch.
+        This helps detect pagination drift and concurrent modifications.
+        
+        Strategy: Sample up to 100 records, re-fetch them individually, compare hashes.
+        """
+        import random
+        
+        sample_size = min(100, len(seen_ids))
+        if sample_size == 0:
+            return
+        
+        sample_ids = random.sample(list(seen_ids), sample_size)
+        
+        log.info(
+            "reconciliation_pass_starting",
+            sample_size=sample_size,
+            total_records=len(seen_ids),
+        )
+        
+        detail_path = getattr(ingestion_cfg.list, "detail_path", None)
+        if not detail_path:
+            log.info("reconciliation_pass_skipped_no_detail_path")
+            return
+        
+        changed_count = 0
+        error_count = 0
+        
+        # Re-fetch sample records
+        transport = HttpTransportAdapter(connector)
+        async with transport:
+            async with self._pool.connection() as conn:
+                for external_id in sample_ids:
+                    try:
+                        # Interpolate detail path
+                        url = detail_path.replace("${external_id}", str(external_id))
+                        url = url.replace("${id}", str(external_id))
+                        
+                        # Fetch current version
+                        resp = await transport._request("GET", url)
+                        if resp.status_code != 200:
+                            error_count += 1
+                            continue
+                        
+                        import orjson
+                        current_data = orjson.loads(resp.content)
+                        
+                        # Compute hash of current data
+                        import hashlib
+                        current_hash = hashlib.sha256(
+                            orjson.dumps(current_data, option=orjson.OPT_SORT_KEYS)
+                        ).hexdigest()
+                        
+                        # Compare with stored hash
+                        row = await conn.execute(
+                            f"SELECT _raw_hash FROM {table} WHERE external_id = %s",
+                            [external_id],
+                        )
+                        stored = await row.fetchone()
+                        if stored and stored[0] != current_hash:
+                            changed_count += 1
+                            log.info(
+                                "reconciliation_drift_detected",
+                                external_id=external_id,
+                                stored_hash=stored[0][:16],
+                                current_hash=current_hash[:16],
+                            )
+                    except Exception as exc:
+                        error_count += 1
+                        log.warning(
+                            "reconciliation_sample_failed",
+                            external_id=external_id,
+                            error=str(exc),
+                        )
+        
+        drift_pct = (changed_count / sample_size * 100) if sample_size > 0 else 0
+        
+        log.info(
+            "reconciliation_pass_complete",
+            sample_size=sample_size,
+            changed=changed_count,
+            errors=error_count,
+            drift_pct=drift_pct,
+        )
+        
+        # If >10% of sample changed, warn (data is changing rapidly during sync)
+        if drift_pct > 10:
+            log.warning(
+                "reconciliation_high_drift",
+                drift_pct=drift_pct,
+                recommendation="Consider snapshot_param or shorter sync windows",
+            )
 
     async def _tombstone_missing(
         self,

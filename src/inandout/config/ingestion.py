@@ -134,6 +134,9 @@ class ListConfig(BaseModel):
     snapshot_param: str | None = None    # query param for server-side snapshot (e.g., "snapshot_id")
     snapshot_response_path: str | None = None  # dot-notation path to snapshot ID in first page response
     reconciliation_pass: bool = False    # after full page fetch, re-query changed records
+    # Streaming response support
+    streaming: bool = False  # if True, parse response as streaming (SSE, NDJSON, chunked)
+    streaming_format: Literal["ndjson", "sse", "json_array"] = "ndjson"  # format of streaming data
     # A5: bulk export support
     bulk_export: BulkExportConfig | None = None
 
