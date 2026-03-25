@@ -36,6 +36,7 @@ jobs:
           path: docs-build
 
   deploy:
+    if: ${{ !github.event.repository.private }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -45,3 +46,14 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  pages-not-supported:
+    if: ${{ github.event.repository.private }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Explain why deploy was skipped
+        run: |
+          echo "GitHub Pages deployment skipped."
+          echo "This repository is private, and the current GitHub plan does not support Pages for it."
+          echo "Options: make the repo public, upgrade plan, or publish docs elsewhere."
