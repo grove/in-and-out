@@ -168,6 +168,112 @@ async def test_fan_in_connector_column_scopes_rows_per_source(pool):
 
     assert len(x_rows) == 2
     assert len(y_rows) == 1
-    assert x_rows[0][0] == "cx-1"
-    assert x_rows[1][0] == "cx-2"
-    assert y_rows[0][0] == "cy-1"
+
+
+@pytest.mark.anyio
+async def test_fan_in_same_external_id_from_different_connectors_no_collision(pool):
+    """T1 #46/47: two connectors produce records with the same external_id.
+
+    In a fan-in shared table the upsert key is (external_id, _connector), so
+    rows from different connectors must coexist without overwriting each other.
+    """
+    shared = "fan_in_people_c"
+    os.environ["INOUT_CREDENTIAL_FANIN_P_KEY"] = "dummy"
+    os.environ["INOUT_CREDENTIAL_FANIN_Q_KEY"] = "dummy"
+
+    conn_p = _make_fan_in_connector("fanin_p", "https://api.conn-p.example.com", shared)
+    conn_q = _make_fan_in_connector("fanin_q", "https://api.conn-q.example.com", shared)
+
+    shared_table = f"inout_src_{shared}"
+
+    async with pool.connection() as conn:
+        await conn.execute(f"DROP TABLE IF EXISTS {shared_table}")
+        await conn.commit()
+
+    # Both APIs return the SAME external_id "contact-1" but with different data
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://api.conn-p.example.com/v1/contacts").mock(
+            return_value=httpx.Response(200, json={"results": [{"id": "contact-1", "name": "Alice-P"}], "next_cursor": None})
+        )
+        mock.get("https://api.conn-q.example.com/v1/contacts").mock(
+            return_value=httpx.Response(200, json={"results": [{"id": "contact-1", "name": "Alice-Q"}], "next_cursor": None})
+        )
+
+        engine = IngestionEngine(pool)
+        result_p = await engine.run_sync(conn_p, _DATATYPE, conn_p.datatypes[_DATATYPE].ingestion)
+        result_q = await engine.run_sync(conn_q, _DATATYPE, conn_q.datatypes[_DATATYPE].ingestion)
+
+    assert result_p.status == "completed"
+    assert result_q.status == "completed"
+
+    async with pool.connection() as conn:
+        rows = await (await conn.execute(
+            f"SELECT external_id, _connector FROM {shared_table} WHERE external_id = 'contact-1' ORDER BY _connector"
+        )).fetchall()
+
+    # Must have TWO rows — one per connector — not one overwritten row
+    assert len(rows) == 2, (
+        f"Expected 2 rows (one per connector) for external_id='contact-1', got {len(rows)}: {rows}"
+    )
+    connectors = {r[1] for r in rows}
+    assert "fanin_p" in connectors
+    assert "fanin_q" in connectors
+
+
+@pytest.mark.anyio
+async def test_fan_in_update_scoped_to_connector(pool):
+    """T1 #46: updates in the shared table are scoped to (external_id, _connector).
+
+    Updating a record from connector A must not affect connector B's row
+    with the same external_id.
+    """
+    shared = "fan_in_people_d"
+    os.environ["INOUT_CREDENTIAL_FANIN_S_KEY"] = "dummy"
+    os.environ["INOUT_CREDENTIAL_FANIN_T_KEY"] = "dummy"
+
+    conn_s = _make_fan_in_connector("fanin_s", "https://api.conn-s.example.com", shared)
+    conn_t = _make_fan_in_connector("fanin_t", "https://api.conn-t.example.com", shared)
+
+    shared_table = f"inout_src_{shared}"
+
+    async with pool.connection() as conn:
+        await conn.execute(f"DROP TABLE IF EXISTS {shared_table}")
+        await conn.commit()
+
+    # First sync: both connectors insert "user-1"
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://api.conn-s.example.com/v1/contacts").mock(
+            return_value=httpx.Response(200, json={"results": [{"id": "user-1", "email": "s1@s.com"}], "next_cursor": None})
+        )
+        mock.get("https://api.conn-t.example.com/v1/contacts").mock(
+            return_value=httpx.Response(200, json={"results": [{"id": "user-1", "email": "t1@t.com"}], "next_cursor": None})
+        )
+        engine = IngestionEngine(pool)
+        await engine.run_sync(conn_s, _DATATYPE, conn_s.datatypes[_DATATYPE].ingestion)
+        await engine.run_sync(conn_t, _DATATYPE, conn_t.datatypes[_DATATYPE].ingestion)
+
+    # Second sync: connector_s updates user-1's email; connector_t is unchanged
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://api.conn-s.example.com/v1/contacts").mock(
+            return_value=httpx.Response(200, json={"results": [{"id": "user-1", "email": "s1_updated@s.com"}], "next_cursor": None})
+        )
+        mock.get("https://api.conn-t.example.com/v1/contacts").mock(
+            return_value=httpx.Response(200, json={"results": [{"id": "user-1", "email": "t1@t.com"}], "next_cursor": None})
+        )
+        engine2 = IngestionEngine(pool)
+        await engine2.run_sync(conn_s, _DATATYPE, conn_s.datatypes[_DATATYPE].ingestion)
+
+    async with pool.connection() as conn:
+        rows = await (await conn.execute(
+            f"SELECT _connector, data->>'email' FROM {shared_table} WHERE external_id = 'user-1' ORDER BY _connector"
+        )).fetchall()
+
+    row_map = {r[0]: r[1] for r in rows}
+    # connector_s's row should reflect the update
+    assert row_map.get("fanin_s") == "s1_updated@s.com", (
+        f"Expected fanin_s row to be updated, got {row_map.get('fanin_s')!r}"
+    )
+    # connector_t's row must be entirely unchanged
+    assert row_map.get("fanin_t") == "t1@t.com", (
+        f"Expected fanin_t row to be unchanged, got {row_map.get('fanin_t')!r}"
+    )

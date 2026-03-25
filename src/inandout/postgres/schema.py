@@ -137,8 +137,35 @@ async def ensure_source_table(
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
             f"_connector TEXT NOT NULL DEFAULT '{connector}'"
         )
-        # Change the primary key to (external_id, _connector) if possible
-        # We do this by creating a unique index if it doesn't exist yet
+        # Migrate primary key from (external_id) to (external_id, _connector) so
+        # two connectors can have rows with the same external_id without collision.
+        # This is idempotent: if the composite PK already exists, the DO block exits.
+        bare_table = table.split(".")[-1]
+        await conn.execute(
+            f"""
+            DO $migrate_pk$
+            DECLARE
+                _pk_cols TEXT;
+            BEGIN
+                SELECT string_agg(a.attname, ',' ORDER BY array_position(c.conkey, a.attnum))
+                INTO _pk_cols
+                FROM pg_constraint c
+                JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+                WHERE c.conrelid = quote_ident('{bare_table}')::regclass
+                  AND c.contype = 'p';
+
+                -- Only migrate when PK is currently just (external_id)
+                IF _pk_cols = 'external_id' THEN
+                    EXECUTE 'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {bare_table}_pkey';
+                    ALTER TABLE {table} ADD PRIMARY KEY (external_id, _connector);
+                END IF;
+            EXCEPTION
+                WHEN others THEN NULL;  -- Non-critical; unique index provides the guard
+            END $migrate_pk$;
+            """
+        )
+        # Also ensure a unique index exists as a fallback guard (covers tables where
+        # the PK migration was skipped due to the EXCEPTION handler above)
         idx_name = f"{table.replace('.', '_')}_fanin_pk_idx"
         await conn.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} "
