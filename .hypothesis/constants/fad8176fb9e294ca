@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/event_buffer.py
+# hypothesis_version: 6.151.9
+
+[0.0, 30.0, 100, 'max_buffer_age_secs']

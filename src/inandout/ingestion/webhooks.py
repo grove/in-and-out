@@ -225,7 +225,68 @@ async def handle_webhook(
         if oo_cfg is not None:
             from inandout.config.ingestion import OutOfOrderStrategy
             strategy = oo_cfg.strategy
-            if strategy != OutOfOrderStrategy.ignore:
+            
+            # T1 #35: buffer_and_reorder strategy
+            if strategy == OutOfOrderStrategy.buffer_and_reorder:
+                seq_field = oo_cfg.sequence_field
+                if seq_field:
+                    payload_seq = payload.get(seq_field)
+                    if payload_seq is not None:
+                        ext_id_for_oo = _extract_external_id(payload, ingestion_cfg.primary_key)
+                        if ext_id_for_oo is not None:
+                            try:
+                                from inandout.ingestion.event_buffer import get_event_buffer
+                                
+                                buffer = get_event_buffer(
+                                    timeout_secs=oo_cfg.buffer_timeout_secs,
+                                    max_size=oo_cfg.buffer_size,
+                                )
+                                
+                                # Convert sequence to int
+                                try:
+                                    seq_int = int(payload_seq)
+                                except (ValueError, TypeError):
+                                    # Non-numeric sequence - fall through to normal processing
+                                    seq_int = None
+                                
+                                if seq_int is not None:
+                                    # Buffer the event and get any ready events
+                                    ready_payloads = buffer.buffer_event(
+                                        connector.name,
+                                        datatype,
+                                        ext_id_for_oo,
+                                        seq_int,
+                                        payload,
+                                    )
+                                    
+                                    if not ready_payloads:
+                                        # Event buffered, waiting for missing sequences
+                                        log.debug(
+                                            "webhook_event_buffered",
+                                            external_id=ext_id_for_oo,
+                                            sequence=seq_int,
+                                        )
+                                        return JSONResponse({"status": "buffered"}, status_code=202)
+                                    
+                                    # Process all ready payloads in sequence order
+                                    for ready_payload in ready_payloads:
+                                        await engine.ingest_record(
+                                            connector,
+                                            datatype,
+                                            ready_payload,
+                                            source="webhook",
+                                            ingestion_cfg=ingestion_cfg,
+                                        )
+                                    
+                                    return JSONResponse(
+                                        {"status": "ok", "processed": len(ready_payloads)},
+                                        status_code=200,
+                                    )
+                            except Exception as buffer_exc:
+                                log.warning("event_buffer_error", error=str(buffer_exc))
+                                # Fall through to normal processing on error
+            
+            elif strategy != OutOfOrderStrategy.ignore:
                 ts_field = oo_cfg.timestamp_field if strategy == OutOfOrderStrategy.accept_latest_timestamp else oo_cfg.sequence_field
                 if ts_field:
                     payload_ts = payload.get(ts_field)

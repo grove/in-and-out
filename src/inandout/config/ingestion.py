@@ -16,6 +16,7 @@ from inandout.config.pagination import PaginationConfig
 class OutOfOrderStrategy(StrEnum):
     accept_latest_timestamp = "accept_latest_timestamp"
     accept_highest_sequence = "accept_highest_sequence"
+    buffer_and_reorder = "buffer_and_reorder"  # T1 #35: buffer events and wait for missing
     ignore = "ignore"
 
 
@@ -25,6 +26,8 @@ class OutOfOrderConfig(BaseModel):
     strategy: OutOfOrderStrategy = OutOfOrderStrategy.accept_latest_timestamp
     timestamp_field: str = "updated_at"   # field in payload to compare
     sequence_field: str | None = None     # field for sequence number comparison
+    buffer_timeout_secs: float = 30.0     # max time to wait for missing events (buffer_and_reorder only)
+    buffer_size: int = 100                # max events to buffer per external_id (buffer_and_reorder only)
 
 class HistoryMode(StrEnum):
     overwrite = "overwrite"

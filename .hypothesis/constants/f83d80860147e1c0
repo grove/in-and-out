@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/webhooks.py
+# hypothesis_version: 6.151.9
+
+[200, 202, 300, 400, 401, 422, 500, ',', '=', 'WebhookConfig', '__direct__', 'buffered', 'direct_upsert', 'discarded', 'duplicate', 'error', 'event_buffer_error', 'failed', 'fetch failed', 'full', 'id', 'inserted', 'invalid JSON', 'invalid signature', 'lookup failed', 'notification', 'ok', 'out_of_order', 'payload_type', 'processed', 'sha1=', 'sha256=', 'single_record_fetch', 'stale_discarded', 'status', 'sync_status', 'sync_triggered', 't', 'triggered', 'unmatched event type', 'updated', 'upsert failed', 'v1', 'v1=', 'webhook', 'webhook_events', 'webhook_invalid_json', 'webhook_upserted']
