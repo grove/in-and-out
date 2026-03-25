@@ -6,6 +6,7 @@ Supported commands:
   pause_connector      — add (connector, datatype) to the in-process pause set
   resume_connector     — remove (connector, datatype) from the pause set
   requeue_dead_letter  — re-dispatch rows from the dead-letter table (max 3 retries per row)
+  rotate-credential    — invalidate cached auth tokens for a credential_ref
 """
 from __future__ import annotations
 
@@ -135,6 +136,8 @@ class ControlDispatcher:
             return await self._cmd_validate_writeback(connector, datatype, payload, engine)
         elif command == "drain":
             return self._cmd_drain(connector)
+        elif command == "rotate-credential":
+            return self._cmd_rotate_credential(connector, payload)
         else:
             raise ValueError(f"Unknown command: {command!r}")
 
@@ -150,6 +153,34 @@ class ControlDispatcher:
         scope = connector or "all"
         logger.info("drain_initiated", scope=scope)
         return {"draining": scope}
+
+    def _cmd_rotate_credential(
+        self, connector: str | None, payload: dict
+    ) -> dict:
+        """Invalidate cached auth tokens for a credential, forcing re-acquisition.
+
+        Payload keys:
+          credential_ref (required) — the credential whose cached tokens to clear.
+        """
+        credential_ref: str | None = payload.get("credential_ref")
+        if not credential_ref:
+            raise ValueError(
+                "rotate-credential requires 'credential_ref' in payload"
+            )
+
+        from inandout.transport.auth import invalidate_credential_cache
+
+        invalidated = invalidate_credential_cache(credential_ref)
+        logger.info(
+            "credential_rotated",
+            connector=connector,
+            credential_ref=credential_ref,
+            invalidated=invalidated,
+        )
+        return {
+            "rotated": credential_ref,
+            "cache_entries_invalidated": invalidated,
+        }
 
     async def _cmd_force_full_sync(
         self, connector: str | None, datatype: str | None

@@ -1422,6 +1422,7 @@ _VALID_COMMANDS = {
     "force_full_sync", "pause_connector", "resume_connector",
     "requeue_dead_letter", "reset-watermark", "reload-config",
     "reset-circuit-breaker", "resync", "trigger-writeback", "validate", "drain",
+    "rotate-credential",
 }
 
 
