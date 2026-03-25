@@ -20,7 +20,7 @@ External APIs → [In-and-Out Ingestion] → PostgreSQL source tables
 **In-and-Out's Scope:** Reliable, conflict-aware HTTP API synchronization in both directions (ingestion and writeback). Identity resolution, consolidation mapping, and field-level conflict resolution strategies are now handled by OSI-Mapping and declared in a separate `osi-mapping.yaml` file (not an in-and-out concern).
 
 **Key Impact on This Document:**
-- Requirements T2 #1, #7, #8, #12, #34 are recontextualized (OSI handles consolidation; in-and-out executes)
+- Requirements T2 #1, #7, #8, #12 are recontextualized (OSI handles consolidation; in-and-out executes)
 - Core T1 and T2 requirements remain valid and unchanged
 - See [REPORT_OSI_MAPPING.md](REPORT_OSI_MAPPING.md) for detailed integration analysis
 
@@ -120,7 +120,7 @@ This project aims to research and build two separate but related tools that act 
 5. **Client-Side Patching:** When the target system supports partial updates (PATCH), the tool should support a lookup-diff-write cycle: fetch the current state, compute a minimal client-side diff against the desired state, and submit only the changed fields. The pre-flight fetch in this cycle must also serve as the conflict detection read per requirement #3 — the fetched state must be compared against the `base` and last-written state before the diff is computed or submitted. The ETag or version identifier returned by the fetch must be carried into the PATCH request as a conditional header when the target system supports it. A single GET must serve both purposes (conflict detection and diff computation) — there must not be two separate reads.
 6. **CRDT Support:** ~~RETRACTED — OSI-Mapping handles conflict-free resolution natively; in-and-out does not need CRDT merge logic.~~
 7. **Desired-State Input Table:** The MDM produces a desired-state table per target datatype with the following structure:
-   - **`action`** column: one of `insert`, `update`, `delete`, `archive`, or `noop`.
+   - **`action`** column: one of `insert`, `update`, `delete`, `archive`, `upsert`, or `noop`.
    - **`cluster_id`** column: the MDM merge-group identifier (origin identity).
    - **Primary key column(s):** the external system's identifier(s) for the record. Present for `update`, `delete`, and `archive` actions; absent for `insert` (only `cluster_id` is known before creation).
    - **`data`** column (JSONB): the desired payload to write to the target system.
