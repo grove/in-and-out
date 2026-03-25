@@ -300,15 +300,41 @@ class HttpTransportAdapter:
         if snapshot_param and snapshot_value:
             base_params[snapshot_param] = snapshot_value
 
+        # A4: inject field/property selection if configured
+        # Build properties params based on format
+        properties_params: list[tuple[str, str]] = []
+        if list_config.properties:
+            props_param = list_config.properties_param
+            props_format = list_config.properties_format
+            if props_format == "comma":
+                base_params[props_param] = ",".join(list_config.properties)
+            elif props_format == "array":
+                # Multiple query params with same name: ?properties=field1&properties=field2
+                properties_params = [(props_param, prop) for prop in list_config.properties]
+            elif props_format == "json_array":
+                import json
+                base_params[props_param] = json.dumps(list_config.properties)
+
+        def _build_params(extra_params: dict[str, str]) -> list[tuple[str, str]] | dict[str, str]:
+            """Build params dict or list of tuples (for array format)."""
+            if properties_params:
+                # Use list of tuples to support duplicate keys
+                result = [(k, v) for k, v in base_params.items()]
+                result.extend([(k, v) for k, v in extra_params.items()])
+                result.extend(properties_params)
+                return result
+            return {**base_params, **extra_params}
+
         termination = set(pagination.termination or [])
 
         if pagination.strategy == PaginationStrategy.cursor:
             assert pagination.cursor is not None
             cursor_value: str | None = None
             while True:
-                params = dict(base_params)
+                extra_params = {}
                 if cursor_value is not None:
-                    params[pagination.cursor.request_param] = cursor_value
+                    extra_params[pagination.cursor.request_param] = cursor_value
+                params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
                 records = _extract_records(data, record_selector)
@@ -327,7 +353,8 @@ class HttpTransportAdapter:
             limit_param = str(offset_cfg.get("limit_param", "limit"))
             offset = 0
             while True:
-                params = {**base_params, offset_param: str(offset), limit_param: str(page_size)}
+                extra_params = {offset_param: str(offset), limit_param: str(page_size)}
+                params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
                 records = _extract_records(data, record_selector)
@@ -339,7 +366,8 @@ class HttpTransportAdapter:
         elif pagination.strategy == PaginationStrategy.link_header:
             url: str | None = path
             while url:
-                resp = await self._request(method, url, params=base_params if url == path else {})
+                params = _build_params({}) if url == path else {}
+                resp = await self._request(method, url, params=params)
                 data = orjson.loads(resp.content)
                 records = _extract_records(data, record_selector)
                 yield records
@@ -354,7 +382,8 @@ class HttpTransportAdapter:
             per_page_param = str(pn_cfg.get("per_page_param", "per_page"))
             page = 1
             while True:
-                params = {**base_params, page_param: str(page), per_page_param: str(page_size)}
+                extra_params = {page_param: str(page), per_page_param: str(page_size)}
+                params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
                 records = _extract_records(data, record_selector)
@@ -378,9 +407,10 @@ class HttpTransportAdapter:
             page_size_param = keyset_cfg.page_size_param
             last_value: str | None = None
             while True:
-                params = {**base_params, page_size_param: str(page_size)}
+                extra_params = {page_size_param: str(page_size)}
                 if last_value is not None:
-                    params[request_param] = last_value
+                    extra_params[request_param] = last_value
+                params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
                 records = _extract_records(data, record_selector)
