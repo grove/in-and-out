@@ -358,3 +358,126 @@ async def test_checkpoint_page_number_reflects_latest_page(pool, run_migrations)
     assert row[0] == 3, f"Expected page_number=3 after 3-page sync, got {row[0]}"
 
     os.environ.pop("INOUT_CREDENTIAL_CKPT_PAGE_KEY", None)
+
+
+@pytest.mark.anyio
+async def test_crash_recovery_marks_stale_run_abandoned(pool, run_migrations):
+    """T1 #29 crash recovery: abandoned 'running' sync_run is marked 'abandoned' when
+    the next sync detects and takes over its checkpoint.
+
+    Simulates a process crash: a sync that was running gets killed mid-sync,
+    leaving a sync_run in 'running' status with a checkpoint.  The next sync
+    startup must:
+    1. Detect the stale running run via the checkpoint table.
+    2. Mark the stale run as 'abandoned' (not 'running') so it is never
+       picked up again.
+    3. Complete its own sync successfully.
+    """
+    os.environ["INOUT_CREDENTIAL_CRASH_REC_KEY"] = "dummy"
+    from inandout.config.auth import ApiKeyAuth, ApiKeyConfig
+    from inandout.config.connector import ConnectorConfig, ConnectionConfig, DatatypeConfig, GenerationProfile
+    from inandout.config.ingestion import (
+        IngestionConfig, HistoryMode, ListConfig, ScheduleConfig,
+        IncrementalConfig, RequestFilterConfig, RequestFilterMode,
+    )
+    from inandout.config.pagination import PaginationConfig, PaginationStrategy, CursorConfig
+    from inandout.ingestion.engine import IngestionEngine
+    from inandout.postgres.schema import ensure_source_table
+
+    CONNECTOR_NAME = "crash_recovery_test"
+    DATATYPE = "orders"
+    STALE_WATERMARK = "2026-01-10T00:00:00"
+    BASE_URL = "https://api.crash-rec.example.com"
+
+    connector = ConnectorConfig(
+        name=CONNECTOR_NAME,
+        system="CrashRecTest",
+        generation_profile=GenerationProfile.ingestion_polling_readonly,
+        api_version="v1",
+        connection=ConnectionConfig(base_url=BASE_URL),
+        auth=ApiKeyAuth(
+            type="api_key", credential_ref="crash_rec_key",
+            api_key=ApiKeyConfig(location="header", name="X-Api-Key"),
+        ),
+        datatypes={
+            DATATYPE: DatatypeConfig(
+                ingestion=IngestionConfig(
+                    primary_key="id",
+                    history_mode=HistoryMode.overwrite,
+                    schedule=ScheduleConfig(interval="5m"),
+                    checkpoint_every_n_pages=1,
+                    **{
+                        "list": ListConfig(
+                            method="GET",
+                            path="/v1/orders",
+                            record_selector="orders",
+                            incremental=IncrementalConfig(
+                                enabled=True,
+                                cursor_field="updated_at",
+                                request_filter=RequestFilterConfig(
+                                    mode=RequestFilterMode.query_param,
+                                    param="since",
+                                    value="${watermark}",
+                                ),
+                            ),
+                            pagination=PaginationConfig(
+                                strategy=PaginationStrategy.cursor,
+                                cursor=CursorConfig(request_param="cursor", response_path="next_cursor"),
+                            ),
+                        )
+                    },
+                )
+            )
+        },
+    )
+
+    async with pool.connection() as conn:
+        await ensure_source_table(conn, CONNECTOR_NAME, DATATYPE)
+        await conn.commit()
+
+    # Simulate a crashed sync: insert a stale 'running' sync_run with a checkpoint
+    stale_run_id = uuid.uuid4()
+    async with pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO inout_ops_sync_run (id, connector, datatype, mode, status, started_at)
+            VALUES (%s, %s, %s, 'incremental', 'running', NOW() - INTERVAL '10 minutes')
+            """,
+            [str(stale_run_id), CONNECTOR_NAME, DATATYPE],
+        )
+        await conn.execute(
+            """
+            INSERT INTO inout_ops_sync_checkpoint
+                (run_id, connector, datatype, page_number, cursor_value, records_committed, checkpointed_at)
+            VALUES (%s, %s, %s, 2, %s, 20, NOW() - INTERVAL '8 minutes')
+            """,
+            [str(stale_run_id), CONNECTOR_NAME, DATATYPE, STALE_WATERMARK],
+        )
+        await conn.commit()
+
+    # New sync runs — should detect the stale run, mark it abandoned, and complete
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.get("/v1/orders").mock(
+            return_value=httpx.Response(
+                200,
+                json={"orders": [{"id": "o-1", "updated_at": "2026-01-15T12:00:00"}], "next_cursor": None},
+            )
+        )
+        engine = IngestionEngine(pool)
+        ingestion_cfg = connector.datatypes[DATATYPE].ingestion
+        result = await engine.run_sync(connector, DATATYPE, ingestion_cfg)
+
+    assert result.status == "completed", f"New sync must complete; got {result.status}"
+
+    # The stale running run must now be marked 'abandoned'
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            "SELECT status FROM inout_ops_sync_run WHERE id = %s",
+            [str(stale_run_id)],
+        )).fetchone()
+
+    assert row is not None, "Stale sync_run must still exist in DB"
+    assert row[0] == "aborted", (
+        f"Stale running sync_run must be marked 'aborted' after crash recovery; "
+        f"got status={row[0]!r}"
+    )

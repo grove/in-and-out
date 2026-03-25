@@ -715,6 +715,17 @@ class IngestionEngine:
                         cursor_value=resume_cursor,
                         records_committed=records_committed_so_far,
                     )
+                    # Mark the stale running sync_run as aborted so future syncs
+                    # don't keep picking up the same old checkpoint (T1 #29 crash recovery).
+                    try:
+                        async with self._pool.connection() as _ab_conn:
+                            await _ab_conn.execute(
+                                "UPDATE inout_ops_sync_run SET status='aborted', finished_at=NOW() WHERE id=%s",
+                                [str(_ck_run_id)],
+                            )
+                            await _ab_conn.commit()
+                    except Exception:
+                        pass  # Abort update failure is non-fatal
                     # Use resume cursor as effective watermark for this sync
                     if resume_cursor is not None:
                         watermark = resume_cursor

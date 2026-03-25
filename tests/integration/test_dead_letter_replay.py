@@ -267,3 +267,42 @@ async def test_below_retry_limit_not_dead_lettered(pool):
         f"{external_id!r} must not be in dead-letter until retry limit exhausted; "
         f"found in DLQ: {dl_ext_ids}"
     )
+
+
+@pytest.mark.anyio
+async def test_max_retry_exhaustion_moves_to_dead_letter(pool):
+    """T2 #24: exhausting max_retry_count moves the row to the dead-letter table.
+
+    With max_retry_count=2, pre-seed 2 failure records then trigger a third
+    failure.  The writeback engine must move the row to the DLQ because
+    failure_count (2 pre-seeded + 1 just recorded = 3) > max_retry_count (2).
+    """
+    await _create_delta_table(pool)
+    await _clear_tables(pool)
+
+    external_id = "camp-exhaust-1"
+    await _seed_rows(pool, [{"external_id": external_id, "name": "Exhausted Campaign", "_action": "insert"}])
+
+    # Pre-seed 2 failures (failure_count already at the limit)
+    await _seed_failure_in_audit(pool, external_id)
+    await _seed_failure_in_audit(pool, external_id)
+
+    connector = _make_connector(max_retry_count=2)
+    wb_cfg = connector.datatypes[_DATATYPE].writeback
+
+    # Third attempt fails → triggers DLQ promotion
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.post(f"/v1/{_DATATYPE}").mock(
+            return_value=httpx.Response(500, json={"error": "still broken"})
+        )
+        engine = WritebackEngine(pool=pool)
+        result = await engine.run_writeback_cycle(connector, _DATATYPE, wb_cfg, _DELTA_TABLE)
+
+    assert result.failed >= 1, f"Expected at least 1 failure, got {result.failed}"
+
+    dl_rows = await fetch_writeback_dead_letter_rows(pool, _CONNECTOR, _DATATYPE, limit=10)
+    dl_ext_ids = [r["external_id"] for r in dl_rows]
+    assert external_id in dl_ext_ids, (
+        f"Expected {external_id!r} in dead-letter after exhausting max_retry_count=2; "
+        f"got DLQ rows: {dl_ext_ids}"
+    )

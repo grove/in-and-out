@@ -266,7 +266,12 @@ async def handle_webhook(
                                         )).fetchone()
 
                                     stored_seq = oo_row[0] if oo_row else None
-                                    if stored_seq is not None and str(payload_ts) <= str(stored_seq):
+                                    if stored_seq is not None:
+                                        try:
+                                            _is_stale = float(payload_ts) <= float(stored_seq)
+                                        except (ValueError, TypeError):
+                                            _is_stale = str(payload_ts) <= str(stored_seq)
+                                    if stored_seq is not None and _is_stale:
                                         log.info(
                                             "webhook_stale_event_discarded",
                                             external_id=ext_id_for_oo,

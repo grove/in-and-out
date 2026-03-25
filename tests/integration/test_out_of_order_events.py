@@ -292,3 +292,232 @@ async def test_same_timestamp_event_is_not_discarded(pool, run_migrations):
     assert row is not None, "contact-303 must have been stored from the first event"
     data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
     assert data.get("name") == "Carol (v1)"
+
+
+# ---------------------------------------------------------------------------
+# T1 #35 — accept_highest_sequence strategy
+# ---------------------------------------------------------------------------
+
+_SEQ_CONNECTOR_NAME = "oo_seq_test"
+_SEQ_SECRET = "seq_test_secret_key"
+
+
+def _make_seq_connector() -> ConnectorConfig:
+    """Connector using accept_highest_sequence with a numeric 'seq' field."""
+    return ConnectorConfig(
+        name=_SEQ_CONNECTOR_NAME,
+        system="OOSeqSystem",
+        generation_profile=GenerationProfile.ingestion_webhook_incremental,
+        api_version="v1",
+        connection=ConnectionConfig(base_url=_BASE_URL),
+        auth=ApiKeyAuth(
+            type="api_key",
+            credential_ref="oo_seq_key",
+            api_key=ApiKeyConfig(location="header", name="X-Api-Key"),
+        ),
+        datatypes={
+            _DATATYPE: DatatypeConfig(
+                ingestion=IngestionConfig(
+                    primary_key="id",
+                    history_mode=HistoryMode.overwrite,
+                    schedule=ScheduleConfig(interval="5m"),
+                    **{
+                        "list": ListConfig(
+                            method="GET",
+                            path="/v1/contacts",
+                            record_selector="contacts",
+                            pagination=PaginationConfig(
+                                strategy=PaginationStrategy.cursor,
+                                cursor=CursorConfig(
+                                    request_param="cursor",
+                                    response_path="next_cursor",
+                                ),
+                            ),
+                        )
+                    },
+                    webhook_events=WebhookEventsConfig(
+                        subscriptions=[{"event": "contact.updated"}],
+                        record_id_path="id",
+                        payload_type=WebhookPayloadType.full_state,
+                        ordering={"field": "seq"},
+                        out_of_order=OutOfOrderConfig(
+                            strategy=OutOfOrderStrategy.accept_highest_sequence,
+                            sequence_field="seq",
+                        ),
+                    ),
+                )
+            )
+        },
+    )
+
+
+def _make_seq_webhook_cfg() -> WebhookConfig:
+    return WebhookConfig(
+        path=f"/webhooks/{_SEQ_CONNECTOR_NAME}",
+        signature=SignatureConfig(
+            algorithm=SignatureAlgorithm.hmac_sha256,
+            header="X-Hub-Signature-256",
+            credential_ref="oo_seq_secret",
+        ),
+        fan_out=FanOutConfig(
+            discriminator="event_type",
+            routes=[FanOutRoute(match="contact.updated", datatype=_DATATYPE)],
+            unmatched=UnmatchedAction.log_and_discard,
+        ),
+    )
+
+
+def _build_seq_webhook_app(pool) -> FastAPI:
+    connector = _make_seq_connector()
+    webhook_cfg = _make_seq_webhook_cfg()
+    engine = IngestionEngine(pool)
+
+    async def _webhook_handler(request: Request) -> Response:
+        return await handle_webhook(request, connector, webhook_cfg, engine)
+
+    app = FastAPI()
+    app.add_api_route(
+        f"/webhooks/{_SEQ_CONNECTOR_NAME}", _webhook_handler, methods=["POST"]
+    )
+    return app
+
+
+def _build_seq_payload(contact_id: str, name: str, seq: int) -> dict:
+    return {
+        "event_type": "contact.updated",
+        "id": contact_id,
+        "name": name,
+        "email": f"{contact_id}@example.com",
+        "seq": seq,
+    }
+
+
+async def _post_seq_webhook(client: AsyncClient, payload: dict, secret: str) -> object:
+    body = json.dumps(payload).encode()
+    sig = _make_signed_body(body, secret)
+    return await client.post(
+        f"/webhooks/{_SEQ_CONNECTOR_NAME}",
+        content=body,
+        headers={"X-Hub-Signature-256": sig, "Content-Type": "application/json"},
+    )
+
+
+@pytest.mark.anyio
+async def test_stale_sequence_event_discarded(pool, run_migrations):
+    """T1 #35 (accept_highest_sequence): event with lower seq is discarded.
+
+    Send event with seq=100, then seq=50. The second event (seq=50) is stale
+    and must be rejected since the stored sequence is already 100.
+    """
+    os.environ["INOUT_CREDENTIAL_OO_SEQ_SECRET"] = _SEQ_SECRET
+    os.environ.setdefault("INOUT_CREDENTIAL_OO_SEQ_KEY", "dummy")
+
+    app = _build_seq_webhook_app(pool)
+
+    high_seq_payload = _build_seq_payload("seq-contact-101", "Dana (seq=100)", 100)
+    low_seq_payload = _build_seq_payload("seq-contact-101", "Dana (seq=50/stale)", 50)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_high = await _post_seq_webhook(client, high_seq_payload, _SEQ_SECRET)
+        assert resp_high.status_code in (200, 201, 202)
+        assert resp_high.json().get("status") != "stale_discarded", (
+            "seq=100 must be accepted as the first event"
+        )
+
+        resp_low = await _post_seq_webhook(client, low_seq_payload, _SEQ_SECRET)
+        assert resp_low.status_code in (200, 201, 202)
+        assert resp_low.json().get("status") == "stale_discarded", (
+            f"seq=50 must be discarded when stored is seq=100; got: {resp_low.json()}"
+        )
+
+    # Source table must still contain seq=100 data
+    src_table = source_table_name(_SEQ_CONNECTOR_NAME, _DATATYPE)
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            f"SELECT data FROM {src_table} WHERE external_id = 'seq-contact-101'",
+        )).fetchone()
+
+    assert row is not None
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    assert data.get("name") == "Dana (seq=100)", (
+        f"Source table must retain higher-sequence event; got: {data.get('name')!r}"
+    )
+
+
+@pytest.mark.anyio
+async def test_higher_sequence_event_accepted(pool, run_migrations):
+    """T1 #35 (accept_highest_sequence): event with higher seq overwrites stored data.
+
+    Send seq=100 first, then seq=200. The second event must be accepted and
+    overwrite the source table with the newer data.
+    """
+    os.environ["INOUT_CREDENTIAL_OO_SEQ_SECRET"] = _SEQ_SECRET
+    os.environ.setdefault("INOUT_CREDENTIAL_OO_SEQ_KEY", "dummy")
+
+    app = _build_seq_webhook_app(pool)
+
+    low_seq_payload = _build_seq_payload("seq-contact-202", "Eve (seq=100)", 100)
+    high_seq_payload = _build_seq_payload("seq-contact-202", "Eve (seq=200/latest)", 200)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_low = await _post_seq_webhook(client, low_seq_payload, _SEQ_SECRET)
+        assert resp_low.status_code in (200, 201, 202)
+        assert resp_low.json().get("status") != "stale_discarded"
+
+        resp_high = await _post_seq_webhook(client, high_seq_payload, _SEQ_SECRET)
+        assert resp_high.status_code in (200, 201, 202)
+        assert resp_high.json().get("status") != "stale_discarded", (
+            "seq=200 must be accepted when stored is seq=100"
+        )
+
+    src_table = source_table_name(_SEQ_CONNECTOR_NAME, _DATATYPE)
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            f"SELECT data FROM {src_table} WHERE external_id = 'seq-contact-202'",
+        )).fetchone()
+
+    assert row is not None
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    assert data.get("name") == "Eve (seq=200/latest)", (
+        f"Source table must contain the higher-sequence event; got: {data.get('name')!r}"
+    )
+
+
+@pytest.mark.anyio
+async def test_equal_sequence_event_discarded(pool, run_migrations):
+    """T1 #35 (accept_highest_sequence): event with equal seq to stored is discarded.
+
+    Send seq=100, then seq=100 again. The second event must be discarded since
+    the OO check uses ``<= stored_seq`` (equal is not strictly newer).
+    """
+    os.environ["INOUT_CREDENTIAL_OO_SEQ_SECRET"] = _SEQ_SECRET
+    os.environ.setdefault("INOUT_CREDENTIAL_OO_SEQ_KEY", "dummy")
+
+    app = _build_seq_webhook_app(pool)
+
+    first_payload = _build_seq_payload("seq-contact-303", "Frank (seq=100/original)", 100)
+    dup_payload = _build_seq_payload("seq-contact-303", "Frank (seq=100/duplicate)", 100)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_first = await _post_seq_webhook(client, first_payload, _SEQ_SECRET)
+        assert resp_first.status_code in (200, 201, 202)
+        assert resp_first.json().get("status") != "stale_discarded"
+
+        resp_dup = await _post_seq_webhook(client, dup_payload, _SEQ_SECRET)
+        assert resp_dup.status_code in (200, 201, 202)
+        assert resp_dup.json().get("status") == "stale_discarded", (
+            f"Duplicate seq=100 event must be discarded; got: {resp_dup.json()}"
+        )
+
+    # Source table must contain the ORIGINAL name (not overwritten by the duplicate)
+    src_table = source_table_name(_SEQ_CONNECTOR_NAME, _DATATYPE)
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            f"SELECT data FROM {src_table} WHERE external_id = 'seq-contact-303'",
+        )).fetchone()
+
+    assert row is not None
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    assert data.get("name") == "Frank (seq=100/original)", (
+        f"Original data must be preserved when duplicate seq is discarded; got: {data.get('name')!r}"
+    )
