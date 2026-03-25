@@ -68,3 +68,6 @@ connectors/*.yaml
 # Logs
 *.log
 logs/
+
+# mdBook build output
+docs-build/

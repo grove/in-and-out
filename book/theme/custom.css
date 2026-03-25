@@ -1,0 +1,32 @@
+/* Custom styles for in-and-out docs */
+
+:root {
+    --sidebar-width: 280px;
+}
+
+/* Improve table readability */
+table {
+    font-size: 0.9em;
+}
+
+table th {
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+/* Code block improvements */
+pre {
+    border-radius: 6px;
+}
+
+/* Admonition-style blockquotes */
+blockquote {
+    border-left: 4px solid #4a9eff;
+    background: rgba(74, 158, 255, 0.05);
+    padding: 0.5em 1em;
+    border-radius: 0 6px 6px 0;
+}
+
+/* Tip blocks */
+blockquote p > strong:first-child {
+    color: #4a9eff;
+}

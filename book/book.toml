@@ -1,0 +1,17 @@
+[book]
+authors = ["Grove"]
+language = "en"
+src = "src"
+title = "in-and-out Documentation"
+description = "Declarative, bidirectional HTTP API synchronisation for MDM"
+
+[build]
+build-dir = "../docs-build"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/grove/in-and-out"
+edit-url-template = "https://github.com/grove/in-and-out/edit/main/book/src/{path}"
+no-section-label = false
+additional-css = ["theme/custom.css"]
