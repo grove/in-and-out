@@ -55,7 +55,7 @@ def desired_state_table_ddl(connector: str, datatype: str, namespace: str = "pub
     _updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     _processed_at   TIMESTAMPTZ,
     _sync_run_id    UUID,
-    CONSTRAINT valid_action CHECK (_action IN ('insert', 'update', 'delete', 'upsert', 'archive', 'noop', 'merge', 'split')),
+    CONSTRAINT valid_action CHECK (_action IN ('insert', 'update', 'delete', 'upsert', 'archive', 'noop')),
     CONSTRAINT valid_status CHECK (_status IN ('pending', 'processed', 'failed', 'skipped'))
 );
 CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_updated_at_idx

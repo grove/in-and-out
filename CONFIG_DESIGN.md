@@ -920,14 +920,6 @@ writeback:
   #   success_value: COMPLETE
   #   error_path: errors
   #   record_id_path: id
-
-  # ─── CRDT Support (T2 #6) ──────────────────────────────
-  # crdt:
-  #   fields:
-  #     - name: tags
-  #       type: add_only_set       # add_only_set | counter | lww_register
-  #     - name: view_count
-  #       type: counter
 ```
 
 ### 4.5 Relationships as First-Class Datatypes (T1 #22)
@@ -956,26 +948,6 @@ datatypes:
       history_mode: overwrite
       schedule:
         interval: 15m
-```
-
-### 4.6 Merge & Split Actions (T2 #34)
-
-In an OSI-integrated architecture, the **bridge layer** detects cluster merges and splits from OSI-Mapping's consolidated views (e.g., two clusters becoming one, or one splitting into two) and populates the desired-state table with `action: merge` or `action: split` records. The writeback tool recognises these actions in the desired-state `action` column and executes them via standard operations (`insert`, `update`, `delete`/`archive`, and identity-mapping updates).
-
-No additional per-datatype config is needed beyond standard operations. The connector must simply declare which operations are available so the tool knows what the target system supports.
-
-```yaml
-writeback:
-  # Declare which action types this datatype supports.
-  # The bridge layer populates desired-state action based on 
-  # cluster events detected by OSI-Mapping. This connector executes them.
-  supported_actions:
-    - insert
-    - update
-    - delete
-    - archive
-    - merge                        # Consolidated clusters becoming one
-    - split                        # Cluster breaking into multiple
 ```
 
 ---

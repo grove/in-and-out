@@ -166,82 +166,6 @@ def test_lint008_multiple_datatypes_only_flags_affected():
 
 
 # ---------------------------------------------------------------------------
-# LINT010: merge/split in supported_actions without required operations
-# ---------------------------------------------------------------------------
-
-
-def test_lint010_merge_without_update_errors():
-    from inandout.linter.rules import _lint010
-
-    wb = _make_writeback(supported_actions=["merge"], has_update=False)
-    dtype = _make_dtype(ingestion=_make_ingestion(), writeback=wb)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint010(cfg)
-    assert len(diags) == 1
-    assert diags[0].rule_id == "LINT010"
-    assert diags[0].severity == "error"
-    assert "merge" in diags[0].message
-    assert "update" in diags[0].message
-
-
-def test_lint010_merge_with_update_no_diag():
-    from inandout.linter.rules import _lint010
-
-    wb = _make_writeback(supported_actions=["merge"], has_update=True)
-    dtype = _make_dtype(ingestion=_make_ingestion(), writeback=wb)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint010(cfg)
-    assert diags == []
-
-
-def test_lint010_split_without_insert_errors():
-    from inandout.linter.rules import _lint010
-
-    wb = _make_writeback(supported_actions=["split"], has_insert=False)
-    dtype = _make_dtype(ingestion=_make_ingestion(), writeback=wb)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint010(cfg)
-    assert len(diags) == 1
-    assert "split" in diags[0].message
-    assert "insert" in diags[0].message
-
-
-def test_lint010_split_with_insert_no_diag():
-    from inandout.linter.rules import _lint010
-
-    wb = _make_writeback(supported_actions=["split"], has_insert=True)
-    dtype = _make_dtype(ingestion=_make_ingestion(), writeback=wb)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint010(cfg)
-    assert diags == []
-
-
-def test_lint010_merge_and_split_both_missing():
-    from inandout.linter.rules import _lint010
-
-    wb = _make_writeback(supported_actions=["merge", "split"], has_update=False, has_insert=False)
-    dtype = _make_dtype(ingestion=_make_ingestion(), writeback=wb)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint010(cfg)
-    assert len(diags) == 2
-
-
-def test_lint010_no_writeback_no_diag():
-    from inandout.linter.rules import _lint010
-
-    dtype = _make_dtype(ingestion=_make_ingestion(), writeback=None)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint010(cfg)
-    assert diags == []
-
-
-# ---------------------------------------------------------------------------
 # LINT011: PII fields + writeback config → info
 # ---------------------------------------------------------------------------
 
@@ -303,7 +227,7 @@ def test_lint011_many_pii_fields_truncated_in_message():
 def test_lint_connector_runs_lint008_to_lint011():
     from inandout.linter import lint_connector
 
-    wb_none = _make_writeback(protection_level=0, supported_actions=["merge"])
+    wb_none = _make_writeback(protection_level=0, supported_actions=["update"])
     dtype = _make_dtype(
         ingestion=_make_ingestion(),
         writeback=wb_none,
@@ -314,5 +238,4 @@ def test_lint_connector_runs_lint008_to_lint011():
     diags = lint_connector(cfg)
     rule_ids = {d.rule_id for d in diags}
     assert "LINT008" in rule_ids  # protection_level=none
-    assert "LINT010" in rule_ids  # merge without update
     assert "LINT011" in rule_ids  # pii + writeback

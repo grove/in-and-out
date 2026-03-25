@@ -508,7 +508,7 @@ The existing `docs/CONNECTOR_AUTHORING.md` provides a good starting point. This 
 
 2. **The write cycle**
    - Reading from `inout_dst_{connector}_{datatype}`
-   - Supported `action` values: `insert`, `update`, `delete`, `archive`, `noop`, `merge`, `split`
+   - Supported `action` values: `insert`, `update`, `delete`, `archive`, `noop`, `upsert`
    - Pre-flight read: why it is mandatory
    - Three-way comparison: `current` vs `base` vs `last_written_state`
 
@@ -549,7 +549,7 @@ The existing `docs/CONNECTOR_AUTHORING.md` provides a good starting point. This 
 
 8. **Writeback concurrency and ordering**
    - `writeback.concurrency` config
-   - Ordering: respecting `cluster_id`-level ordering for `merge`, `split`, `delete` actions
+   - Ordering: respecting `cluster_id`-level ordering and dependency ordering for write batches
 
 9. **Batch response handling**
    - APIs that accept bulk write requests

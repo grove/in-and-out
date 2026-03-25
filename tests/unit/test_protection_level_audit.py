@@ -140,7 +140,6 @@ async def test_dispatch_row_audit_has_protection_level():
     wb_cfg.idempotency_key_header = None
     wb_cfg.diff_fields = False
     wb_cfg.use_desired_state_table = False
-    wb_cfg.crdt_type = None
     wb_cfg.enable_crash_recovery = False
     wb_cfg.operations = MagicMock()
     wb_cfg.operations.insert = MagicMock()

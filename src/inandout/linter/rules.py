@@ -207,40 +207,6 @@ def _lint008(cfg: Any) -> list[LintDiagnostic]:
     return diags
 
 
-def _lint010(cfg: Any) -> list[LintDiagnostic]:
-    """LINT010: 'merge'/'split' in supported_actions but required operations not configured → error."""
-    diags: list[LintDiagnostic] = []
-    connector = cfg.connector
-    for dtype_name, dtype_cfg in connector.datatypes.items():
-        if dtype_cfg.writeback is None:
-            continue
-        wb = dtype_cfg.writeback
-        actions = [str(a).lower() for a in (getattr(wb, "supported_actions", None) or [])]
-        ops = wb.operations
-
-        if "merge" in actions and ops.update is None:
-            diags.append(LintDiagnostic(
-                severity="error",
-                rule_id="LINT010",
-                message=(
-                    f"datatype '{dtype_name}' lists 'merge' in supported_actions "
-                    "but operations.update is not configured — merge requires an update operation"
-                ),
-                path=f"connector.datatypes.{dtype_name}.writeback.operations.update",
-            ))
-        if "split" in actions and ops.insert is None:
-            diags.append(LintDiagnostic(
-                severity="error",
-                rule_id="LINT010",
-                message=(
-                    f"datatype '{dtype_name}' lists 'split' in supported_actions "
-                    "but operations.insert is not configured — split requires an insert operation"
-                ),
-                path=f"connector.datatypes.{dtype_name}.writeback.operations.insert",
-            ))
-    return diags
-
-
 def _lint011(cfg: Any) -> list[LintDiagnostic]:
     """LINT011: PII fields declared on datatype that also has writeback → info."""
     diags: list[LintDiagnostic] = []

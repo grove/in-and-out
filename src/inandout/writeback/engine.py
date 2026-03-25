@@ -350,12 +350,6 @@ class WritebackEngine:
                             grouped[ext_id] = []
                         grouped[ext_id].append(row_data)
 
-                    # T2 #21: group-abort tracking — shared across all concurrent
-                    # _dispatch_group coroutines.  When any member of a _group_id
-                    # group fails, remaining members in the same group are
-                    # immediately moved to dead-letter and counted as failed.
-                    _aborted_groups: dict[str, str] = {}  # group_id → abort reason
-
                     async def _dispatch_group(
                         group_rows: list[dict[str, Any]],
                     ) -> None:
@@ -363,58 +357,11 @@ class WritebackEngine:
                             for row_data in group_rows:
                                 action = row_data.get("_action", "")
                                 external_id = row_data.get("external_id") or row_data.get("_cluster_id", "")
-                                gid = row_data.get("_group_id")
 
-                                # T2 #21: abort this member if its group has already failed
-                                if gid and gid in _aborted_groups:
-                                    abort_reason = _aborted_groups[gid]
-                                    log.warning(
-                                        "writeback_group_member_aborted",
-                                        external_id=external_id,
-                                        group_id=gid,
-                                        reason=abort_reason,
-                                    )
-                                    result.failed += 1
-                                    result._failed_entries.append((
-                                        external_id, action,
-                                        f"group_partial_failure:{gid}:{abort_reason}",
-                                    ))
-                                    try:
-                                        from inandout.deadletter.writeback import move_to_dead_letter
-                                        await move_to_dead_letter(
-                                            self._pool,
-                                            connector.name,
-                                            result.datatype,
-                                            external_id=external_id,
-                                            action="group_partial_failure",
-                                            payload_snapshot={
-                                                k: v for k, v in row_data.items()
-                                                if not k.startswith("_")
-                                            },
-                                            error_message=(
-                                                f"Group {gid} aborted: "
-                                                f"member failed ({abort_reason})"
-                                            ),
-                                            delta_table=result.delta_table,
-                                        )
-                                    except Exception:
-                                        pass
-                                    continue
-
-                                _failed_before = result.failed
                                 await self._dispatch_row(
                                     transport, connector, writeback_cfg,
                                     action, external_id, row_data, log, result
                                 )
-                                # T2 #21: mark group aborted when a member fails
-                                if (
-                                    gid
-                                    and result.failed > _failed_before
-                                    and gid not in _aborted_groups
-                                ):
-                                    _aborted_groups[gid] = (
-                                        f"member {external_id} action={action} failed"
-                                    )
 
                     async with anyio.create_task_group() as tg:
                         for group_rows in grouped.values():
@@ -1022,39 +969,6 @@ class WritebackEngine:
                 else:
                     _3way_etag = ""
 
-                # CRDT merge: apply before diff_fields and protection-level branching.
-                # GETs the current remote state and merges local payload according to
-                # the configured strategy (lww_register, g_counter).
-                if writeback_cfg.crdt_type and ops.lookup is not None and external_id:
-                    try:
-                        from inandout.writeback.crdt import crdt_merge
-                        lookup_path_crdt = interpolate_path(ops.lookup.path)
-                        crdt_resp = await transport._raw_request(
-                            ops.lookup.method.upper(), lookup_path_crdt
-                        )
-                        remote_crdt_state: dict[str, Any] = {}
-                        try:
-                            if crdt_resp.is_success:
-                                remote_crdt_state = orjson.loads(crdt_resp.content) if crdt_resp.content else {}
-                        except Exception:
-                            pass
-                        crdt_ts_field = getattr(writeback_cfg, "crdt_ts_field", "_updated_at")
-                        merged_crdt = crdt_merge(
-                            payload, remote_crdt_state, writeback_cfg.crdt_type, ts_field=crdt_ts_field
-                        )
-                        if merged_crdt is None:
-                            logger.info(
-                                "writeback_crdt_skip_remote_newer",
-                                action=action, external_id=external_id,
-                                crdt_type=writeback_cfg.crdt_type,
-                            )
-                            result.skipped += 1
-                            return
-                        payload = merged_crdt
-                    except Exception as exc:
-                        logger.warning("writeback_crdt_merge_failed", error=str(exc))
-                        # Fall through to normal write
-
                 # Incremental writeback: only send changed fields
                 if writeback_cfg.diff_fields and external_id:
                     if _preflight_remote_data is not None:
@@ -1376,122 +1290,6 @@ class WritebackEngine:
                     await transport._request(ops.archive.method.upper(), path, json=payload)
                 _eff_pl_arch = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
                 result._audit_entries.append((external_id, action, payload, None, _eff_pl_arch))
-                _http_write_ok = True
-                result.processed += 1
-
-            elif action == "merge":
-                # T2 #34: merge — update the surviving record, delete losers, update identity map.
-                # Row shape expected from OSI-Mapping delta view:
-                #   external_id       — surviving cluster_id / external_id
-                #   data              — desired state for the survivor
-                #   _losing_ids       — list[str] of external_ids to be deleted (losers)
-                if ops.update is None:
-                    logger.warning("merge_no_update_op_configured", connector=connector.name, datatype=result.datatype)
-                    result.skipped += 1
-                    return
-
-                surviving_id = external_id
-                losing_ids: list[str] = row.get("_losing_ids") or []
-                payload = {k: v for k, v in row.items() if not k.startswith("_")}
-
-                if dry_run:
-                    base_url = connector.connection.base_url.rstrip("/")
-                    update_path = interpolate_path(ops.update.path)
-                    _log_dry_run("merge:update", ops.update.method.upper(), f"{base_url}{update_path}", {}, payload)
-                    for loser_id in losing_ids:
-                        if ops.delete is not None:
-                            loser_path = ops.delete.path.replace("${external_id}", loser_id)
-                            _log_dry_run("merge:delete", ops.delete.method.upper(), f"{base_url}{loser_path}", {}, {})
-                    return
-
-                # 1. Update the survivor
-                update_path = interpolate_path(ops.update.path)
-                extra_headers = _make_extra_headers(payload)
-                if extra_headers:
-                    _merge_upd_resp = await transport._raw_request(ops.update.method.upper(), update_path, json=payload, headers=extra_headers)
-                    _merge_upd_resp.raise_for_status()
-                else:
-                    await transport._request(ops.update.method.upper(), update_path, json=payload)
-
-                # 2. Delete the losers
-                if ops.delete is not None:
-                    for loser_id in losing_ids:
-                        loser_path = ops.delete.path.replace("${external_id}", loser_id)
-                        try:
-                            await transport._request(ops.delete.method.upper(), loser_path)
-                        except httpx.HTTPError as loser_exc:
-                            logger.warning(
-                                "merge_loser_delete_failed",
-                                loser_id=loser_id, error=str(loser_exc),
-                            )
-
-                # 3. Update identity map: point all loser cluster_ids to survivor's external_id
-                for loser_id in losing_ids:
-                    await self._record_identity_map(
-                        connector=result.connector,
-                        datatype=result.datatype,
-                        external_id=loser_id,
-                        internal_id=surviving_id,
-                    )
-
-                _eff_pl_merge = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
-                result._audit_entries.append((surviving_id, action, payload, None, _eff_pl_merge))
-                _http_write_ok = True
-                result.processed += 1
-
-            elif action == "split":
-                # T2 #34: split — create child records from a single source row.
-                # Row shape expected from OSI-Mapping delta view:
-                #   external_id   — source cluster_id being split
-                #   _split_rows   — list[dict], each the desired-state payload for a new child
-                if ops.insert is None:
-                    logger.warning("split_no_insert_op_configured", connector=connector.name, datatype=result.datatype)
-                    result.skipped += 1
-                    return
-
-                split_rows: list[dict[str, Any]] = row.get("_split_rows") or []
-                if not split_rows:
-                    logger.warning("split_no_rows", external_id=external_id)
-                    result.skipped += 1
-                    return
-
-                if dry_run:
-                    base_url = connector.connection.base_url.rstrip("/")
-                    for split_payload in split_rows:
-                        insert_path = interpolate_path(ops.insert.path)
-                        _log_dry_run("split:insert", ops.insert.method.upper(), f"{base_url}{insert_path}", {}, split_payload)
-                    return
-
-                created_ids: list[str] = []
-                for split_payload in split_rows:
-                    insert_path = interpolate_path(ops.insert.path)
-                    extra_headers = _make_extra_headers(split_payload)
-                    if extra_headers:
-                        resp = await transport._raw_request(ops.insert.method.upper(), insert_path, json=split_payload, headers=extra_headers)
-                    else:
-                        resp = await transport._raw_request(ops.insert.method.upper(), insert_path, json=split_payload)
-                    resp.raise_for_status()
-                    # Record identity for each created child
-                    try:
-                        resp_body: dict[str, Any] = orjson.loads(resp.content) if resp.content else {}
-                        returned_id = next(
-                            (str(resp_body[f]) for f in ("id", f"{result.datatype}_id", f"{result.connector}_id", "externalId") if f in resp_body),
-                            None,
-                        )
-                        if returned_id:
-                            created_ids.append(returned_id)
-                            await self._record_identity_map(
-                                connector=result.connector,
-                                datatype=result.datatype,
-                                external_id=external_id,
-                                internal_id=returned_id,
-                            )
-                    except Exception:
-                        pass
-
-                logger.info("split_complete", source_id=external_id, child_count=len(created_ids))
-                _eff_pl_split = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
-                result._audit_entries.append((external_id, action, {"_split_rows": len(split_rows)}, None, _eff_pl_split))
                 _http_write_ok = True
                 result.processed += 1
 
