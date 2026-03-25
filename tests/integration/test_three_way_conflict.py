@@ -210,3 +210,223 @@ async def test_three_way_no_conflict_current_matches_base(pool, run_migrations):
 
     # No conflict: PATCH should have been sent
     assert result.processed >= 1 or len(patched) >= 1 or result.skipped == 0
+
+
+@pytest.mark.anyio
+async def test_three_way_no_conflict_current_matches_lwstate(pool, run_migrations):
+    """T2 #3: current state differs from base but matches lwstate (our own prior write).
+
+    This is safe — the discrepancy between current and base was caused by the
+    tool's own last write, not by an external actor. The write must proceed.
+    """
+    os.environ["INOUT_CREDENTIAL_CONFLICT_KEY"] = "dummy"
+    from inandout.postgres.desired_state import (
+        ensure_desired_state_table,
+        ensure_lwstate_table,
+        desired_state_table_name,
+        lwstate_table_name,
+    )
+    from inandout.writeback.engine import WritebackEngine
+
+    connector = _make_connector(connector_name="conflict_test_c")
+    wb_cfg = connector.datatypes[_DATATYPE].writeback
+    dst = desired_state_table_name("conflict_test_c", _DATATYPE)
+    lwst = lwstate_table_name("conflict_test_c", _DATATYPE)
+
+    async with pool.connection() as conn:
+        await ensure_desired_state_table(conn, "conflict_test_c", _DATATYPE)
+        await ensure_lwstate_table(conn, "conflict_test_c", _DATATYPE)
+
+        # Scenario: MDM base says status=pending; we previously wrote status=processing
+        # External system now shows status=processing (our own prior write)
+        await conn.execute(
+            f"""
+            INSERT INTO {lwst} (external_id, data, _written_at)
+            VALUES ('ord-3', %s, NOW())
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data
+            """,
+            [orjson.dumps({"status": "processing"}).decode()],  # last we wrote
+        )
+        await conn.execute(
+            f"""
+            INSERT INTO {dst} (external_id, data, _action)
+            VALUES ('ord-3', %s, 'update')
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data, _action=EXCLUDED._action
+            """,
+            [orjson.dumps({"status": "shipped", "_base": {"status": "pending"}}).decode()],
+        )
+        await conn.commit()
+
+    patched = []
+
+    def _handle_get(request):
+        # External system reflects our own last write (processing), not the MDM base (pending)
+        return httpx.Response(200, json={"id": "ord-3", "status": "processing"})
+
+    def _handle_patch(request):
+        patched.append(request)
+        return httpx.Response(200, json={"id": "ord-3", "status": "shipped"})
+
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_get)
+        mock.patch(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_patch)
+
+        engine = WritebackEngine(pool)
+        result = await engine.run_writeback_cycle(connector, _DATATYPE, wb_cfg, dst)
+
+    # current matches lwstate → safe write, no conflict
+    assert result.conflicts == 0, (
+        f"Expected 0 conflicts (current matches lwstate = our prior write); got {result}"
+    )
+    assert len(patched) == 1, "PATCH should be sent when current matches lwstate (safe)"
+
+
+@pytest.mark.anyio
+async def test_three_way_field_scoped_unrelated_changes_not_conflict(pool, run_migrations):
+    """T2 #3: field-scoped comparison — changes to fields NOT in the desired payload
+    must not trigger a false conflict.
+
+    External actor changes job_title; MDM only writes email.
+    Since job_title is not in the write payload, the conflict check must pass.
+    """
+    os.environ["INOUT_CREDENTIAL_CONFLICT_KEY"] = "dummy"
+    from inandout.postgres.desired_state import (
+        ensure_desired_state_table,
+        ensure_lwstate_table,
+        desired_state_table_name,
+        lwstate_table_name,
+    )
+    from inandout.writeback.engine import WritebackEngine
+
+    connector = _make_connector(connector_name="conflict_test_d")
+    wb_cfg = connector.datatypes[_DATATYPE].writeback
+    dst = desired_state_table_name("conflict_test_d", _DATATYPE)
+    lwst = lwstate_table_name("conflict_test_d", _DATATYPE)
+
+    async with pool.connection() as conn:
+        await ensure_desired_state_table(conn, "conflict_test_d", _DATATYPE)
+        await ensure_lwstate_table(conn, "conflict_test_d", _DATATYPE)
+
+        await conn.execute(
+            f"""
+            INSERT INTO {lwst} (external_id, data, _written_at)
+            VALUES ('ord-4', %s, NOW())
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data
+            """,
+            [orjson.dumps({"email": "old@example.com", "job_title": "Engineer"}).decode()],
+        )
+        # MDM only changes email, not job_title
+        await conn.execute(
+            f"""
+            INSERT INTO {dst} (external_id, data, _action)
+            VALUES ('ord-4', %s, 'update')
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data, _action=EXCLUDED._action
+            """,
+            [orjson.dumps({
+                "email": "new@example.com",
+                "_base": {"email": "old@example.com"},
+            }).decode()],
+        )
+        await conn.commit()
+
+    patched = []
+
+    def _handle_get(request):
+        # External actor changed job_title (not email) — should NOT be a conflict
+        return httpx.Response(200, json={"id": "ord-4", "email": "old@example.com", "job_title": "Senior Engineer"})
+
+    def _handle_patch(request):
+        patched.append(request)
+        return httpx.Response(200, json={"id": "ord-4"})
+
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_get)
+        mock.patch(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_patch)
+
+        engine = WritebackEngine(pool)
+        result = await engine.run_writeback_cycle(connector, _DATATYPE, wb_cfg, dst)
+
+    assert result.conflicts == 0, (
+        f"Expected 0 conflicts (job_title change is field-scoped out); got {result}"
+    )
+    assert len(patched) == 1, "PATCH should be sent because only unrelated field changed"
+
+
+@pytest.mark.anyio
+async def test_three_way_last_writer_wins_sends_patch_despite_conflict(pool, run_migrations):
+    """T2 #3 / T2 #30: last_writer_wins resolution — conflict is detected and counted
+    but the PATCH is still sent (overwriting external changes).
+    """
+    os.environ["INOUT_CREDENTIAL_CONFLICT_KEY"] = "dummy"
+    from inandout.config.writeback import ConflictResolution
+    from inandout.postgres.desired_state import (
+        ensure_desired_state_table,
+        ensure_lwstate_table,
+        desired_state_table_name,
+        lwstate_table_name,
+        get_lwstate,
+    )
+    from inandout.writeback.engine import WritebackEngine
+
+    # Build a connector with last_writer_wins resolution
+    connector_lww = _make_connector(connector_name="conflict_test_e")
+    from inandout.config.writeback import WritebackConfig, ProtectionLevel, OperationsConfig, OperationConfig, UpdateOperationConfig
+    new_wb_cfg = WritebackConfig(
+        protection_level=ProtectionLevel.optimistic,
+        conflict_resolution=ConflictResolution.last_writer_wins,
+        supported_actions=["update"],
+        use_desired_state_table=True,
+        operations=OperationsConfig(
+            lookup=OperationConfig(method="GET", path="/v1/orders/${external_id}"),
+            update=UpdateOperationConfig(method="PATCH", path="/v1/orders/${external_id}"),
+        ),
+    )
+    import copy
+    connector_lww = copy.deepcopy(connector_lww)
+    connector_lww.datatypes[_DATATYPE].__dict__["writeback"] = new_wb_cfg
+    object.__setattr__(connector_lww.datatypes[_DATATYPE], "writeback", new_wb_cfg)
+
+    dst = desired_state_table_name("conflict_test_e", _DATATYPE)
+    lwst = lwstate_table_name("conflict_test_e", _DATATYPE)
+
+    async with pool.connection() as conn:
+        await ensure_desired_state_table(conn, "conflict_test_e", _DATATYPE)
+        await ensure_lwstate_table(conn, "conflict_test_e", _DATATYPE)
+
+        await conn.execute(
+            f"""
+            INSERT INTO {lwst} (external_id, data, _written_at)
+            VALUES ('ord-5', %s, NOW())
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data
+            """,
+            [orjson.dumps({"status": "pending"}).decode()],
+        )
+        await conn.execute(
+            f"""
+            INSERT INTO {dst} (external_id, data, _action)
+            VALUES ('ord-5', %s, 'update')
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data, _action=EXCLUDED._action
+            """,
+            [orjson.dumps({"status": "shipped", "_base": {"status": "pending"}}).decode()],
+        )
+        await conn.commit()
+
+    patched = []
+
+    def _handle_get(request):
+        return httpx.Response(200, json={"id": "ord-5", "status": "modified_externally"})
+
+    def _handle_patch(request):
+        patched.append(request)
+        return httpx.Response(200, json={"id": "ord-5", "status": "shipped"})
+
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_get)
+        mock.patch(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_patch)
+
+        engine = WritebackEngine(pool)
+        result = await engine.run_writeback_cycle(connector_lww, _DATATYPE, new_wb_cfg, dst)
+
+    assert result.conflicts >= 1, "Conflict should be counted even with last_writer_wins"
+    assert len(patched) == 1, "PATCH must be sent despite conflict with last_writer_wins"
+    assert result.processed >= 1, "Record should count as processed (write executed)"
