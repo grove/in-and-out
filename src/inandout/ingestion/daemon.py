@@ -153,11 +153,80 @@ def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
 # ---------------------------------------------------------------------------
 
 async def _health(request: Request) -> JSONResponse:
+    """Liveness probe - returns 200 if process is alive."""
     return JSONResponse({"status": "ok"})
 
 
-async def _ready(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ready", "connectors": []})
+def _make_ready_handler(pool: Any, connector_configs: list) -> Any:
+    """Build /ready handler with access to pool and connector configs."""
+    async def _ready(request: Request) -> JSONResponse:
+        """
+        Readiness probe - returns connector status details.
+        Per GOAL.md: includes which connectors are active, paused, or circuit-broken.
+        """
+        connectors: dict[str, dict] = {}
+        
+        if pool:
+            try:
+                async with pool.connection() as conn:
+                    # Check connector health status
+                    rows = await conn.execute(
+                        "SELECT connector, datatype, status, reason FROM inout_ops_connector_health"
+                    )
+                    health_rows = await rows.fetchall()
+                    
+                    # Check paused connectors
+                    pause_rows_cursor = await conn.execute(
+                        "SELECT connector, datatype FROM inout_ops_control WHERE command = 'pause'"
+                    )
+                    pause_rows = await pause_rows_cursor.fetchall()
+                    
+                    # Build status map
+                    for row in health_rows:
+                        conn_name = row[0]
+                        dt = row[1]
+                        status = row[2]
+                        reason = row[3]
+                        
+                        if conn_name not in connectors:
+                            connectors[conn_name] = {"status": "active", "datatypes": {}}
+                        
+                        connectors[conn_name]["datatypes"][dt] = {
+                            "status": status,
+                            "reason": reason,
+                        }
+                        
+                        if status == "unavailable":
+                            connectors[conn_name]["status"] = "circuit_broken"
+                    
+                    # Mark paused
+                    for row in pause_rows:
+                        conn_name = row[0]
+                        dt = row[1]
+                        
+                        if conn_name not in connectors:
+                            connectors[conn_name] = {"status": "paused", "datatypes": {}}
+                        else:
+                            connectors[conn_name]["status"] = "paused"
+                        
+                        if dt:
+                            connectors[conn_name]["datatypes"][dt] = {"status": "paused"}
+                    
+            except Exception as exc:
+                logger.warning("ready_check_failed", error=str(exc))
+        
+        # Add configured connectors not in status map (active by default)
+        for cfg in connector_configs:
+            conn_name = cfg.connector.name
+            if conn_name not in connectors:
+                connectors[conn_name] = {"status": "active", "datatypes": {}}
+        
+        return JSONResponse({
+            "status": "ready",
+            "connectors": connectors,
+        })
+    
+    return _ready
 
 
 def _build_app(
@@ -169,7 +238,7 @@ def _build_app(
 
     app = FastAPI(title="in-and-out", docs_url="/api/docs")
     app.add_api_route("/health", _health)
-    app.add_api_route("/ready", _ready)
+    app.add_api_route("/ready", _make_ready_handler(pool, connector_configs))
     app.mount("/metrics", prometheus_make_asgi_app(registry=REGISTRY))
 
     for connector_file_cfg in connector_configs:

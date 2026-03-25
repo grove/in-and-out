@@ -138,6 +138,8 @@ class ControlDispatcher:
             return self._cmd_drain(connector)
         elif command == "rotate-credential":
             return self._cmd_rotate_credential(connector, payload)
+        elif command == "gdpr-purge":
+            return await self._cmd_gdpr_purge(connector, datatype, payload)
         else:
             raise ValueError(f"Unknown command: {command!r}")
 
@@ -180,6 +182,40 @@ class ControlDispatcher:
         return {
             "rotated": credential_ref,
             "cache_entries_invalidated": invalidated,
+        }
+
+    async def _cmd_gdpr_purge(
+        self, connector: str | None, datatype: str | None, payload: dict | None
+    ) -> dict:
+        """GDPR-compliant targeted purge of all data for a specific external_id."""
+        from inandout.postgres.housekeeping import purge_by_external_id
+        
+        if not connector:
+            raise ValueError("gdpr-purge requires 'connector'")
+        if not datatype:
+            raise ValueError("gdpr-purge requires 'datatype'")
+        if not payload or "external_id" not in payload:
+            raise ValueError("gdpr-purge requires payload with 'external_id' field")
+        
+        external_id = str(payload["external_id"])
+        
+        result = await purge_by_external_id(self._pool, connector, datatype, external_id)
+        
+        total_deleted = sum(result.values())
+        logger.info(
+            "gdpr_purge_executed",
+            connector=connector,
+            datatype=datatype,
+            external_id=external_id,
+            total_deleted=total_deleted,
+        )
+        
+        return {
+            "connector": connector,
+            "datatype": datatype,
+            "external_id": external_id,
+            "deleted": result,
+            "total": total_deleted,
         }
 
     async def _cmd_force_full_sync(

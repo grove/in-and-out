@@ -124,3 +124,108 @@ async def run_housekeeping(
 
     logger.info("housekeeping_complete", totals=totals)
     return totals
+
+
+async def purge_by_external_id(
+    pool: AsyncConnectionPool,
+    connector: str,
+    datatype: str,
+    external_id: str,
+) -> dict:
+    """
+    GDPR-compliant targeted purge: delete all records for a specific external_id.
+    
+    Purges from:
+    - Main datatype table (inout_{connector}_{datatype})
+    - History table (inout_{connector}_{datatype}_history)
+    - Last-written-state (inout_lwstate_{connector}_{datatype})
+    - Desired-state tables (inout_dst_{connector}_{datatype})
+    - Dead-letter table (inout_dead_letter)
+    - Writeback result table (inout_writeback_result)
+    
+    Returns count of rows deleted per table.
+    """
+    totals: dict[str, int] = {}
+    
+    async with pool.connection() as conn:
+        # Main table
+        main_table = f"inout_{connector}_{datatype}"
+        try:
+            cur = await conn.execute(
+                f"DELETE FROM {main_table} WHERE external_id = %s",
+                [external_id],
+            )
+            totals["main"] = cur.rowcount or 0
+        except Exception as exc:
+            logger.warning("gdpr_purge_main_failed", table=main_table, error=str(exc))
+            totals["main"] = 0
+        
+        # History table
+        history_table = f"{main_table}_history"
+        try:
+            cur = await conn.execute(
+                f"DELETE FROM {history_table} WHERE external_id = %s",
+                [external_id],
+            )
+            totals["history"] = cur.rowcount or 0
+        except Exception:
+            totals["history"] = 0
+        
+        # Last-written-state
+        lwstate_table = f"inout_lwstate_{connector}_{datatype}"
+        try:
+            cur = await conn.execute(
+                f"DELETE FROM {lwstate_table} WHERE external_id = %s",
+                [external_id],
+            )
+            totals["lwstate"] = cur.rowcount or 0
+        except Exception:
+            totals["lwstate"] = 0
+        
+        # Desired-state
+        dst_table = f"inout_dst_{connector}_{datatype}"
+        try:
+            cur = await conn.execute(
+                f"DELETE FROM {dst_table} WHERE external_id = %s",
+                [external_id],
+            )
+            totals["desired_state"] = cur.rowcount or 0
+        except Exception:
+            totals["desired_state"] = 0
+        
+        # Dead-letter
+        try:
+            cur = await conn.execute(
+                """
+                DELETE FROM inout_dead_letter
+                WHERE connector = %s AND datatype = %s AND external_id = %s
+                """,
+                [connector, datatype, external_id],
+            )
+            totals["dead_letter"] = cur.rowcount or 0
+        except Exception:
+            totals["dead_letter"] = 0
+        
+        # Writeback result
+        try:
+            cur = await conn.execute(
+                """
+                DELETE FROM inout_writeback_result
+                WHERE connector = %s AND datatype = %s AND external_id = %s
+                """,
+                [connector, datatype, external_id],
+            )
+            totals["writeback_result"] = cur.rowcount or 0
+        except Exception:
+            totals["writeback_result"] = 0
+        
+        await conn.commit()
+    
+    logger.info(
+        "gdpr_purge_complete",
+        connector=connector,
+        datatype=datatype,
+        external_id=external_id,
+        totals=totals,
+    )
+    return totals
