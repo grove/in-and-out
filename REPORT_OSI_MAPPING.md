@@ -492,7 +492,6 @@ External APIs
 │  - cluster_id                        │
 │  - data (JSONB payload)              │
 │  - base (original source snapshot)   │
-│  - base_version (ETag/version)       │
 └────────────┬─────────────────────────┘
              │
           consumes
@@ -617,8 +616,7 @@ SELECT
   END as action,
   r._cluster_id,
   jsonb_build_object('email', r.email, 'name', r.name) as data,
-  r._base,
-  NULL as base_version
+  r._base
 FROM _resolved_contact r
 LEFT JOIN previous_resolved prev USING (cluster_id)
 WHERE r._cluster_id IS NOT NULL
@@ -630,7 +628,6 @@ action: 'update'
 cluster_id: <UUID>
 data: {email: "alice@x.com", name: "Alice"}
 base: {email: "alice@x.com", name: "Alice"}
-base_version: NULL
 ```
 
 ### Step 6: Writeback Conflict Detection
@@ -1018,8 +1015,7 @@ select
     'first_name', r.first_name,
     'last_name', r.last_name
   ) as data,
-  r._base,
-  null as base_version
+  r._base
 from {{ ref('resolved_contact') }} r
 where r._cluster_id is not null
   and r.email is not null -- business rule: email required
@@ -1054,13 +1050,12 @@ CREATE OR REPLACE FUNCTION build_desired_state_contact()
 RETURNS void AS $$
 BEGIN
   INSERT INTO inout_dst_crm_contact
-    (cluster_id, action, data, base, base_version)
+    (cluster_id, action, data, base)
   SELECT
     r._cluster_id,
     (CASE WHEN r.email != prev.email THEN 'update' ELSE 'noop' END),
     to_jsonb(r),
-    r._base,
-    NULL
+    r._base
   FROM _resolved_contact r
   LEFT JOIN previous_contact prev USING (cluster_id);
 END

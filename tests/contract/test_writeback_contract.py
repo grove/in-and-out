@@ -42,7 +42,6 @@ async def _ensure_desired_state_table(conn, connector: str, datatype: str) -> st
             external_id     TEXT,
             data            JSONB NOT NULL DEFAULT '{{}}',
             base            JSONB,
-            base_version    TEXT,
             _status         TEXT NOT NULL DEFAULT 'pending',
             _processed_at   TIMESTAMPTZ,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -85,7 +84,7 @@ async def test_desired_state_table_required_columns(pool):
         cols = await _get_columns(conn, f"inout_dst_{connector}_{datatype}")
 
     required = ["id", "action", "cluster_id", "external_id", "data",
-                "base", "base_version", "_status", "_processed_at", "created_at"]
+                "base", "_status", "_processed_at", "created_at"]
     for col in required:
         assert col in cols, f"Missing required column in inout_dst_*: {col}"
 

@@ -814,7 +814,7 @@ The existing `docs/SCHEMA_CONTRACT.md` should be reviewed and extended to cover:
    - Append-only; all source table columns plus `_history_id` (serial PK) and `_valid_from` / `_valid_to`
 
 3. **Desired-state table contract (`inout_dst_*`)**
-   - Columns: `cluster_id`, `action`, `data`, `base`, `base_version`, `_requested_at`, `_status`, `_processed_at`
+   - Columns: `cluster_id`, `action`, `data`, `base`, `_requested_at`, `_status`, `_processed_at`
    - Who writes these rows (OSI-Mapping) and who reads them (writeback daemon)
 
 4. **Schema versioning and drift detection**

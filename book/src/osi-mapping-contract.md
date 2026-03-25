@@ -149,7 +149,6 @@ The `_delta_{mapping}` view (or its materialised equivalent) must expose the fol
 | `external_id` | TEXT | NULL | The source system's primary key. Used to construct the API URL for updates and deletes. NULL for inserts into a system that has no prior record. |
 | `data` | JSONB | NOT NULL | The full desired-state payload. For updates, this is the resolved value after conflict resolution. For inserts, this is the new record. |
 | `base` | JSONB | NULL | The original source-system snapshot at the time of the last ingestion. Used as the "base" in three-way merge conflict detection during writeback. |
-| `base_version` | TEXT | NULL | The ETag or version identifier from the source system at the time `base` was captured. Used for conditional HTTP writes (`If-Match`). |
 
 ### Desired-state tables (`inout_dst_*`)
 
@@ -167,7 +166,6 @@ inout_dst_{connector}_{datatype}
 | `external_id` | TEXT | NULL | — | Source system external ID. |
 | `data` | JSONB | NOT NULL | — | Full desired-state payload. |
 | `base` | JSONB | NULL | — | Base state for three-way merge. |
-| `base_version` | TEXT | NULL | — | Version/ETag at time of base snapshot. |
 | `_status` | TEXT | NOT NULL | `pending` | Processing state: `pending` → `processing` → `done`. |
 | `_processed_at` | TIMESTAMPTZ | NULL | — | When writeback processed this row. |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `NOW()` | Row creation time. |

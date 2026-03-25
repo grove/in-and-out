@@ -47,7 +47,6 @@ def desired_state_table_ddl(connector: str, datatype: str, namespace: str = "pub
     cluster_id      TEXT,
     data            JSONB NOT NULL,
     base            JSONB,
-    base_version    TEXT,
     _action         TEXT NOT NULL DEFAULT 'update',
     _status         TEXT NOT NULL DEFAULT 'pending',
     _schema_version INTEGER NOT NULL DEFAULT 1,
@@ -110,7 +109,6 @@ async def ensure_desired_state_table(
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _processed_at TIMESTAMPTZ",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cluster_id TEXT",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS base JSONB",
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS base_version TEXT",
     ):
         await conn.execute(col_ddl)
 

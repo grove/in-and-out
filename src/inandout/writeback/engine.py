@@ -1005,29 +1005,21 @@ class WritebackEngine:
                 sent_diff: dict[str, Any] | None = None
 
                 if writeback_cfg.protection_level == ProtectionLevel.optimistic:
-                    # Use base_version from the desired-state row as the ETag when available
-                    # (avoids an extra GET round-trip when the MDM has already recorded it).
-                    # Fall back to a fresh lookup GET when base_version is absent.
-                    base_version: str = str(row.get("base_version") or row.get("_base_version") or "")
                     lookup_path = interpolate_path(ops.lookup.path)
-                    if base_version:
-                        etag = base_version
-                        remote_data = {}  # skip GET — trust base_version as ETag
-                    else:
+                    try:
+                        lookup_resp = await transport._raw_request(
+                            ops.lookup.method.upper(), lookup_path
+                        )
+                        etag = lookup_resp.headers.get(writeback_cfg.etag_header, "") if lookup_resp.is_success else ""
+                        remote_data = {}
                         try:
-                            lookup_resp = await transport._raw_request(
-                                ops.lookup.method.upper(), lookup_path
-                            )
-                            etag = lookup_resp.headers.get(writeback_cfg.etag_header, "") if lookup_resp.is_success else ""
-                            remote_data = {}
-                            try:
-                                if lookup_resp.is_success:
-                                    remote_data = orjson.loads(lookup_resp.content)
-                            except Exception:
-                                remote_data = {}
+                            if lookup_resp.is_success:
+                                remote_data = orjson.loads(lookup_resp.content)
                         except Exception:
-                            etag = ""
                             remote_data = {}
+                    except Exception:
+                        etag = ""
+                        remote_data = {}
 
                     # Apply conflict resolution strategy
                     conflict_resolution = writeback_cfg.conflict_resolution
@@ -1155,11 +1147,8 @@ class WritebackEngine:
                         raise
                 else:
                     extra_headers = _make_extra_headers(payload)
-                    # Prefer base_version from desired-state row as If-Match (avoids extra GET)
-                    _row_base_version = str(row.get("base_version") or row.get("_base_version") or "")
-                    _effective_etag = _row_base_version or _3way_etag
-                    if _effective_etag and writeback_cfg.etag_header:
-                        extra_headers[writeback_cfg.if_match_header] = _effective_etag
+                    if _3way_etag and writeback_cfg.etag_header:
+                        extra_headers[writeback_cfg.if_match_header] = _3way_etag
 
                     # B1: dry_run — log would-be write, skip actual HTTP call
                     if dry_run:

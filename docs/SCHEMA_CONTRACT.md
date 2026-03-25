@@ -70,7 +70,6 @@ inout_dst_{connector}_{datatype}
 | `external_id`    | TEXT         | NULL     | —           | Source system external ID                |
 | `data`           | JSONB        | NOT NULL | —           | Full desired-state payload               |
 | `base`           | JSONB        | NULL     | —           | Base state for three-way merge           |
-| `base_version`   | TEXT         | NULL     | —           | Version/etag at time of base snapshot    |
 | `_status`        | TEXT         | NOT NULL | `pending`   | `pending` / `processing` / `done`        |
 | `_processed_at`  | TIMESTAMPTZ  | NULL     | —           | Timestamp when writeback processed row   |
 | `created_at`     | TIMESTAMPTZ  | NOT NULL | `NOW()`     | Row creation timestamp                   |
