@@ -1,71 +1,74 @@
-# in-and-out
+<div align="center">
 
-Declarative, bidirectional HTTP API synchronization for composite MDM platforms.
+# 🔄 in-and-out
 
-in-and-out is the I/O layer between external SaaS APIs and your PostgreSQL-based MDM pipeline. It runs as two stateless daemons:
+**Keep your systems in sync — automatically.**
 
-- Ingestion daemon: pulls records from external APIs into PostgreSQL source tables
-- Writeback daemon: pushes desired-state changes back to external APIs with conflict protection
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.13+](https://img.shields.io/badge/Python-3.13%2B-3776AB.svg?logo=python&logoColor=white)](https://python.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B-336791.svg?logo=postgresql&logoColor=white)](https://postgresql.org)
+[![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)](Dockerfile)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Supported-326CE5.svg?logo=kubernetes&logoColor=white)](k8s/)
 
-All behavior is configured through YAML connector files and tool config, so integrations are version-controlled and repeatable.
+---
 
-## Why this project exists
+*A data synchronization tool that connects your external services (like HubSpot, Salesforce, etc.) to your central database — pulling data in and pushing changes back out, all configured through simple YAML files.*
 
-Most MDM programs need robust API integration plumbing before identity resolution can add value. in-and-out focuses specifically on that plumbing:
+</div>
 
-- Inbound sync with polling and webhook support
-- Outbound writeback with pre-flight checks and conflict strategies
-- Durable operational state in PostgreSQL
-- Strong observability and operator controls
+## What does in-and-out do?
 
-This lets upstream systems like OSI-Mapping focus on identity resolution and consolidation logic.
+Imagine you have customer data spread across multiple cloud services. You need that data in one central place (a PostgreSQL database), and when you make changes there, those changes need to flow back out to the original services.
 
-## Core capabilities
+**in-and-out handles both directions automatically:**
 
-- Declarative connectors in YAML (no custom integration code required)
-- Multiple generation profiles:
-  - ingestion_polling_readonly
-  - ingestion_webhook_incremental
-  - writeback_patch
-  - full_duplex
-- Built-in auth models: OAuth2, API key, JWT, custom flows
-- Pagination support: cursor, offset, link header, keyset
-- Incremental sync with watermarks and checkpoints
-- Writeback protection levels and conflict-resolution strategies
-- Dead-letter queues and replay workflows
-- Runtime control plane via control table and CLI
-- Health/readiness endpoints, Prometheus metrics, OpenTelemetry traces
+```
+                    ┌──────────────┐
+  HubSpot ─────┐   │              │   ┌───── HubSpot
+  Salesforce ──┼──▶│  PostgreSQL  │──▶├───── Salesforce
+  Stripe ──────┘   │  (your hub)  │   └───── Stripe
+                    └──────────────┘
+               PULL data in          PUSH changes out
+```
 
-## High-level architecture
+It runs as two background services:
 
-External APIs and webhooks feed the ingestion daemon, which writes source tables in PostgreSQL.
-OSI-Mapping and pg-trickle consume those tables and produce desired-state rows.
-The writeback daemon consumes desired state and writes changes back to external APIs.
+| Service | What it does |
+|---------|-------------|
+| **Ingestion** | Pulls records from external APIs into your database on a schedule or via webhooks |
+| **Writeback** | Pushes changes from your database back to external APIs with conflict protection |
 
-The daemons are decoupled through PostgreSQL and can be scaled independently.
+## Why use it?
 
-## Repository layout
+- **No code required** — define integrations in YAML config files, not custom code
+- **Reliable** — tracks progress with checkpoints so nothing gets lost on restart
+- **Conflict-aware** — detects when external data changed before overwriting it
+- **Observable** — built-in health checks, metrics, and tracing
+- **Scalable** — stateless services backed by PostgreSQL; run multiple instances safely
 
-- src/inandout: application source code
-- config: tool config for ingestion and writeback daemons
-- connectors: connector examples and templates
-- migrations: Alembic schema migrations
-- schemas: JSON schemas for connector validation
-- tests: unit, integration, contract, acceptance, load
-- book: mdBook documentation source
-- docs-build: generated local docs output
+## How it fits into the bigger picture
 
-## Quick start
+in-and-out is the data transport layer. It works alongside [OSI-Mapping](https://github.com/BaardBouvet/OSI-mapping), which handles the harder problem of figuring out which records across different systems represent the same real-world entity (identity resolution).
 
-### Prerequisites
+```
+External APIs → [in-and-out] → PostgreSQL → [OSI-Mapping] → PostgreSQL → [in-and-out] → External APIs
+                  (pull in)                  (resolve &                      (push out)
+                                              merge)
+```
 
-- Python 3.13+
-- uv
-- PostgreSQL 15 or 16
-- Docker and Docker Compose (optional but recommended for local stack)
-- just (optional convenience task runner)
+## Getting started
 
-### Install
+### What you'll need
+
+| Requirement | Notes |
+|------------|-------|
+| Python 3.13+ | Runtime |
+| [uv](https://docs.astral.sh/uv/) | Python package manager |
+| PostgreSQL 15+ | Database |
+| Docker + Compose | *Optional* — easiest way to run PostgreSQL locally |
+| [just](https://github.com/casey/just) | *Optional* — handy task runner |
+
+### 1. Clone and install
 
 ```bash
 git clone git@github.com:grove/in-and-out.git
@@ -73,105 +76,103 @@ cd in-and-out
 uv sync --all-extras
 ```
 
-### Start local database and migrate
+### 2. Start the database
 
-With just:
+Using `just` (recommended):
 
 ```bash
 just up-db
 just db-upgrade
 ```
 
-Or directly:
+Or with Docker Compose directly:
 
 ```bash
 docker compose up -d postgres
 uv run alembic upgrade head
 ```
 
-### Run daemons locally
+### 3. Run the services
 
 ```bash
-just ingest
-just writeback
+just ingest       # start pulling data in
+just writeback    # start pushing changes out
 ```
 
-### Validate a connector
+### 4. Validate a connector file
 
 ```bash
 uv run inandout ingest validate-connector --connector connectors/hubspot.example.yaml
 ```
 
-## Local documentation
+## Key features
 
-This project uses mdBook for documentation.
+| Feature | Description |
+|---------|-------------|
+| **YAML connectors** | Define integrations declaratively — no custom code |
+| **Multiple sync modes** | Polling, webhooks, incremental sync, full duplex |
+| **Built-in authentication** | OAuth2, API key, JWT, and custom auth flows |
+| **Smart pagination** | Cursor, offset, link header, and keyset pagination |
+| **Conflict resolution** | Configurable strategies to handle concurrent changes |
+| **Dead-letter queues** | Failed records are saved for review and replay |
+| **Runtime control** | Pause, resume, and reconfigure without restarting |
+| **Observability** | Prometheus metrics, OpenTelemetry traces, health endpoints |
 
-Build docs:
+## CLI commands
 
-```bash
-just docs-build
+in-and-out provides a command-line interface organized into groups:
+
+```
+inandout ingest        # Data ingestion commands
+inandout writeback     # Writeback commands
+inandout db            # Database management
+inandout control       # Runtime control (pause, resume, etc.)
+inandout dead-letter   # Review and replay failed records
+inandout webhook       # Webhook management
+inandout connector     # Connector utilities
+inandout api           # API server
 ```
 
-Serve docs locally with live reload:
+Run `uv run inandout --help` to see all available commands.
+
+## Documentation
+
+Full documentation is built with [mdBook](https://rust-lang.github.io/mdBook/). To browse it locally:
 
 ```bash
-just docs-serve
+just docs-serve     # builds and opens docs with live reload
 ```
 
-## CLI overview
+## Project structure
 
-Main command groups:
-
-- inandout ingest
-- inandout writeback
-- inandout db
-- inandout control
-- inandout dead-letter
-- inandout webhook
-- inandout connector
-- inandout api
-
-Show all commands:
-
-```bash
-uv run inandout --help
+```
+src/inandout/    Application source code
+config/          Daemon configuration files
+connectors/      Connector examples and templates
+migrations/      Database schema migrations (Alembic)
+schemas/         JSON schemas for connector validation
+tests/           Unit, integration, contract, acceptance, and load tests
+book/            Documentation source (mdBook)
+k8s/             Kubernetes deployment manifests
 ```
 
-## Operations model
-
-Operational state is stored in inout_ops_* tables, including:
-
-- inout_ops_sync_run
-- inout_ops_watermark
-- inout_ops_control
-- inout_ops_writeback_result
-- inout_ops_identity_map
-
-Dead-letter queues are stored in inout_dl_* tables for ingestion and writeback replay workflows.
-
-## Development workflow
-
-Useful commands:
+## Development
 
 ```bash
-just check            # lint + typecheck
-just test             # unit tests
-just test-all         # all non-acceptance/non-load tests
-just validate-connectors
-```
-
-Run the full local CI path:
-
-```bash
-just ci
+just check       # Run linter and type checker
+just test        # Run unit tests
+just test-all    # Run all tests (except acceptance & load)
+just ci          # Full CI pipeline locally
 ```
 
 ## Deployment
 
-- Docker Compose files are included for local and observability stacks
-- Kubernetes manifests are provided under k8s
-- GitHub Actions workflow builds mdBook docs from book
+in-and-out is designed for containerized deployment:
+
+- **Docker Compose** — included for local and observability stacks
+- **Kubernetes** — manifests provided in `k8s/`
+- **CI/CD** — GitHub Actions workflow for automated builds and docs
 
 ## License
 
-This project is licensed under the terms in LICENSE.
+Licensed under [Apache 2.0](LICENSE).
