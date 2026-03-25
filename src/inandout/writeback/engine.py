@@ -1060,22 +1060,54 @@ class WritebackEngine:
                         last_written = await self._get_last_written(connector, result.datatype, external_id)
                         merged: dict[str, Any] = {}
                         conflicted_fields: list[str] = []
+                        
+                        # T2 #3: Build field coupling map for faster lookups
+                        coupled_map: dict[str, set[str]] = {}
+                        for group in writeback_cfg.coupled_fields:
+                            group_set = set(group)
+                            for field in group:
+                                coupled_map[field] = group_set
+                        
+                        # First pass: detect conflicted fields
+                        primary_conflicts: set[str] = set()
                         for field_name, local_val in payload.items():
                             last_val = last_written.get(field_name)
                             remote_val = remote_data.get(field_name)
                             if remote_val is not None and remote_val != last_val:
-                                # Server changed this field — keep server value
-                                merged[field_name] = remote_val
-                                conflicted_fields.append(field_name)
+                                primary_conflicts.add(field_name)
+                        
+                        # Apply field coupling: if any field in a group conflicts, all in group conflict
+                        all_conflicts: set[str] = set(primary_conflicts)
+                        for conflicted_field in primary_conflicts:
+                            if conflicted_field in coupled_map:
+                                all_conflicts.update(coupled_map[conflicted_field])
+                        
+                        # Second pass: merge based on expanded conflict set
+                        for field_name, local_val in payload.items():
+                            if field_name in all_conflicts:
+                                # Field is conflicted (directly or via coupling) — keep server value
+                                remote_val = remote_data.get(field_name)
+                                if remote_val is not None:
+                                    merged[field_name] = remote_val
+                                    conflicted_fields.append(field_name)
+                                else:
+                                    # Server doesn't have this coupled field — use local
+                                    merged[field_name] = local_val
                             else:
-                                # Server unchanged or field not in remote — use local value
+                                # No conflict — use local value
                                 merged[field_name] = local_val
+                        
                         if conflicted_fields:
                             logger.info(
                                 "writeback_conflict_merged",
                                 action=action,
                                 external_id=external_id,
                                 conflicted_fields=conflicted_fields,
+                                coupled_groups=[
+                                    list(coupled_map.get(f, set()))
+                                    for f in conflicted_fields
+                                    if f in coupled_map
+                                ],
                             )
                             try:
                                 conflicts_detected_total.labels(

@@ -132,6 +132,10 @@ class WritebackConfig(BaseModel):
     # T2 #23: JSON Schema (dict) to validate the outbound payload before HTTP dispatch.
     # Supports: required (list), properties ({field: {type}}), additionalProperties (bool)
     payload_schema: dict[str, Any] | None = None
+    # T2 #3: field coupling for conflict resolution — declare logically-related field groups.
+    # When any field in a group conflicts, all fields in that group are treated as conflicted.
+    # Example: [["email", "email_verified"], ["address", "city", "zip"]]
+    coupled_fields: list[list[str]] = []
 
     @model_validator(mode="after")
     def validate_protection_level_pairing(self) -> "WritebackConfig":
