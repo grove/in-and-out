@@ -131,7 +131,8 @@ class ListConfig(BaseModel):
     drift_protection: bool = True
     drift_max_shrink_pct: float = 50.0   # trip circuit breaker if result set shrinks >50%
     drift_min_records: int = 0           # minimum expected records; 0 = use previous run's count
-    snapshot_param: str | None = None    # query param for server-side snapshot
+    snapshot_param: str | None = None    # query param for server-side snapshot (e.g., "snapshot_id")
+    snapshot_response_path: str | None = None  # dot-notation path to snapshot ID in first page response
     reconciliation_pass: bool = False    # after full page fetch, re-query changed records
     # A5: bulk export support
     bulk_export: BulkExportConfig | None = None

@@ -331,17 +331,32 @@ class HttpTransportAdapter:
             return {**base_params, **extra_params}
 
         termination = set(pagination.termination or [])
+        
+        # A2: snapshot extraction from first page response
+        snapshot_response_path = getattr(list_config, "snapshot_response_path", None)
+        extracted_snapshot: str | None = None
 
         if pagination.strategy == PaginationStrategy.cursor:
             assert pagination.cursor is not None
             cursor_value: str | None = None
+            page_num = 0
             while True:
+                page_num += 1
                 extra_params = {}
                 if cursor_value is not None:
                     extra_params[pagination.cursor.request_param] = cursor_value
+                # Inject extracted snapshot on subsequent pages if available
+                if page_num > 1 and snapshot_param and extracted_snapshot:
+                    base_params[snapshot_param] = extracted_snapshot
                 params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
+                # Extract snapshot from first page
+                if page_num == 1 and snapshot_response_path and snapshot_param:
+                    extracted_snapshot = jmespath.search(snapshot_response_path, data)
+                    if extracted_snapshot:
+                        extracted_snapshot = str(extracted_snapshot)
+                        base_params[snapshot_param] = extracted_snapshot
                 records = _extract_records(data, record_selector)
                 yield records
                 if not records and ("empty_page" in termination or not termination):
@@ -357,11 +372,22 @@ class HttpTransportAdapter:
             offset_param = str(offset_cfg.get("offset_param", "offset"))
             limit_param = str(offset_cfg.get("limit_param", "limit"))
             offset = 0
+            page_num = 0
             while True:
+                page_num += 1
                 extra_params = {offset_param: str(offset), limit_param: str(page_size)}
+                # Inject extracted snapshot on subsequent pages
+                if page_num > 1 and snapshot_param and extracted_snapshot:
+                    base_params[snapshot_param] = extracted_snapshot
                 params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
+                # Extract snapshot from first page
+                if page_num == 1 and snapshot_response_path and snapshot_param:
+                    extracted_snapshot = jmespath.search(snapshot_response_path, data)
+                    if extracted_snapshot:
+                        extracted_snapshot = str(extracted_snapshot)
+                        base_params[snapshot_param] = extracted_snapshot
                 records = _extract_records(data, record_selector)
                 yield records
                 if len(records) < page_size:
@@ -370,10 +396,21 @@ class HttpTransportAdapter:
 
         elif pagination.strategy == PaginationStrategy.link_header:
             url: str | None = path
+            page_num = 0
             while url:
+                page_num += 1
+                # Inject extracted snapshot on subsequent pages
+                if page_num > 1 and snapshot_param and extracted_snapshot:
+                    base_params[snapshot_param] = extracted_snapshot
                 params = _build_params({}) if url == path else {}
                 resp = await self._request(method, url, params=params)
                 data = orjson.loads(resp.content)
+                # Extract snapshot from first page
+                if page_num == 1 and snapshot_response_path and snapshot_param:
+                    extracted_snapshot = jmespath.search(snapshot_response_path, data)
+                    if extracted_snapshot:
+                        extracted_snapshot = str(extracted_snapshot)
+                        base_params[snapshot_param] = extracted_snapshot
                 records = _extract_records(data, record_selector)
                 yield records
                 if not records:
@@ -387,10 +424,19 @@ class HttpTransportAdapter:
             per_page_param = str(pn_cfg.get("per_page_param", "per_page"))
             page = 1
             while True:
+                # Inject extracted snapshot on subsequent pages
+                if page > 1 and snapshot_param and extracted_snapshot:
+                    base_params[snapshot_param] = extracted_snapshot
                 extra_params = {page_param: str(page), per_page_param: str(page_size)}
                 params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
+                # Extract snapshot from first page
+                if page == 1 and snapshot_response_path and snapshot_param:
+                    extracted_snapshot = jmespath.search(snapshot_response_path, data)
+                    if extracted_snapshot:
+                        extracted_snapshot = str(extracted_snapshot)
+                        base_params[snapshot_param] = extracted_snapshot
                 records = _extract_records(data, record_selector)
                 yield records
                 if len(records) < page_size:
@@ -411,13 +457,24 @@ class HttpTransportAdapter:
             page_size = keyset_cfg.page_size
             page_size_param = keyset_cfg.page_size_param
             last_value: str | None = None
+            page_num = 0
             while True:
+                page_num += 1
                 extra_params = {page_size_param: str(page_size)}
                 if last_value is not None:
                     extra_params[request_param] = last_value
+                # Inject extracted snapshot on subsequent pages
+                if page_num > 1 and snapshot_param and extracted_snapshot:
+                    base_params[snapshot_param] = extracted_snapshot
                 params = _build_params(extra_params)
                 resp = await self._request(method, path, params=params)
                 data = orjson.loads(resp.content)
+                # Extract snapshot from first page
+                if page_num == 1 and snapshot_response_path and snapshot_param:
+                    extracted_snapshot = jmespath.search(snapshot_response_path, data)
+                    if extracted_snapshot:
+                        extracted_snapshot = str(extracted_snapshot)
+                        base_params[snapshot_param] = extracted_snapshot
                 records = _extract_records(data, record_selector)
                 yield records
                 if len(records) < page_size:
