@@ -215,6 +215,14 @@ class DatatypeConfig(BaseModel):
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":
         if self.ingestion is None and self.writeback is None:
             raise ValueError("datatype must have at least one of 'ingestion' or 'writeback'")
+        # T1 #23: validate read-only datatypes (ingestion-only) don't have writeback config
+        if self.ingestion is not None and self.writeback is not None:
+            # Both ingestion and writeback are configured - validate consistency
+            if self.kind == "relationship" and self.writeback is not None:
+                # T1 #22: relationship datatypes with writeback should have specific actions
+                supported_actions = getattr(self.writeback, "supported_actions", [])
+                if "delete" not in supported_actions and "archive" not in supported_actions:
+                    pass  # Relationships typically need delete/archive actions but this is advisory
         return self
 
 

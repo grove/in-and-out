@@ -189,6 +189,18 @@ class ControlDispatcher:
         if not connector:
             raise ValueError("force_full_sync requires 'connector'")
 
+        # T1 #14: protect delta-only sources from watermark reset (data loss risk)
+        if datatype:
+            conn_cfg = self._connectors.get(connector)
+            if conn_cfg:
+                dt_cfg = conn_cfg.datatypes.get(datatype)
+                if dt_cfg and dt_cfg.ingestion:
+                    if getattr(dt_cfg.ingestion, "delta_only", False):
+                        raise ValueError(
+                            f"Cannot reset watermark for delta-only datatype {connector}/{datatype}. "
+                            "Delta-only sources provide no full snapshots; resetting would cause data loss."
+                        )
+
         async with self._pool.connection() as conn:
             if datatype:
                 await conn.execute(
