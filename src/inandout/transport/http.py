@@ -14,6 +14,7 @@ from inandout.config.connector import ConnectorConfig
 from inandout.config.ingestion import ListConfig
 from inandout.config.pagination import PaginationStrategy
 from inandout.transport.auth import build_auth_provider
+from inandout.transport.pre_request_auth import PreRequestAuthProvider
 from inandout.transport.errors import (
     ErrorClass,
     classify_http_error,
@@ -61,7 +62,11 @@ class HttpTransportAdapter:
         api_version: str | None = None,
     ) -> None:
         self._connector = connector
-        self._auth = build_auth_provider(connector.auth)
+        # T1 #24: use PreRequestAuthProvider when pre_request is configured on connection
+        if connector.connection.pre_request is not None:
+            self._auth: httpx.Auth = PreRequestAuthProvider(connector.connection.pre_request)
+        else:
+            self._auth = build_auth_provider(connector.auth)
         self._limiter: AsyncLimiter | None = None
         self._token_bucket: TokenBucket | None = None
         self._max_retries = max_retries

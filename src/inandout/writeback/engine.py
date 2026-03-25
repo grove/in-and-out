@@ -339,7 +339,9 @@ class WritebackEngine:
                         rows = [r for r in rows if r.get("_action") != "delete"]
                         result.skipped += delete_count
 
-                async with HttpTransportAdapter(connector) as transport:
+                # T1 #39: pass effective api_version so header is injected when api_version_header is set
+                _wb_api_version = connector.api_version if connector.api_version_header else None
+                async with HttpTransportAdapter(connector, api_version=_wb_api_version) as transport:
                     # Group rows by external_id to preserve per-id ordering
                     grouped: dict[str, list[dict[str, Any]]] = {}
                     for row_data in rows:
