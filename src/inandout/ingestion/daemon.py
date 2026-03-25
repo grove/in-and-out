@@ -28,6 +28,81 @@ from inandout.postgres.pool import create_pool
 from inandout.postgres.version_check import SchemaVersionMismatch, check_schema_version
 from inandout.secrets import configure_backend
 
+logger = structlog.get_logger(__name__)
+
+
+def _check_api_deprecations(connector_configs: list[Any], log: Any) -> None:
+    """Check for API version deprecations and emit warnings (T1 #39).
+    
+    Warns when api_version_deprecation_date is within api_version_warning_days days,
+    or when api_deprecation_deadline has passed.
+    """
+    import datetime as _dt
+    
+    now = _dt.datetime.now(_dt.timezone.utc).date()
+    
+    for cfg in connector_configs:
+        connector = cfg.connector
+        
+        # Check api_version_deprecation_date
+        if connector.api_version_deprecation_date:
+            try:
+                deadline = _dt.date.fromisoformat(connector.api_version_deprecation_date)
+                days_until = (deadline - now).days
+                warning_days = connector.api_version_warning_days
+                
+                if days_until <= 0:
+                    log.error(
+                        "api_version_deprecated",
+                        connector=connector.name,
+                        api_version=connector.api_version,
+                        deprecation_date=connector.api_version_deprecation_date,
+                        message=f"API version {connector.api_version} is DEPRECATED (deadline passed)",
+                    )
+                elif days_until <= warning_days:
+                    log.warning(
+                        "api_version_deprecation_approaching",
+                        connector=connector.name,
+                        api_version=connector.api_version,
+                        deprecation_date=connector.api_version_deprecation_date,
+                        days_remaining=days_until,
+                        message=f"API version {connector.api_version} will be deprecated in {days_until} days",
+                    )
+            except (ValueError, TypeError):
+                log.warning(
+                    "api_deprecation_date_invalid",
+                    connector=connector.name,
+                    date=connector.api_version_deprecation_date,
+                )
+        
+        # Check legacy api_deprecation_deadline field
+        if connector.api_deprecation_deadline:
+            try:
+                deadline = _dt.date.fromisoformat(connector.api_deprecation_deadline)
+                days_until = (deadline - now).days
+                
+                if days_until <= 0:
+                    log.error(
+                        "api_deprecated",
+                        connector=connector.name,
+                        deprecation_deadline=connector.api_deprecation_deadline,
+                        message="API is DEPRECATED (deadline passed)",
+                    )
+                elif days_until <= 60:
+                    log.warning(
+                        "api_deprecation_approaching",
+                        connector=connector.name,
+                        deprecation_deadline=connector.api_deprecation_deadline,
+                        days_remaining=days_until,
+                        message=f"API will be deprecated in {days_until} days",
+                    )
+            except (ValueError, TypeError):
+                log.warning(
+                    "api_deprecation_deadline_invalid",
+                    connector=connector.name,
+                    deadline=connector.api_deprecation_deadline,
+                )
+
 
 def _setup_credential_backend(config: IngestionToolConfig) -> None:
     """Configure the module-level secret backend from tool config."""
@@ -58,7 +133,6 @@ def _setup_credential_backend(config: IngestionToolConfig) -> None:
     else:
         logger.warning("unknown_credential_backend", backend=backend_type)
 
-logger = structlog.get_logger(__name__)
 
 # Drain flag — set by SIGTERM/SIGINT or a 'drain' control command.
 # All polling loops check this at the top of each iteration and exit cleanly.
@@ -673,6 +747,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         return loaded
 
     connector_configs = _load_connectors()
+
+    # T1 #39: Warn about API version deprecations
+    _check_api_deprecations(connector_configs, log)
 
     # Apply topological sort so connectors with dependencies run after their dependencies
     try:
