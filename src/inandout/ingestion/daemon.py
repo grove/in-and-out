@@ -773,14 +773,6 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     engine = IngestionEngine(pool, read_pool=read_pool)
 
-    paused_connectors: set[tuple[str, str]] = set()
-    dispatcher = ControlDispatcher(
-        pool, paused_connectors,
-        target_tool="ingestion",
-        drain_callback=_trigger_drain,
-        reload_callback=reload_flag.set,
-    )
-
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     default_interval_secs = parse_duration(
         config.defaults.scheduling.default_interval if config.defaults.scheduling else "5m"
@@ -819,6 +811,19 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     # T1 #39: Warn about API version deprecations
     _check_api_deprecations(connector_configs, log)
+
+    # Build connector config map for delta-only protection
+    connector_map = {cfg.connector.name: cfg.connector for cfg in connector_configs}
+
+    # Create control dispatcher with connector map
+    paused_connectors: set[tuple[str, str]] = set()
+    dispatcher = ControlDispatcher(
+        pool, paused_connectors,
+        target_tool="ingestion",
+        drain_callback=_trigger_drain,
+        reload_callback=reload_flag.set,
+        connectors=connector_map,
+    )
 
     # Apply topological sort so connectors with dependencies run after their dependencies
     try:

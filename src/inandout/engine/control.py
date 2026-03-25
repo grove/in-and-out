@@ -34,6 +34,7 @@ class ControlDispatcher:
         target_tool: str | None = None,
         drain_callback: Any | None = None,
         reload_callback: Any | None = None,
+        connectors: dict[str, "ConnectorConfig"] | None = None,
     ) -> None:
         self._pool = pool
         self._paused = paused_connectors
@@ -43,6 +44,8 @@ class ControlDispatcher:
         self._drain_callback = drain_callback
         # Called when a 'reload-config' command is received; typically sets a threading.Event
         self._reload_callback = reload_callback
+        # Connector config map for delta-only source protection
+        self._connectors = connectors or {}
 
     # ------------------------------------------------------------------
     # Main entry point — called by the polling loop every N seconds

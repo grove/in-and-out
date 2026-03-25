@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from inandout.config.connector import ConnectorConfig, DatatypeConfig
 from inandout.config.ingestion import HistoryMode, IngestionConfig
 from inandout.ingestion.field_mapper import apply_field_mappings
+from inandout.ingestion.field_exclusion import apply_field_exclusions
 from inandout.ingestion.quality import validate_record
 from inandout.observability.metrics import (
     intra_sync_duplicates_total,
@@ -862,6 +863,11 @@ class IngestionEngine:
                         bulk_buffer: list[dict] = []
 
                         for record in page:
+                            # T1 #21: Apply field exclusions (glob patterns)
+                            properties_exclude = getattr(ingestion_cfg.list, "properties_exclude", [])
+                            if properties_exclude:
+                                record = apply_field_exclusions(record, properties_exclude)
+                            
                             # Apply field mappings (if configured)
                             if dtype_cfg is not None and dtype_cfg.field_mappings:
                                 record = apply_field_mappings(

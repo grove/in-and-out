@@ -23,6 +23,9 @@ class SignatureConfig(BaseModel):
     header: str
     credential_ref: str
     version: str | None = None
+    # Secret rotation support
+    rotation_credential_ref: str | None = None  # Secondary credential during rotation
+    rotation_grace_period: str = "1h"  # How long to accept both secrets
 
 
 class FanOutRoute(BaseModel):

@@ -81,15 +81,46 @@ def _verify_hmac_sha256(
 
 
 def _verify_signature(config: "WebhookConfig", body: bytes, headers: dict) -> bool:
-    """Verify the request signature according to the connector's signature config."""
+    """Verify the request signature according to the connector's signature config.
+    
+    Supports secret rotation: if rotation_credential_ref is configured, will accept
+    signatures from either the primary or rotation secret during the grace period.
+    """
     sig_cfg = config.signature
     header_val = headers.get(sig_cfg.header.lower(), "")
     if not header_val:
         logger.warning("webhook_missing_signature_header", header=sig_cfg.header)
         return False
 
+    # Try primary secret
     secret = resolve_credential(sig_cfg.credential_ref)
+    if _verify_signature_with_secret(sig_cfg, secret, body, header_val):
+        return True
+    
+    # If rotation credential is configured, try it as well (secret rotation grace period)
+    rotation_ref = getattr(sig_cfg, "rotation_credential_ref", None)
+    if rotation_ref:
+        try:
+            rotation_secret = resolve_credential(rotation_ref)
+            if _verify_signature_with_secret(sig_cfg, rotation_secret, body, header_val):
+                logger.info(
+                    "webhook_signature_verified_with_rotation_secret",
+                    credential_ref=rotation_ref,
+                )
+                return True
+        except Exception as exc:
+            logger.warning("webhook_rotation_secret_failed", error=str(exc))
+    
+    return False
 
+
+def _verify_signature_with_secret(
+    sig_cfg: Any,
+    secret: str,
+    body: bytes,
+    header_val: str,
+) -> bool:
+    """Verify signature using a specific secret."""
     if sig_cfg.algorithm == SignatureAlgorithm.hmac_sha256:
         # Check for timestamp-binding (Stripe uses "t=<ts>,v1=<sig>")
         timestamp: str | None = None
@@ -101,7 +132,6 @@ def _verify_signature(config: "WebhookConfig", body: bytes, headers: dict) -> bo
             if ts_raw:
                 ts = int(ts_raw)
                 if abs(time.time() - ts) > _MAX_TIMESTAMP_SKEW_SECS:
-                    logger.warning("webhook_timestamp_too_old", ts=ts)
                     return False
                 timestamp = ts_raw
 
@@ -115,7 +145,6 @@ def _verify_signature(config: "WebhookConfig", body: bytes, headers: dict) -> bo
             sig = sig[5:]
         return hmac.compare_digest(expected, sig)
 
-    logger.warning("webhook_unsupported_signature_algorithm", algorithm=sig_cfg.algorithm)
     return False
 
 

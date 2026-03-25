@@ -103,8 +103,9 @@ class BulkExportConfig(BaseModel):
     job_id_field: str = "id"           # field in submit response containing job ID
     poll_interval: str = "30s"
     max_wait: str = "4h"
-    result_format: Literal["jsonl", "csv", "json_array"] = "jsonl"
-    record_selector: str | None = None  # for json_array: dot-notation path to records
+    result_format: Literal["jsonl", "csv", "json_array", "xml"] = "jsonl"
+    record_selector: str | None = None  # for json_array/xml: dot-notation path to records
+    xml_record_tag: str | None = None  # for xml: tag name of each record (e.g., "item")
 
 
 class ListConfig(BaseModel):
@@ -125,6 +126,7 @@ class ListConfig(BaseModel):
     detail_concurrency: int = 5       # max concurrent detail GETs
     # A4: declarative field/property selection
     properties: list[str] = []                                           # fields to request (empty = request all)
+    properties_exclude: list[str] = []                                   # glob patterns to exclude (e.g., "*.internal_*", "_*")
     properties_param: str = "properties"                                  # query/body param name
     properties_format: Literal["comma", "array", "json_array"] = "comma"  # encoding format
     # A2: pagination drift protection

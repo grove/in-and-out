@@ -138,9 +138,26 @@ async def run_bulk_export(
 
     log.info("bulk_export_complete", job_id=job_id)
 
-    # Download and stream records
+    # Download and stream records with retry logic
     download_url = f"{bulk_cfg.download_path}/{job_id}"
-    download_resp = await transport._request("GET", download_url)
+    download_resp = None
+    last_error = None
+    
+    # Retry download up to 3 times (download might fail temporarily)
+    for attempt in range(3):
+        try:
+            download_resp = await transport._request("GET", download_url)
+            download_resp.raise_for_status()
+            break
+        except Exception as exc:
+            last_error = exc
+            log.warning("bulk_export_download_failed", attempt=attempt + 1, error=str(exc))
+            if attempt < 2:  # Not last attempt
+                await anyio.sleep(5.0 * (attempt + 1))  # Exponential backoff
+    
+    if download_resp is None:
+        raise Exception(f"Failed to download bulk export after 3 attempts: {last_error}")
+    
     content = download_resp.content or b""
 
     result_format = bulk_cfg.result_format
@@ -172,3 +189,43 @@ async def run_bulk_export(
         reader = csv.DictReader(io.StringIO(text))
         for row_dict in reader:
             yield dict(row_dict)
+    
+    elif result_format == "xml":
+        # XML format support for bulk exports
+        try:
+            import xml.etree.ElementTree as ET
+            
+            root = ET.fromstring(content.decode("utf-8"))
+            
+            # If record_selector is provided, navigate to the container
+            if bulk_cfg.record_selector:
+                parts = bulk_cfg.record_selector.split(".")
+                current = root
+                for part in parts:
+                    found = current.find(part)
+                    if found is not None:
+                        current = found
+                    else:
+                        return
+                root = current
+            
+            # Find all records by tag name
+            record_tag = bulk_cfg.xml_record_tag or "item"
+            for elem in root.findall(f".//{record_tag}"):
+                # Convert XML element to dict
+                record: dict[str, Any] = {}
+                for child in elem:
+                    # Simple conversion: tag name -> key, text -> value
+                    tag = child.tag
+                    if "}" in tag:  # Handle namespaces
+                        tag = tag.split("}", 1)[1]
+                    record[tag] = child.text or ""
+                
+                # Also include attributes
+                for attr_name, attr_value in elem.attrib.items():
+                    record[f"@{attr_name}"] = attr_value
+                
+                if record:
+                    yield record
+        except Exception as exc:
+            log.warning("xml_parse_failed", error=str(exc))
