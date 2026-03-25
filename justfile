@@ -169,6 +169,20 @@ cli-help:
     uv run inandout --help
 
 # ---------------------------------------------------------------------------
+# Documentation
+# ---------------------------------------------------------------------------
+
+# Build mdBook documentation locally into docs-build/
+docs-build:
+    @command -v mdbook >/dev/null || (echo "mdbook is required. Install with: brew install mdbook" && exit 1)
+    mdbook build book
+
+# Serve mdBook documentation locally with live reload (http://127.0.0.1:3000)
+docs-serve:
+    @command -v mdbook >/dev/null || (echo "mdbook is required. Install with: brew install mdbook" && exit 1)
+    mdbook serve book --open
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
