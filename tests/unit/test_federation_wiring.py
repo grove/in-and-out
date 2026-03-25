@@ -52,7 +52,7 @@ async def test_ingestion_polling_loop_updates_heartbeat_on_success():
                 connector=connector_cfg.name,
                 datatype="contacts",
                 health_score=0.0 if result_inner.status == "failed" else 1.0,
-                last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
+                last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
                 circuit_breaker_state=cb.state.value,
             )
 
@@ -99,7 +99,7 @@ async def test_ingestion_polling_loop_updates_heartbeat_on_failure():
                 connector=connector_cfg.name,
                 datatype="contacts",
                 health_score=0.0 if result_inner.status == "failed" else 1.0,
-                last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
+                last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
                 circuit_breaker_state=cb.state.value,
             )
 
@@ -150,7 +150,7 @@ async def test_writeback_polling_loop_updates_heartbeat_on_success():
                 connector=connector_cfg.name,
                 datatype="leads",
                 health_score=0.0 if result_inner.failed > 0 else 1.0,
-                last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
+                last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
                 circuit_breaker_state=_cb.state.value,
             )
 

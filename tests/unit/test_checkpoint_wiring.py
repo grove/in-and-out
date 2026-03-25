@@ -83,7 +83,7 @@ async def test_load_checkpoint_returns_dict_when_checkpoint_exists():
     from inandout.postgres.checkpoint import load_checkpoint
 
     run_id = uuid.uuid4()
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.UTC)
     checkpoint_row = (str(run_id), "myconn", "contacts", 5, "2026-01-01T00:00:00", 250, now)
     pool, _ = _make_pool(checkpoint_row=checkpoint_row)
 

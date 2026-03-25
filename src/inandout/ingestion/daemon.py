@@ -299,7 +299,7 @@ async def _polling_loop(
                     connector=connector_cfg.name,
                     datatype=datatype,
                     health_score=_hs,
-                    last_sync_at=datetime.datetime.utcnow().isoformat() + "Z",
+                    last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
                     circuit_breaker_state=cb.state.value,
                 )
         except Exception as exc:

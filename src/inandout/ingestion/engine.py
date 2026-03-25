@@ -850,7 +850,7 @@ class IngestionEngine:
                 import datetime as _dt
                 _current_lineage: dict[str, Any] = {
                     "run_id": str(result.run_id),
-                    "fetched_at": _dt.datetime.utcnow().isoformat(),
+                    "fetched_at": _dt.datetime.now(_dt.UTC).isoformat(),
                     "api_path": ingestion_cfg.list.path,
                     "watermark_at_fetch": str(watermark) if watermark else None,
                     "page_number": page_number,

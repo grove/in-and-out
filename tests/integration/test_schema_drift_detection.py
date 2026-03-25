@@ -300,22 +300,27 @@ async def test_detect_schema_drift_function_finds_orphans(pool, run_migrations):
     columns that are absent from the latest observed field set.
 
     This tests the drift-detection primitive in isolation — not the full
-    engine pipeline.
+    engine pipeline.  Uses a dedicated table to avoid pollution from earlier
+    tests that dynamically add columns via the engine.
+
+    Explicitly sets search_path to 'public' because the testcontainers DB user
+    is named 'test', and other tests may create a 'test' schema that shadows
+    public via the default "$user" search_path element.
     """
-    src_table = source_table_name(_CONNECTOR, _DATATYPE)
+    orphan_connector = "drift_orphan"
+    orphan_datatype = "items"
+    src_table = source_table_name(orphan_connector, orphan_datatype)
 
     async with pool.connection() as conn:
-        await ensure_source_table(conn, _CONNECTOR, _DATATYPE)
-        # Manually add an extra column to simulate a previously-seen field
+        await conn.execute("SET search_path TO public")
+        await conn.execute(f"DROP TABLE IF EXISTS {src_table}")
+        await ensure_source_table(conn, orphan_connector, orphan_datatype)
         await conn.execute(
             f"ALTER TABLE {src_table} ADD COLUMN IF NOT EXISTS legacy_field TEXT"
         )
         await conn.commit()
 
-    # The latest API response no longer includes 'legacy_field'
-    current_observed_fields = {"id", "name"}
-
-    async with pool.connection() as conn:
+        current_observed_fields = {"id", "name"}
         orphans = await detect_schema_drift(conn, src_table, current_observed_fields)
 
     assert "legacy_field" in orphans, (

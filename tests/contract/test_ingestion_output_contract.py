@@ -148,7 +148,7 @@ async def test_upsert_on_conflict_external_id(pool):
 
     # First insert
     async with pool.connection() as conn:
-        inserted, updated = await _upsert_record(
+        inserted, updated, _resurrected = await _upsert_record(
             conn, table, "ext_001", {"name": "Widget A"}, "hash_v1", run_id
         )
         await conn.commit()
@@ -157,7 +157,7 @@ async def test_upsert_on_conflict_external_id(pool):
 
     # Upsert with changed data
     async with pool.connection() as conn:
-        inserted2, updated2 = await _upsert_record(
+        inserted2, updated2, _resurrected2 = await _upsert_record(
             conn, table, "ext_001", {"name": "Widget A Updated"}, "hash_v2", run_id
         )
         await conn.commit()
