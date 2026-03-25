@@ -1493,6 +1493,76 @@ class WritebackEngine:
                 _http_write_ok = True
                 result.processed += 1
 
+            elif action == "upsert":
+                # T2 #19: upsert — dedicated endpoint or PATCH→POST 404-fallback
+                payload = _extract_writeback_payload(
+                    row, use_desired_state_table=writeback_cfg.use_desired_state_table
+                )
+                payload = _apply_writeback_transforms(payload, row, writeback_cfg)
+                _pw_schema_ups = getattr(writeback_cfg, "payload_schema", None)
+                if _pw_schema_ups:
+                    _pw_errors_ups = _validate_payload_schema(payload, _pw_schema_ups)
+                    if _pw_errors_ups:
+                        logger.warning(
+                            "writeback_payload_validation_failed",
+                            external_id=external_id,
+                            action=action,
+                            errors=_pw_errors_ups,
+                        )
+                        result.failed += 1
+                        result._failed_external_ids.add(external_id)
+                        result._failed_entries.append(
+                            (external_id, action, f"payload_validation:{_pw_errors_ups[0]}")
+                        )
+                        return
+
+                extra_headers = _make_extra_headers(payload)
+
+                if ops.upsert is not None:
+                    # Dedicated idempotent upsert endpoint (e.g. PUT /resource/{id})
+                    path = interpolate_path(ops.upsert.path)
+                    if dry_run:
+                        base_url = connector.connection.base_url.rstrip("/")
+                        _log_dry_run(action, ops.upsert.method.upper(), f"{base_url}{path}", extra_headers, payload)
+                        return
+                    if extra_headers:
+                        _ups_resp = await transport._raw_request(ops.upsert.method.upper(), path, json=payload, headers=extra_headers)
+                    else:
+                        _ups_resp = await transport._raw_request(ops.upsert.method.upper(), path, json=payload)
+                    _ups_resp.raise_for_status()
+
+                elif ops.update is not None and ops.insert is not None:
+                    # PATCH first; on 404 fall back to POST to create the record
+                    update_path = interpolate_path(ops.update.path)
+                    insert_path = interpolate_path(ops.insert.path)
+                    if dry_run:
+                        base_url = connector.connection.base_url.rstrip("/")
+                        _log_dry_run(action, ops.update.method.upper(), f"{base_url}{update_path}", extra_headers, payload)
+                        return
+                    if extra_headers:
+                        _upsert_patch = await transport._raw_request(ops.update.method.upper(), update_path, json=payload, headers=extra_headers)
+                    else:
+                        _upsert_patch = await transport._raw_request(ops.update.method.upper(), update_path, json=payload)
+                    if _upsert_patch.status_code == 404:
+                        logger.debug("upsert_patch_404_fallback_to_insert", external_id=external_id)
+                        if extra_headers:
+                            _upsert_post = await transport._raw_request(ops.insert.method.upper(), insert_path, json=payload, headers=extra_headers)
+                        else:
+                            _upsert_post = await transport._raw_request(ops.insert.method.upper(), insert_path, json=payload)
+                        _upsert_post.raise_for_status()
+                    else:
+                        _upsert_patch.raise_for_status()
+
+                else:
+                    logger.warning("upsert_no_ops_configured", connector=connector.name, datatype=result.datatype)
+                    result.skipped += 1
+                    return
+
+                _eff_pl_ups = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
+                result._audit_entries.append((external_id, action, payload, None, _eff_pl_ups))
+                _http_write_ok = True
+                result.processed += 1
+
             else:
                 logger.warning("unsupported_writeback_action", action=action)
                 result.skipped += 1
