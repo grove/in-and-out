@@ -14,3 +14,4 @@
 - [Connector Authoring Guide](./connector-authoring.md)
 - [CLI Reference](./cli.md)
 - [Database & Migrations](./database.md)
+- [OSI-Mapping Integration Contract](./osi-mapping-contract.md)
