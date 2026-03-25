@@ -44,7 +44,6 @@ The following design decisions in GOAL.md are independent of how data arrives an
 | Intra-sync deduplication | T1 #33 | Dedup by primary key before write — source-independent |
 | Out-of-order event handling | T1 #35 | More relevant for streams than HTTP, actually — already well-specified |
 | Timestamp normalisation | T1 #45 | Applies to any timestamp, regardless of transport |
-| Multi-connector fan-in policy | T1 #46 | Table-ownership rules don't depend on transport |
 | Read-only datatype support | T1 #23 | Ingestion-only flag is metadata |
 | Relationship datatypes | T1 #22 | How relationships are stored is transport-agnostic |
 | Per-datatype concurrency control | T1 #36 | Advisory lock mechanism works for any source |

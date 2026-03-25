@@ -209,7 +209,6 @@ class DatatypeConfig(BaseModel):
     linked_objects: list[LinkedObject] = []     # A3: linked/nested object resolution
     timestamp_fields: list[TimestampFieldConfig] = []  # A7: timestamp normalisation
     pii_fields: list[str] = []                  # B6: fields containing PII
-    shared_table: str | None = None             # A3 fan-in: write to inout_src_{shared_table} if set
     api_version: str | None = None              # A6: per-datatype API version override
 
     @model_validator(mode="after")

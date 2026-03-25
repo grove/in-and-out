@@ -207,28 +207,6 @@ def _lint008(cfg: Any) -> list[LintDiagnostic]:
     return diags
 
 
-def _lint009(cfg: Any) -> list[LintDiagnostic]:
-    """LINT009: fan-in shared_table set but datatype has no ingestion config → error."""
-    diags: list[LintDiagnostic] = []
-    connector = cfg.connector
-    for dtype_name, dtype_cfg in connector.datatypes.items():
-        shared_table = getattr(dtype_cfg, "shared_table", None)
-        if not shared_table:
-            continue
-        if dtype_cfg.ingestion is None:
-            diags.append(LintDiagnostic(
-                severity="error",
-                rule_id="LINT009",
-                message=(
-                    f"datatype '{dtype_name}' declares shared_table='{shared_table}' (fan-in) "
-                    "but has no ingestion config — fan-in requires an ingestion pipeline to "
-                    "populate the shared table"
-                ),
-                path=f"connector.datatypes.{dtype_name}.shared_table",
-            ))
-    return diags
-
-
 def _lint010(cfg: Any) -> list[LintDiagnostic]:
     """LINT010: 'merge'/'split' in supported_actions but required operations not configured → error."""
     diags: list[LintDiagnostic] = []

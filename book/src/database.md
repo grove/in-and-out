@@ -120,7 +120,6 @@ The recommended order for production upgrades:
 |---|---|
 | `inout_src_{connector}_{datatype}` | Current-state source records |
 | `inout_src_{connector}_{datatype}_history` | Record version history (when `history_mode: append`) |
-| `inout_src_{shared_table}` | Fan-in shared table (when multiple connectors write the same datatype) |
 
 ### Desired-state tables (`inout_dst_*`) — created at runtime
 
@@ -253,7 +252,6 @@ Every dynamically-created source table includes these columns:
 | `_source_version` | TEXT | ETag/version from the source API |
 | `_last_written` | JSONB | Last writeback payload (for conflict detection) |
 | `_lineage` | JSONB | Provenance metadata (run_id, api_path, page_number) |
-| `_connector` | TEXT | **Fan-in only** — discriminator for shared tables |
 
 ### Dead-letter table columns (`inout_dl_ingestion_*`)
 

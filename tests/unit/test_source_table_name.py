@@ -34,23 +34,6 @@ def test_datatype_in_name():
     assert "leads" in source_table_name("sfdc", "leads")
 
 
-def test_shared_table_overrides_name():
-    name = source_table_name("crm", "contacts", shared_table="shared_contacts")
-    assert "shared_contacts" in name
-    assert "crm" not in name
-
-
-def test_shared_table_with_public_namespace_bare():
-    name = source_table_name("crm", "contacts", "public", shared_table="shared_tbl")
-    assert name == "inout_src_shared_tbl"
-    assert "." not in name
-
-
-def test_shared_table_with_custom_namespace():
-    name = source_table_name("crm", "contacts", "ns", shared_table="shared_tbl")
-    assert name == "ns.inout_src_shared_tbl"
-
-
 def test_different_connectors_different_names():
     a = source_table_name("crm", "contacts")
     b = source_table_name("erp", "contacts")

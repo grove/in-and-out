@@ -12,12 +12,8 @@ def source_table_name(
     connector: str,
     datatype: str,
     namespace: str = "public",
-    shared_table: str | None = None,
 ) -> str:
-    if shared_table:
-        base = f"inout_src_{shared_table}"
-    else:
-        base = f"inout_src_{connector}_{datatype}"
+    base = f"inout_src_{connector}_{datatype}"
     if namespace and namespace != "public":
         return f"{namespace}.{base}"
     return base
@@ -117,81 +113,14 @@ async def ensure_source_table(
     connector: str,
     datatype: str,
     namespace: str = "public",
-    shared_table: str | None = None,
 ) -> None:
     """Create the source table for a connector/datatype pair if it doesn't exist."""
-    table = source_table_name(connector, datatype, namespace, shared_table=shared_table)
-    # For shared tables, the base DDL uses the shared table name
-    if shared_table:
-        base_ddl = source_table_ddl_for_name(table, namespace)
-        await conn.execute(base_ddl)
-    else:
-        await conn.execute(source_table_ddl(connector, datatype, namespace))
+    table = source_table_name(connector, datatype, namespace)
+    await conn.execute(source_table_ddl(connector, datatype, namespace))
     # Ensure _lineage column exists on older tables (ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
     await conn.execute(
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _lineage JSONB"
     )
-    # For shared (fan-in) tables, add _connector column with default
-    if shared_table:
-        await conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            f"_connector TEXT NOT NULL DEFAULT '{connector}'"
-        )
-        # Migrate primary key from (external_id) to (external_id, _connector) so
-        # two connectors can have rows with the same external_id without collision.
-        # This is idempotent: if the composite PK already exists, the DO block exits.
-        bare_table = table.split(".")[-1]
-        await conn.execute(
-            f"""
-            DO $migrate_pk$
-            DECLARE
-                _pk_cols TEXT;
-            BEGIN
-                SELECT string_agg(a.attname, ',' ORDER BY array_position(c.conkey, a.attnum))
-                INTO _pk_cols
-                FROM pg_constraint c
-                JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
-                WHERE c.conrelid = quote_ident('{bare_table}')::regclass
-                  AND c.contype = 'p';
-
-                -- Only migrate when PK is currently just (external_id)
-                IF _pk_cols = 'external_id' THEN
-                    EXECUTE 'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {bare_table}_pkey';
-                    ALTER TABLE {table} ADD PRIMARY KEY (external_id, _connector);
-                END IF;
-            EXCEPTION
-                WHEN others THEN NULL;  -- Non-critical; unique index provides the guard
-            END $migrate_pk$;
-            """
-        )
-        # Also ensure a unique index exists as a fallback guard (covers tables where
-        # the PK migration was skipped due to the EXCEPTION handler above)
-        idx_name = f"{table.replace('.', '_')}_fanin_pk_idx"
-        await conn.execute(
-            f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} "
-            f"ON {table} (external_id, _connector)"
-        )
-
-
-def source_table_ddl_for_name(table: str, namespace: str = "public") -> str:
-    """Generate CREATE TABLE DDL when the table name is already known."""
-    prefix = _schema_prefix_ddl(namespace)
-    return f"""{prefix}CREATE TABLE IF NOT EXISTS {table} (
-    external_id TEXT NOT NULL,
-    data        JSONB NOT NULL,
-    raw         JSONB NOT NULL,
-    _ingested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    _sync_run_id    UUID,
-    _raw_hash       TEXT NOT NULL,
-    _deleted        BOOLEAN NOT NULL DEFAULT FALSE,
-    _deleted_at     TIMESTAMPTZ,
-    _schema_version INTEGER NOT NULL DEFAULT 1,
-    _source_version TEXT,
-    _last_written   JSONB,
-    _lineage        JSONB,
-    PRIMARY KEY (external_id)
-);
-CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_ingested_at_idx ON {table} (_ingested_at);""".strip()
 
 
 async def ensure_source_history_table(

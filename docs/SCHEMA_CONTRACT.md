@@ -17,12 +17,6 @@ of the in-and-out / OSI-Mapping architecture:
 inout_src_{connector}_{datatype}
 ```
 
-For fan-in (multi-connector shared tables):
-
-```
-inout_src_{shared_table}
-```
-
 ### Columns
 
 | Column           | Type         | Nullable | Default     | Description                                      |
@@ -39,12 +33,10 @@ inout_src_{shared_table}
 | `_source_version`| TEXT         | NULL     | —           | Source system version/etag when available        |
 | `_last_written`  | JSONB        | NULL     | —           | Last payload successfully written back to source |
 | `_lineage`       | JSONB        | NULL     | —           | Provenance: run_id, api_path, page_number        |
-| `_connector`     | TEXT         | NOT NULL | connector   | **Fan-in only**: connector name                  |
 
 ### Primary Key
 
-- Standard: `PRIMARY KEY (external_id)`
-- Fan-in (shared table): unique index on `(external_id, _connector)`
+`PRIMARY KEY (external_id)`
 
 ### Indexes
 
@@ -227,7 +219,6 @@ INDEX ON inout_ops_identity_map (connector, datatype, external_id)
 | Pattern                              | Used for                            |
 |--------------------------------------|-------------------------------------|
 | `inout_src_{connector}_{datatype}`   | Ingestion source tables             |
-| `inout_src_{shared_table}`           | Fan-in shared ingestion tables      |
 | `inout_dst_{connector}_{datatype}`   | Writeback desired-state tables      |
 | `inout_dst_{connector}_{datatype}_lwstate` | Writeback last-written-state  |
 | `inout_dl_ingestion_{connector}_{datatype}` | Ingestion dead-letter queue  |
@@ -266,7 +257,7 @@ If not, it **refuses to start** and logs an error directing the operator to run:
 alembic upgrade head
 ```
 
-Hot-reloading connector configs that change table schemas (e.g., adding `shared_table`)
+Hot-reloading connector configs that change table schemas
 also requires a migration. The daemon will log a warning and skip the config reload
 for schema-affecting changes until migrations are applied.
 

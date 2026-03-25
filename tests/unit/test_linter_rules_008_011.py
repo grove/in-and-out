@@ -65,7 +65,7 @@ def _make_ingestion():
     return _Ingestion()
 
 
-def _make_dtype(ingestion: Any = None, writeback: Any = None, pii_fields: list | None = None, shared_table: str | None = None):
+def _make_dtype(ingestion: Any = None, writeback: Any = None, pii_fields: list | None = None):
     class _Dtype:
         pass
 
@@ -73,7 +73,6 @@ def _make_dtype(ingestion: Any = None, writeback: Any = None, pii_fields: list |
     d.ingestion = ingestion
     d.writeback = writeback
     d.pii_fields = pii_fields or []
-    d.shared_table = shared_table
     d.field_mappings = []
     return d
 
@@ -164,45 +163,6 @@ def test_lint008_multiple_datatypes_only_flags_affected():
     diags = _lint008(cfg)
     assert len(diags) == 1
     assert "contacts" in diags[0].message
-
-
-# ---------------------------------------------------------------------------
-# LINT009: fan-in shared_table without ingestion config
-# ---------------------------------------------------------------------------
-
-
-def test_lint009_shared_table_without_ingestion_errors():
-    from inandout.linter.rules import _lint009
-
-    # shared_table set but ingestion=None
-    dtype = _make_dtype(ingestion=None, writeback=_make_writeback(), shared_table="shared_contacts")
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint009(cfg)
-    assert len(diags) == 1
-    assert diags[0].rule_id == "LINT009"
-    assert diags[0].severity == "error"
-    assert "shared_contacts" in diags[0].message
-
-
-def test_lint009_shared_table_with_ingestion_no_diag():
-    from inandout.linter.rules import _lint009
-
-    dtype = _make_dtype(ingestion=_make_ingestion(), shared_table="shared_contacts")
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint009(cfg)
-    assert diags == []
-
-
-def test_lint009_no_shared_table_no_diag():
-    from inandout.linter.rules import _lint009
-
-    dtype = _make_dtype(ingestion=_make_ingestion(), shared_table=None)
-    cfg = _make_file_cfg(_make_connector(datatypes={"contacts": dtype}))
-
-    diags = _lint009(cfg)
-    assert diags == []
 
 
 # ---------------------------------------------------------------------------

@@ -421,18 +421,6 @@ list:
   drift_max_shrink_pct: 50.0    # Alert if total records shrinks > 50% mid-pagination
 ```
 
-### Fan-in (shared tables)
-
-Multiple connectors can write to the same source table:
-
-```yaml
-ingestion:
-  fan_in:
-    shared_table: "all_contacts"
-```
-
-When fan-in is enabled, an additional `_connector` column is added to the shared table to discriminate records by source connector.
-
 ## Writeback configuration
 
 The writeback section tells the daemon how to push changes back to the external API.

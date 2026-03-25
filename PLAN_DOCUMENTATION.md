@@ -291,7 +291,6 @@ The existing `docs/CONNECTOR_AUTHORING.md` provides a good starting point. This 
    - Pagination strategies: `cursor`, `offset`, `link_header`, `keyset` — all fields explained with examples
    - Pagination termination conditions
    - `transforms`: field mapping, type casting, renaming, dropping
-   - `fan_in`: shared table configuration
 
 8. **Writeback config per datatype**
    - `insert`, `update`, `delete`, `archive` endpoint configs
@@ -810,7 +809,6 @@ The existing `docs/SCHEMA_CONTRACT.md` should be reviewed and extended to cover:
      | `_source_version` | text | ETag / version token from the source API |
      | `_last_written` | timestamptz | Last time writeback wrote to this record |
      | `_lineage` | jsonb | Provenance metadata |
-     | `_connector` | text | Only present on fan-in shared tables |
 
 2. **History table contract (`inout_src_*_history`)**
    - Append-only; all source table columns plus `_history_id` (serial PK) and `_valid_from` / `_valid_to`
@@ -823,9 +821,6 @@ The existing `docs/SCHEMA_CONTRACT.md` should be reviewed and extended to cover:
    - `_schema_version` increment policy
    - How downstream consumers should handle schema version changes
    - Schema registry query patterns
-
-5. **Fan-in (`_connector` discriminator column)**
-   - When it is present; how to filter by source connector
 
 ---
 
@@ -860,8 +855,7 @@ The existing `docs/SCHEMA_CONTRACT.md` should be reviewed and extended to cover:
    - How schema version changes in `inout_src_*` signal OSI-Mapping to adapt
 
 6. **Federation scenarios**
-   - Multi-source fan-in tables: multiple connectors writing the same logical datatype
-   - `_connector` discriminator in shared tables
+   - Multiple in-and-out instances writing to different connector sets
    - How OSI-Mapping deduplicates across sources
 
 ---
@@ -1081,7 +1075,6 @@ The existing `docs/SCHEMA_CONTRACT.md` should be reviewed and extended to cover:
 | Conflict | When the current API state differs from what OSI-Mapping expected when computing the desired change |
 | Dead-letter | A queue of records that failed permanently and require operator intervention |
 | Circuit breaker | A safety mechanism that pauses operations when anomalous conditions are detected |
-| Fan-in | Multiple connectors writing the same logical datatype into a shared table |
 | Identity map | The mapping between OSI-Mapping `cluster_id`s and external system IDs |
 | Credential ref | A symbolic name for a secret, resolved at runtime from a secrets backend |
 | OSI-Mapping | The upstream identity resolution engine; computes desired state from consolidated records |

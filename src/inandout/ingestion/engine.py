@@ -584,20 +584,19 @@ class IngestionEngine:
         history_mode = ingestion_cfg.history_mode
         ns = self._namespace
 
-        # Resolve shared_table and api_version from dtype_cfg (A3, A6)
-        shared_table = getattr(dtype_cfg, "shared_table", None) if dtype_cfg else None
+        # Resolve api_version from dtype_cfg (A6)
         dtype_api_version = getattr(dtype_cfg, "api_version", None) if dtype_cfg else None
         effective_api_version = dtype_api_version or connector.api_version
 
         # Ensure source table and dead-letter table exist
         async with self._pool.connection() as conn:
-            await ensure_source_table(conn, connector.name, datatype, ns, shared_table=shared_table)
+            await ensure_source_table(conn, connector.name, datatype, ns)
             await ensure_dead_letter_table(conn, "ingestion", connector.name, datatype, ns)
             if history_mode == HistoryMode.append:
                 await ensure_source_history_table(conn, connector.name, datatype, ns)
             await conn.commit()
 
-        table = source_table_name(connector.name, datatype, ns, shared_table=shared_table)
+        table = source_table_name(connector.name, datatype, ns)
         hist_table = source_history_table_name(connector.name, datatype, ns)
         dl_table = dead_letter_table_name("ingestion", connector.name, datatype, ns)
         new_watermark: str | None = None
@@ -948,7 +947,7 @@ class IngestionEngine:
                                 inserted, updated, resurrected = await _upsert_record(
                                     conn, table, external_id, record, raw_hash, result.run_id,
                                     lineage=_current_lineage,
-                                    connector_col=connector.name if shared_table else None,
+
                                 )
                                 result.records_inserted += inserted
                                 result.records_updated += updated
@@ -1648,66 +1647,15 @@ async def _upsert_record(
     raw_hash: str,
     run_id: uuid.UUID,
     lineage: dict[str, Any] | None = None,
-    connector_col: str | None = None,  # A3: set for shared (fan-in) tables
 ) -> tuple[int, int, int]:
     """Upsert a record. Returns (inserted, updated, resurrected).
 
     resurrected=1 means the record previously had a tombstone (_deleted_at IS NOT NULL)
     and has been re-activated — callers should write a history record for audit purposes
     when history_mode is HistoryMode.append (T1 #41).
-
-    When connector_col is set, the upsert key is (external_id, _connector)
-    rather than just external_id (A3 fan-in shared tables).
     """
     data = orjson.dumps(raw).decode()
     lineage_json = orjson.dumps(lineage).decode() if lineage is not None else None
-
-    if connector_col is not None:
-        # Fan-in shared table path: conflict key is (external_id, _connector)
-        row = await (await conn.execute(
-            f"SELECT _raw_hash, _deleted_at FROM {table} WHERE external_id = %s AND _connector = %s",
-            [external_id, connector_col],
-        )).fetchone()
-
-        if row is None:
-            await conn.execute(
-                f"""
-                INSERT INTO {table}
-                    (external_id, data, raw, _ingested_at, _sync_run_id, _raw_hash, _lineage, _connector)
-                VALUES (%s, %s, %s, NOW(), %s, %s, %s, %s)
-                ON CONFLICT (external_id, _connector) DO UPDATE SET
-                    data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s, _lineage=%s
-                """,
-                [
-                    external_id, data, data, run_id, raw_hash, lineage_json, connector_col,
-                    data, data, run_id, raw_hash, lineage_json,
-                ],
-            )
-            return 1, 0, 0
-        elif row[0] != raw_hash:
-            was_tombstoned = row[1] is not None
-            await conn.execute(
-                f"""
-                UPDATE {table}
-                SET data=%s, raw=%s, _ingested_at=NOW(), _sync_run_id=%s, _raw_hash=%s,
-                    _deleted=FALSE, _deleted_at=NULL, _lineage=%s
-                WHERE external_id=%s AND _connector=%s
-                """,
-                [data, data, run_id, raw_hash, lineage_json, external_id, connector_col],
-            )
-            if was_tombstoned:
-                _emit_resurrection(table, external_id)
-            return 0, 1, int(was_tombstoned)
-        else:
-            was_tombstoned = row[1] is not None
-            await conn.execute(
-                f"UPDATE {table} SET _deleted=FALSE, _deleted_at=NULL "
-                f"WHERE external_id=%s AND _connector=%s AND _deleted_at IS NOT NULL",
-                [external_id, connector_col],
-            )
-            if was_tombstoned:
-                _emit_resurrection(table, external_id)
-            return 0, 0, int(was_tombstoned)
 
     # Standard single-connector path
     row = await (await conn.execute(

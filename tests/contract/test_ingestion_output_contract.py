@@ -170,23 +170,3 @@ async def test_upsert_on_conflict_external_id(pool):
             f"SELECT COUNT(*) FROM {table} WHERE external_id = 'ext_001'"
         )).fetchone()
     assert row[0] == 1
-
-
-@pytest.mark.anyio
-async def test_shared_table_has_connector_column(pool):
-    """Fan-in shared tables must have a _connector column."""
-    from inandout.postgres.schema import ensure_source_table, source_table_name
-
-    connector = "hubspot"
-    datatype = "contacts"
-    shared = "contacts_unified_contract"
-
-    async with pool.connection() as conn:
-        await ensure_source_table(conn, connector, datatype, shared_table=shared)
-        await conn.commit()
-
-    table_name = f"inout_src_{shared}"
-    async with pool.connection() as conn:
-        cols = await _get_columns(conn, table_name)
-
-    assert "_connector" in cols, "Fan-in table missing _connector column"

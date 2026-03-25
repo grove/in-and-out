@@ -3,7 +3,6 @@
 Covers source_table_name, dead_letter_table_name:
 - public namespace produces bare table name (no schema prefix).
 - non-public namespace produces "namespace.table_name".
-- shared_table overrides the connector/datatype in source_table_name.
 - dead_letter_table_name embeds the tool name (ingestion / writeback).
 - All names follow the inout_ prefix convention.
 """
@@ -32,18 +31,6 @@ class TestSourceTableName:
     def test_non_public_namespace_prefixes(self):
         name = source_table_name("hubspot", "contacts", "tenant_42")
         assert name == "tenant_42.inout_src_hubspot_contacts"
-
-    def test_shared_table_overrides_connector_datatype(self):
-        name = source_table_name("hubspot", "contacts", shared_table="crm_contacts")
-        assert name == "inout_src_crm_contacts"
-
-    def test_shared_table_in_non_public_namespace(self):
-        name = source_table_name(
-            "hubspot", "contacts",
-            namespace="tenant_1",
-            shared_table="crm_contacts",
-        )
-        assert name == "tenant_1.inout_src_crm_contacts"
 
     @pytest.mark.parametrize("connector,datatype", [
         ("salesforce", "deals"),

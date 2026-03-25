@@ -3,9 +3,6 @@
 Verifies that ensure_source_table issues:
   1. A CREATE TABLE IF NOT EXISTS for the correct table name.
   2. An ALTER TABLE to add _lineage column.
-  3. No _connector column added for non-shared tables.
-
-For shared-table mode, also verifies _connector column alter is issued.
 """
 from __future__ import annotations
 
@@ -91,26 +88,3 @@ async def test_ensure_source_table_respects_namespace():
     assert any("tenant_42" in s for s in create_sqls), (
         f"Expected namespace in table name, got: {create_sqls}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Shared-table mode
-# ---------------------------------------------------------------------------
-
-@pytest.mark.anyio
-async def test_ensure_source_table_shared_creates_shared_table_name():
-    conn, sql_list = _make_conn()
-    await ensure_source_table(conn, "hubspot", "contacts", shared_table="crm_contacts")
-    create_sqls = [s for s in sql_list if "CREATE TABLE IF NOT EXISTS" in s]
-    assert any("inout_src_crm_contacts" in s for s in create_sqls), (
-        f"Expected CREATE TABLE for inout_src_crm_contacts, got: {create_sqls}"
-    )
-
-
-@pytest.mark.anyio
-async def test_ensure_source_table_shared_adds_connector_column():
-    """Shared-table mode must add _connector column."""
-    conn, sql_list = _make_conn()
-    await ensure_source_table(conn, "hubspot", "contacts", shared_table="crm_contacts")
-    connector_alters = [s for s in sql_list if "_connector" in s and "ADD COLUMN" in s]
-    assert connector_alters, "Expected ADD COLUMN _connector for shared table"

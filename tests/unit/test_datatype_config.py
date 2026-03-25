@@ -109,11 +109,6 @@ def test_max_concurrent_writes_default_none():
     assert cfg.max_concurrent_writes is None
 
 
-def test_shared_table_default_none():
-    cfg = DatatypeConfig(ingestion=_minimal_ingestion())
-    assert cfg.shared_table is None
-
-
 def test_api_version_default_none():
     cfg = DatatypeConfig(ingestion=_minimal_ingestion())
     assert cfg.api_version is None

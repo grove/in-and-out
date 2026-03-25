@@ -533,13 +533,6 @@ ingestion:
   # ─── History Mode (T1 #15, #30) ─────────────────────────
   history_mode: overwrite          # overwrite | append
 
-  # ─── Fan-In (T1 #46) ────────────────────────────────────
-  fan_in:
-    enabled: false                 # Default: false (one table per connector).
-    # When true, writes to a shared table across connectors.
-    # Requires connector discriminator column.
-    # shared_table: contacts
-
   # ─── Schema Tracking (T1 #31) ───────────────────────────
   schema_tracking:
     enabled: true                  # Detect and record schema drift.

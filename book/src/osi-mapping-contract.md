@@ -59,12 +59,6 @@ in-and-out's ingestion daemon writes source tables that OSI-Mapping reads. This 
 inout_src_{connector}_{datatype}
 ```
 
-For fan-in (multiple connectors writing to a shared table):
-
-```
-inout_src_{shared_table}
-```
-
 ### Required columns
 
 Every source table **must** contain the following columns. OSI-Mapping's forward views depend on them.
@@ -83,12 +77,10 @@ Every source table **must** contain the following columns. OSI-Mapping's forward
 | `_source_version` | TEXT | NULL | — | ETag or version identifier from the source API, when available. Used for conditional writes during writeback. |
 | `_last_written` | JSONB | NULL | — | Last payload successfully written back to the source system. OSI-Mapping uses this to suppress noop echoes. |
 | `_lineage` | JSONB | NULL | — | Provenance metadata: `run_id`, `api_path`, `page_number`. For debugging and audit trails. |
-| `_connector` | TEXT | NOT NULL | connector name | **Fan-in only.** Discriminator column when multiple connectors share a table. |
 
 ### Primary key
 
-- Standard tables: `PRIMARY KEY (external_id)`
-- Fan-in tables: unique index on `(external_id, _connector)`
+`PRIMARY KEY (external_id)`
 
 ### Upsert semantics
 
@@ -264,7 +256,7 @@ This table is written by in-and-out's writeback daemon and can be read by OSI-Ma
 
 ### in-and-out guarantees
 
-1. **Exactly-once upsert per external_id.** Source tables never contain duplicate rows for the same `external_id` (or `external_id` + `_connector` pair for fan-in tables).
+1. **Exactly-once upsert per external_id.** Source tables never contain duplicate rows for the same `external_id`.
 2. **Hash-gated updates.** Records are only updated when `_raw_hash` changes. OSI-Mapping can rely on `_ingested_at` as a meaningful change indicator.
 3. **Soft-delete semantics.** Deleted records are never physically removed during normal operation. They are marked with `_deleted = TRUE` so OSI-Mapping can detect disappearances.
 4. **Schema version tracking.** When the source API's response structure changes, `_schema_version` increments. OSI-Mapping can use this to handle schema evolution.
