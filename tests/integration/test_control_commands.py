@@ -245,3 +245,87 @@ async def test_requeue_dead_letter_moves_rows_to_source_table(pool, run_migratio
     assert dl_row is not None
     assert dl_row[0] == 1
     assert dl_row[1] is not None
+
+
+@pytest.mark.anyio
+async def test_validate_command_completes_and_returns_result(pool, run_migrations):
+    """T2 #37 / T1 #43: issuing a 'validate' control command marks the row
+    completed and returns a result dict with connectivity/auth/errors keys.
+
+    Uses a real HTTP stub (respx) to simulate the target system, so the
+    validation probe can actually succeed without a live external dependency.
+    """
+    import respx
+
+    _VALIDATE_BASE = "https://api.validate-ctrl-test.example.com"
+    _VALIDATE_CONNECTOR = "validate_ctrl_test"
+    os.environ["INOUT_CREDENTIAL_VALIDATE_CTRL_KEY"] = "dummy"
+
+    paused: set = set()
+    dispatcher = ControlDispatcher(pool, paused)
+
+    # Issue validate command via control table (shallow path: base_url in payload)
+    # The ControlDispatcher's _cmd_validate_writeback falls back to a direct HTTP
+    # probe when no connector_cfg is available in the engine registry.
+    cmd_id = await _insert_control_command(
+        pool,
+        "validate",
+        connector=_VALIDATE_CONNECTOR,
+        datatype="contacts",
+        payload={"base_url": _VALIDATE_BASE},
+    )
+
+    with respx.mock(base_url=_VALIDATE_BASE, assert_all_called=False) as mock:
+        mock.get("/").mock(return_value=httpx.Response(200, json={"ok": True}))
+        mock.head("/").mock(return_value=httpx.Response(200, headers={"ETag": '"abc123"'}))
+        await dispatcher.dispatch_pending()
+
+    status = await _get_command_status(pool, cmd_id)
+    assert status["status"] == "completed", (
+        f"validate command must complete; got {status['status']!r}, result={status['result']}"
+    )
+    result = status["result"]
+    assert isinstance(result, dict), f"validate result must be a dict; got {result!r}"
+    assert "connectivity" in result, f"result must have 'connectivity' key; got {result}"
+    assert result["connectivity"] == "ok", (
+        f"connectivity must be 'ok' for reachable base_url; got {result['connectivity']!r}"
+    )
+    assert "errors" in result, "result must have 'errors' key"
+    # No errors expected for a healthy stub
+    assert result["errors"] == [], (
+        f"Expected no validation errors for healthy stub; got {result['errors']}"
+    )
+
+
+@pytest.mark.anyio
+async def test_validate_command_reports_auth_failure(pool, run_migrations):
+    """T2 #37: validate command correctly identifies auth failure (401 from target)."""
+    import respx
+
+    _VALIDATE_BASE = "https://api.validate-auth-fail.example.com"
+    _VALIDATE_CONNECTOR = "validate_auth_fail_test"
+
+    paused: set = set()
+    dispatcher = ControlDispatcher(pool, paused)
+
+    cmd_id = await _insert_control_command(
+        pool,
+        "validate",
+        connector=_VALIDATE_CONNECTOR,
+        payload={"base_url": _VALIDATE_BASE},
+    )
+
+    with respx.mock(base_url=_VALIDATE_BASE, assert_all_called=False) as mock:
+        mock.get("/").mock(return_value=httpx.Response(401, json={"error": "unauthorized"}))
+        await dispatcher.dispatch_pending()
+
+    status = await _get_command_status(pool, cmd_id)
+    assert status["status"] == "completed", (
+        f"validate command must complete even on auth failure; got {status['status']!r}"
+    )
+    result = status["result"]
+    assert result.get("connectivity") == "ok", "Connectivity should be ok (server responded)"
+    assert result.get("auth") == "failed", (
+        f"auth must be 'failed' when server returns 401; got {result.get('auth')!r}"
+    )
+    assert len(result.get("errors", [])) >= 1, "Should have at least one error in result"

@@ -430,3 +430,114 @@ async def test_three_way_last_writer_wins_sends_patch_despite_conflict(pool, run
     assert result.conflicts >= 1, "Conflict should be counted even with last_writer_wins"
     assert len(patched) == 1, "PATCH must be sent despite conflict with last_writer_wins"
     assert result.processed >= 1, "Record should count as processed (write executed)"
+
+    # T2 #9 / T2 #30: after successful write, lwstate must reflect confirmed written state
+    async with pool.connection() as conn:
+        lw_row = await (
+            await conn.execute(f"SELECT data FROM {lwst} WHERE external_id='ord-5'")
+        ).fetchone()
+    assert lw_row is not None, "lwstate must be written after successful last_writer_wins patch"
+    lw_data = lw_row[0] if isinstance(lw_row[0], dict) else orjson.loads(lw_row[0])
+    assert lw_data.get("status") == "shipped", (
+        f"lwstate must reflect confirmed written state 'shipped' after last_writer_wins; "
+        f"got: {lw_data.get('status')!r}"
+    )
+
+
+@pytest.mark.anyio
+async def test_three_way_server_wins_updates_lwstate_to_current(pool, run_migrations):
+    """T2 #9 / T2 #30: server_wins resolution — write is skipped but lwstate is
+    refreshed to reflect the actual current external state observed in the
+    preflight read.
+
+    GOAL.md requirement T2 #9: "After a conflict is detected (any resolution
+    strategy): Update [lwstate] with the actual current state observed in the
+    pre-flight read."
+    """
+    os.environ["INOUT_CREDENTIAL_CONFLICT_KEY"] = "dummy"
+    from inandout.config.writeback import ConflictResolution
+    from inandout.postgres.desired_state import (
+        ensure_desired_state_table,
+        ensure_lwstate_table,
+        desired_state_table_name,
+        lwstate_table_name,
+    )
+    from inandout.writeback.engine import WritebackEngine
+
+    connector_sw = _make_connector(connector_name="conflict_test_f")
+    from inandout.config.writeback import WritebackConfig, ProtectionLevel, OperationsConfig, OperationConfig, UpdateOperationConfig
+    import copy
+    sw_wb_cfg = WritebackConfig(
+        protection_level=ProtectionLevel.optimistic,
+        conflict_resolution=ConflictResolution.server_wins,
+        supported_actions=["update"],
+        use_desired_state_table=True,
+        operations=OperationsConfig(
+            lookup=OperationConfig(method="GET", path="/v1/orders/${external_id}"),
+            update=UpdateOperationConfig(method="PATCH", path="/v1/orders/${external_id}"),
+        ),
+    )
+    connector_sw = copy.deepcopy(connector_sw)
+    object.__setattr__(connector_sw.datatypes[_DATATYPE], "writeback", sw_wb_cfg)
+
+    dst = desired_state_table_name("conflict_test_f", _DATATYPE)
+    lwst = lwstate_table_name("conflict_test_f", _DATATYPE)
+
+    async with pool.connection() as conn:
+        await ensure_desired_state_table(conn, "conflict_test_f", _DATATYPE)
+        await ensure_lwstate_table(conn, "conflict_test_f", _DATATYPE)
+
+        # lwstate: last we wrote was status=pending
+        await conn.execute(
+            f"""
+            INSERT INTO {lwst} (external_id, data, _written_at)
+            VALUES ('ord-6', %s, NOW())
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data
+            """,
+            [orjson.dumps({"status": "pending"}).decode()],
+        )
+        # Desired state: want to set status=closed, base was pending
+        await conn.execute(
+            f"""
+            INSERT INTO {dst} (external_id, data, _action)
+            VALUES ('ord-6', %s, 'update')
+            ON CONFLICT (external_id) DO UPDATE SET data=EXCLUDED.data, _action=EXCLUDED._action
+            """,
+            [orjson.dumps({"status": "closed", "_base": {"status": "pending"}}).decode()],
+        )
+        await conn.commit()
+
+    patched = []
+
+    def _handle_get(request):
+        # External actor modified the record while we weren't looking
+        return httpx.Response(200, json={"id": "ord-6", "status": "in_review"})
+
+    def _handle_patch(request):
+        patched.append(request)
+        return httpx.Response(200, json={"id": "ord-6", "status": "closed"})
+
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_get)
+        mock.patch(re.compile(r"/v1/orders/\w+")).mock(side_effect=_handle_patch)
+
+        engine = WritebackEngine(pool)
+        result = await engine.run_writeback_cycle(connector_sw, _DATATYPE, sw_wb_cfg, dst)
+
+    # server_wins: we do NOT send the PATCH — the external state wins
+    assert result.conflicts >= 1, "Conflict must be counted"
+    assert result.skipped >= 1, "server_wins must skip the write"
+    assert len(patched) == 0, "PATCH must NOT be sent when server_wins"
+
+    # T2 #9 / T2 #30: lwstate must be updated to the current external state
+    # even though we didn't write anything
+    async with pool.connection() as conn:
+        lw_row = await (
+            await conn.execute(f"SELECT data FROM {lwst} WHERE external_id='ord-6'")
+        ).fetchone()
+    assert lw_row is not None, "lwstate must exist"
+    lw_data = lw_row[0] if isinstance(lw_row[0], dict) else orjson.loads(lw_row[0])
+    assert lw_data.get("status") == "in_review", (
+        f"lwstate must be refreshed to current external state 'in_review' after "
+        f"server_wins; got: {lw_data.get('status')!r}"
+    )
