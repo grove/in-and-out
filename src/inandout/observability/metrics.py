@@ -21,6 +21,13 @@ def _gauge(name: str, documentation: str, labelnames: list[str]) -> Gauge:
         return REGISTRY._names_to_collectors.get(name)  # type: ignore[return-value]
 
 
+def _histogram(name: str, documentation: str, labelnames: list[str]) -> Histogram:
+    try:
+        return Histogram(name, documentation, labelnames, registry=REGISTRY)
+    except ValueError:
+        return REGISTRY._names_to_collectors.get(name)  # type: ignore[return-value]
+
+
 # Records processed
 records_processed_total: Counter = _counter(
     "inout_records_processed_total",
@@ -133,6 +140,20 @@ schema_changes_total: Counter = _counter(
     "inout_schema_changes_total",
     "Total schema change events detected (new fields, removed fields) per connector/datatype",
     ["connector", "datatype", "change_type"],
+)
+
+# Per-datatype sync latency histogram
+sync_duration_seconds: Histogram = _histogram(
+    "inout_sync_duration_seconds",
+    "Sync operation duration in seconds per connector/datatype",
+    ["tool", "connector", "datatype", "operation"],
+)
+
+# Per-datatype HTTP request latency histogram
+http_request_duration_seconds: Histogram = _histogram(
+    "inout_http_request_duration_seconds",
+    "HTTP request duration in seconds per connector/datatype/endpoint",
+    ["connector", "datatype", "method", "endpoint"],
 )
 
 

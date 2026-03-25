@@ -1556,5 +1556,16 @@ def control_list(
     anyio.run(_run)
 
 
+@app.command(name="interactive")
+def interactive_mode(
+    database_url: str = typer.Option(..., "--database-url", envvar="DATABASE_URL", help="PostgreSQL connection string"),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Path to main config file"),
+):
+    """Start interactive REPL mode for operator commands."""
+    from inandout.cli.interactive import start_interactive
+    
+    start_interactive(database_url, config_path)
+
+
 if __name__ == "__main__":
     app()

@@ -99,13 +99,27 @@ class TokenBucket:
 # Module-level registry: connector_name → TokenBucket
 _buckets: dict[str, TokenBucket] = {}
 
+# Per-tenant rate limiters: (connector_name, account_id) → TokenBucket
+_tenant_buckets: dict[tuple[str, str], TokenBucket] = {}
+
 
 def get_rate_limiter(
     connector_name: str,
     rate_per_second: float,
     burst: float,
+    account_id: str | None = None,
 ) -> TokenBucket:
-    """Return (creating if needed) the token bucket for *connector_name*."""
+    """Return (creating if needed) the token bucket for connector or tenant.
+    
+    If account_id is provided, returns a per-tenant rate limiter.
+    Otherwise returns the connector-level rate limiter.
+    """
+    if account_id:
+        key = (connector_name, account_id)
+        if key not in _tenant_buckets:
+            _tenant_buckets[key] = TokenBucket(rate=rate_per_second, capacity=burst)
+        return _tenant_buckets[key]
+    
     if connector_name not in _buckets:
         _buckets[connector_name] = TokenBucket(rate=rate_per_second, capacity=burst)
     return _buckets[connector_name]
@@ -114,3 +128,4 @@ def get_rate_limiter(
 def reset_all() -> None:
     """Clear all buckets — used in tests."""
     _buckets.clear()
+    _tenant_buckets.clear()

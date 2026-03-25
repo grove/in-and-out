@@ -240,6 +240,7 @@ class AccountConfig(BaseModel):
     credential_ref: str          # per-account credentials
     base_url: str | None = None  # per-account base URL override (falls back to connection.base_url)
     display_name: str | None = None
+    rate_limit: RateLimitConfig | None = None  # per-tenant rate limit override
 
 
 class ConnectorConfig(BaseModel):

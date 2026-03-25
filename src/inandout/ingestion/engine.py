@@ -582,6 +582,9 @@ class IngestionEngine:
         log: Any,
         dtype_cfg: DatatypeConfig | None = None,
     ) -> None:
+        import time
+        start_time = time.time()
+        
         history_mode = ingestion_cfg.history_mode
         ns = self._namespace
 
@@ -1139,6 +1142,16 @@ class IngestionEngine:
                         log.warning("schema_version_bump_failed", error=str(_bsv_exc))
 
         result.status = "completed"
+        
+        # Record sync duration metric
+        sync_duration = time.time() - start_time
+        from inandout.observability.metrics import sync_duration_seconds
+        sync_duration_seconds.labels(
+            tool="ingestion",
+            connector=connector.name,
+            datatype=datatype,
+            operation=result.mode,
+        ).observe(sync_duration)
 
     async def _resolve_linked_objects(
         self,
