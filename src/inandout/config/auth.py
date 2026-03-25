@@ -79,6 +79,50 @@ class CustomAuth(BaseModel):
     custom: CustomConfig
 
 
+class SamlConfig(BaseModel):
+    """SAML 2.0 authentication configuration."""
+    model_config = ConfigDict(extra="allow")
+    
+    idp_entity_id: str                      # Identity Provider entity ID
+    idp_sso_url: str                        # Identity Provider SSO URL
+    idp_x509_cert: str | None = None        # IDP certificate (PEM format) or credential_ref
+    sp_entity_id: str                       # Service Provider (our) entity ID
+    assertion_consumer_service_url: str     # ACS URL for SAML response
+    name_id_format: str = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
+    requested_authn_context: list[str] | None = None
+    # Token extraction
+    token_attribute: str = "sessionToken"   # SAML attribute containing API token
+    token_injection: dict[str, Any] | None = None
+
+
+class SamlAuth(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    
+    type: Literal["saml"]
+    credential_ref: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$")
+    saml: SamlConfig
+
+
+class KerberosConfig(BaseModel):
+    """Kerberos (GSSAPI) authentication configuration."""
+    model_config = ConfigDict(extra="allow")
+    
+    service: str                            # Service principal (e.g., "HTTP@api.example.com")
+    keytab_path: str | None = None          # Path to keytab file
+    credential_cache: str | None = None     # Path to credential cache
+    mutual_authentication: str = "REQUIRED"  # REQUIRED, OPTIONAL, or DISABLED
+    delegate: bool = False                   # Enable credential delegation
+    force_preemptive: bool = True            # Send auth on first request
+
+
+class KerberosAuth(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    
+    type: Literal["kerberos"]
+    credential_ref: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$")
+    kerberos: KerberosConfig
+
+
 class PreRequestAuthConfig(BaseModel):
     """Config for pre-request session-token authentication flows (A3 — T1 #24)."""
 
@@ -94,6 +138,6 @@ class PreRequestAuthConfig(BaseModel):
 
 
 AuthConfig = Annotated[
-    OAuth2Auth | ApiKeyAuth | JwtAuth | CustomAuth,
+    OAuth2Auth | ApiKeyAuth | JwtAuth | CustomAuth | SamlAuth | KerberosAuth,
     Field(discriminator="type"),
 ]
