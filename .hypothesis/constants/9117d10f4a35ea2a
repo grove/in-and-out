@@ -1,0 +1,4 @@
+# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/writeback/ordering.py
+# hypothesis_version: 6.151.9
+
+['_cycle_error', '_group_id', 'external_id']

@@ -166,6 +166,11 @@ class HttpTransportAdapter:
 
             exc = httpx.HTTPStatusError("429", request=resp.request, response=resp)
             wait = _retry_after_secs(exc) or (2 ** attempt)
+            
+            # T1 #18: Adaptive rate limiting — apply backoff to token bucket
+            if self._token_bucket is not None and wait is not None:
+                self._token_bucket.apply_backoff(wait)
+            
             await anyio.sleep(min(wait, 300.0))
 
         return resp  # all retries exhausted — return final response to caller
