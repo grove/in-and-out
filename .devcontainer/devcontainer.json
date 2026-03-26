@@ -1,0 +1,43 @@
+{
+  "name": "in-and-out dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  // Install all project deps (including dev extras).
+  // Integration tests use testcontainers to spin up Postgres on demand — no sidecar needed.
+  "postCreateCommand": "uv sync --all-extras",
+
+  "forwardPorts": [
+    9090,  // Health / metrics (ingest)
+    9091   // Health / metrics (writeback)
+  ],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml",
+        "skellock.just"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "ruff.path": ["/workspace/.venv/bin/ruff"],
+        "mypy-type-checker.path": ["/workspace/.venv/bin/mypy"],
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["tests/unit"]
+      }
+    }
+  },
+
+}
