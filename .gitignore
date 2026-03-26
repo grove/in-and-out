@@ -26,11 +26,12 @@ env/
 # uv
 .uv/
 
-# pytest / coverage
+# pytest / coverage / hypothesis
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
+.hypothesis/
 
 # mypy
 .mypy_cache/
