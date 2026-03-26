@@ -15,3 +15,4 @@
 - [CLI Reference](./cli.md)
 - [Database & Migrations](./database.md)
 - [OSI-Mapping Integration Contract](./osi-mapping-contract.md)
+- [FAQ](./faq.md)
