@@ -94,6 +94,8 @@ class MemoryStore:
         result = []
         for r in records:
             d = dict(r.data)
+            d["__modified_at__"] = r.modified_at
+            d["__created_at__"] = r.created_at
             if r.deleted_at is not None:
                 d["__deleted_at__"] = r.deleted_at
             result.append(d)
@@ -111,6 +113,8 @@ class MemoryStore:
             return None
         stored = self._records[key][idx]
         result = dict(stored.data)
+        result["__modified_at__"] = stored.modified_at
+        result["__created_at__"] = stored.created_at
         if stored.deleted_at is not None:
             result["__deleted_at__"] = stored.deleted_at
         return result

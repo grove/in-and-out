@@ -47,7 +47,10 @@ class WebhookDispatcher:
     def __init__(self, engine_url: str = "http://localhost:9090") -> None:
         self._engine_url = engine_url.rstrip("/")
         # Shared client — caller must call aclose() when done.
-        self._client = httpx.AsyncClient(timeout=0.5)
+        # Use a short connect timeout so a missing engine doesn't stall the event loop.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=0.3, read=0.5, write=0.5, pool=0.5)
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -117,3 +120,17 @@ class WebhookDispatcher:
             await self._client.post(url, content=payload_bytes, headers=headers)
         except Exception:
             pass  # best-effort; demo tool only
+
+    def dispatch_nowait(
+        self,
+        connector: ConnectorConfig,
+        datatype: str,
+        operation: str,
+        record_id: str,
+        record: dict | None,
+    ) -> None:
+        """Schedule dispatch as a background task — never blocks the caller."""
+        import asyncio
+        asyncio.create_task(
+            self.dispatch(connector, datatype, operation, record_id, record)
+        )

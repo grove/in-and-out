@@ -86,6 +86,70 @@
                 const statusEl = document.getElementById('sse-status');
                 const source = new EventSource('/events');
 
+                // Close the SSE connection immediately on navigation so the browser's
+                // 6-connection-per-origin limit (HTTP/1.1) is not exhausted by abandoned
+                // EventSource slots from previously visited pages.
+                window.addEventListener('pagehide', function () { source.close(); });
+                window.addEventListener('beforeunload', function () { source.close(); });
+
+                // Map of "connector-datatype" -> [{op, record_id, ts}, ...]
+                // Keeps the last 10 changes per datatype for banner/row display.
+                const recentChanges = {};
+
+                function _relativeTime(iso) {
+                    const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+                    if (secs < 60) return 'just now';
+                    if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+                    return Math.floor(secs / 3600) + 'h ago';
+                }
+
+                function _updateRecentUI(key, connector, datatype) {
+                    const changes = recentChanges[key] || [];
+                    // Dashboard card banner
+                    const banner = document.getElementById('recent-' + key);
+                    if (banner) {
+                        if (changes.length === 0) {
+                            banner.classList.add('hidden');
+                            banner.classList.remove('flex');
+                        } else {
+                            const latest = changes[changes.length - 1];
+                            const opLabel = latest.op === 'delete' ? 'deleted' : latest.op === 'create' ? 'created' : 'updated';
+                            const n = changes.length;
+                            const noun = n === 1
+                                ? `<a href="/ui/${connector}/${datatype}/${latest.record_id}" class="underline hover:text-amber-200">${datatype}:${latest.record_id}</a> was ${opLabel}`
+                                : `${n} records changed`;
+                            banner.innerHTML = `<span class="mr-1">⚡</span>${noun} &mdash; <span class="opacity-75">${_relativeTime(latest.ts)}</span>`;
+                            banner.classList.remove('hidden');
+                            banner.classList.add('flex');
+                        }
+                    }
+                }
+
+                // Stamp "Xs ago" labels on table rows from their server-rendered data-ts attribute.
+                // This is purely computed from the row data — no SSE state needed.
+                function _stampRowLabels() {
+                    document.querySelectorAll('[data-ts]').forEach(function (span) {
+                        span.textContent = _relativeTime(span.dataset.ts);
+                        span.className = 'ml-2 text-xs font-medium text-amber-400';
+                    });
+                }
+
+                // Refresh dashboard banners every 5 seconds; also refresh row labels.
+                setInterval(function () {
+                    Object.keys(recentChanges).forEach(function (key) {
+                        const parts = key.split('-');
+                        _updateRecentUI(key, parts[0], parts.slice(1).join('-'));
+                    });
+                    _stampRowLabels();
+                }, 5000);
+
+                // When HTMX finishes loading rows, stamp labels from data-ts immediately.
+                document.addEventListener('htmx:afterSwap', function (e) {
+                    if (e.detail.target && e.detail.target.id === 'records-tbody') {
+                        _stampRowLabels();
+                    }
+                });
+
                 source.onopen = () => {
                     statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> live';
                 };
@@ -96,6 +160,19 @@
                 source.addEventListener('mutation', function (e) {
                     const d = JSON.parse(e.data);
                     const key = d.connector + '-' + d.datatype;
+                    const ageMs = Date.now() - new Date(d.timestamp).getTime();
+                    const isLive = ageMs < 5000;
+
+                    // Track recent changes and update banners/row labels for ALL events,
+                    // including replayed history, so labels appear immediately on page load.
+                    if (!recentChanges[key]) recentChanges[key] = [];
+                    // Avoid duplicate entries from SSE replay (same event_id isn't available, use ts+id).
+                    const changeKey = d.record_id + '@' + d.timestamp;
+                    if (!recentChanges[key].some(c => c.record_id + '@' + c.ts === changeKey)) {
+                        recentChanges[key].push({ op: d.operation, record_id: d.record_id, ts: d.timestamp });
+                        if (recentChanges[key].length > 10) recentChanges[key].shift();
+                    }
+                    _updateRecentUI(key, d.connector, d.datatype);
 
                     // Refresh the count badge by fetching the authoritative server count.
                     const badge = document.getElementById('count-' + key);
@@ -103,20 +180,36 @@
                         fetch('/ui/' + d.connector + '/' + d.datatype + '/_count')
                             .then(r => r.text()).then(n => {
                                 badge.textContent = n.trim();
-                                badge.classList.add('ring-2', 'ring-sky-400');
-                                setTimeout(() => badge.classList.remove('ring-2', 'ring-sky-400'), 1200);
+                                if (isLive) {
+                                    badge.classList.add('ring-2', 'ring-sky-400');
+                                    setTimeout(() => badge.classList.remove('ring-2', 'ring-sky-400'), 1200);
+                                }
                             });
                     }
 
-                    // Flash updated row in table views (only for live events)
-                    const ageMs = Date.now() - new Date(d.timestamp).getTime();
-                    if (ageMs < 5000) {
-                        const row = document.getElementById('row-' + d.record_id);
-                        if (row) {
-                            row.classList.remove('flash-create', 'flash-update');
-                            void row.offsetWidth;
-                            row.classList.add(d.operation === 'create' ? 'flash-create' : 'flash-update');
+                    // Refresh the table rows if we're on the relevant listing page (live events only).
+                    // This updates cell values after an API PATCH/POST without requiring a full reload.
+                    if (isLive) {
+                        const tbody = document.getElementById('records-tbody');
+                        if (tbody && tbody.getAttribute('hx-get')) {
+                            htmx.ajax('GET', tbody.getAttribute('hx-get'), { target: tbody, swap: 'innerHTML' });
                         }
+                    }
+
+                    // Flash updated row and update its data-ts label (live events only).
+                    if (isLive) {
+                        // Row flash is handled via the flash-* CSS class; applied after swap completes.
+                        document.addEventListener('htmx:afterSwap', function onSwap(e) {
+                            if (e.detail.target && e.detail.target.id === 'records-tbody') {
+                                document.removeEventListener('htmx:afterSwap', onSwap);
+                                const row = document.getElementById('row-' + d.record_id);
+                                if (row) {
+                                    row.classList.remove('flash-create', 'flash-update');
+                                    void row.offsetWidth;
+                                    row.classList.add(d.operation === 'create' ? 'flash-create' : 'flash-update');
+                                }
+                            }
+                        });
                     }
 
                     // Prepend to activity feed

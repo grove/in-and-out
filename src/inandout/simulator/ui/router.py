@@ -328,7 +328,10 @@ def _mutations_html(mutations: list) -> str:
 def _row_html(connector_name: str, datatype: str, pk_field: str, record: dict) -> str:
     rid = str(record.get(pk_field, ""))
     is_deleted = "__deleted_at__" in record
-    display = {k: v for k, v in record.items() if k != "__deleted_at__"}
+    modified_at = record.get("__modified_at__", "")
+    created_at = record.get("__created_at__", "")
+    was_updated = modified_at and created_at and modified_at != created_at
+    display = {k: v for k, v in record.items() if not k.startswith("__")}
     row_cls = (
         "border-b border-slate-700 opacity-50 bg-red-950/20"
         if is_deleted
@@ -358,6 +361,11 @@ def _row_html(connector_name: str, datatype: str, pk_field: str, record: dict) -
             f'  hx-delete="/admin/{connector_name}/{datatype}/{rid}" '
             f'  hx-target="closest tr" hx-swap="outerHTML" '
             f'  class="text-red-400 hover:text-red-300">Delete</button>'
+            + (
+                f'<span id="recent-row-{rid}" data-ts="{modified_at}"'
+                f' class="ml-2 text-xs font-medium"></span>'
+                if was_updated else ""
+            )
         )
     return (
         f'<tr id="row-{rid}" class="{row_cls}">'

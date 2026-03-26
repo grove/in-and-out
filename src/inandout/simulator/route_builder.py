@@ -435,7 +435,7 @@ def build_connector_router(
                                 connector_name, _dt_name, rid, source="engine"
                             )
                             if deleted:
-                                await dispatcher.dispatch(connector, _dt_name, "delete", rid, None)
+                                dispatcher.dispatch_nowait(connector, _dt_name, "delete", rid, None)
                                 ev = await store.recent_mutations(connector_name, _dt_name, 1)
                                 if ev:
                                     event_bus.publish_mutation(ev[0])
@@ -475,7 +475,7 @@ def build_connector_router(
                                 connector_name, _dt_name, body, pk_field=_pk, source="engine"
                             )
                             new_id = record.get(_pk, "")
-                            await dispatcher.dispatch(
+                            dispatcher.dispatch_nowait(
                                 connector, _dt_name, "create", str(new_id), record
                             )
                             evs = await store.recent_mutations(connector_name, _dt_name, 1)
@@ -506,7 +506,7 @@ def build_connector_router(
                                 connector_name, _dt_name, _method, str(request.url.path), 404, ms
                             )
                             return JSONResponse({"error": "not found"}, status_code=404)
-                        await dispatcher.dispatch(connector, _dt_name, "update", rid, updated)
+                        dispatcher.dispatch_nowait(connector, _dt_name, "update", rid, updated)
                         evs = await store.recent_mutations(connector_name, _dt_name, 1)
                         if evs:
                             event_bus.publish_mutation(evs[0])

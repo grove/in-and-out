@@ -114,17 +114,19 @@ class SQLiteStore:
         def _do(conn, connector, datatype, cursor_field, watermark, include_deleted):
             if include_deleted:
                 rows = conn.execute(
-                    "SELECT data, deleted_at FROM sim_records WHERE connector=? AND datatype=? ORDER BY modified_at ASC",
+                    "SELECT data, deleted_at, modified_at, created_at FROM sim_records WHERE connector=? AND datatype=? ORDER BY modified_at ASC",
                     (connector, datatype),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT data, deleted_at FROM sim_records WHERE connector=? AND datatype=? AND deleted_at IS NULL ORDER BY modified_at ASC",
+                    "SELECT data, deleted_at, modified_at, created_at FROM sim_records WHERE connector=? AND datatype=? AND deleted_at IS NULL ORDER BY modified_at ASC",
                     (connector, datatype),
                 ).fetchall()
             result = []
             for r in rows:
                 d = json.loads(r["data"])
+                d["__modified_at__"] = r["modified_at"]
+                d["__created_at__"] = r["created_at"]
                 if r["deleted_at"] is not None:
                     d["__deleted_at__"] = r["deleted_at"]
                 result.append(d)
@@ -142,12 +144,14 @@ class SQLiteStore:
     ) -> dict[str, Any] | None:
         def _do(conn, connector, datatype, record_id):
             row = conn.execute(
-                "SELECT data, deleted_at FROM sim_records WHERE connector=? AND datatype=? AND record_id=?",
+                "SELECT data, deleted_at, modified_at, created_at FROM sim_records WHERE connector=? AND datatype=? AND record_id=?",
                 (connector, datatype, record_id),
             ).fetchone()
             if row is None:
                 return None
             result = json.loads(row["data"])
+            result["__modified_at__"] = row["modified_at"]
+            result["__created_at__"] = row["created_at"]
             if row["deleted_at"] is not None:
                 result["__deleted_at__"] = row["deleted_at"]
             return result

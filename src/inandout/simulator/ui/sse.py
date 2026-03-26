@@ -26,9 +26,9 @@ async def sse_endpoint(request: Request) -> StreamingResponse:
         for ev in event_bus.recent(limit=30):
             yield ev.to_sse()
         try:
-            while True:
+            while not await request.is_disconnected():
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    event = await asyncio.wait_for(queue.get(), timeout=3.0)
                     yield event.to_sse()
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"

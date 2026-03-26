@@ -35,6 +35,11 @@
                         </span>
                     </div>
 
+                    <!-- Recent-changes banner (populated by SSE) -->
+                    <div id="recent-{{ connector.name }}-{{ dt_name }}" class="hidden items-center gap-2 text-xs
+                         bg-amber-900/40 border border-amber-700/50 text-amber-300 rounded-lg px-3 py-1.5">
+                    </div>
+
                     <div class="flex items-center gap-2 text-xs text-slate-400">
                         {% if dt_cfg.ingestion %}
                         <span class="bg-green-900 text-green-300 px-1.5 py-0.5 rounded">ingest</span>
