@@ -89,7 +89,11 @@ def build_ui_router() -> APIRouter:
         dt_cfg = connector.datatypes[datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         records = await store.list_all(connector_name, datatype, include_deleted=True)
-        rows = "".join(_row_html(connector_name, datatype, pk_field, r) for r in records)
+        columns = _columns_from_cfg(dt_cfg)
+        if columns is None and records:
+            first = next((r for r in records if "__deleted_at__" not in r), records[0])
+            columns = [k for k in first if not k.startswith("__")]
+        rows = "".join(_row_html(connector_name, datatype, pk_field, r, columns) for r in records)
         return HTMLResponse(rows)
 
     @router.get("/ui/{connector_name}/{datatype}/_count")
@@ -181,7 +185,8 @@ def build_ui_router() -> APIRouter:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
         await disp.dispatch(connector, datatype, "create", str(record.get(pk_field, "")), record)
-        return HTMLResponse(_row_html(connector_name, datatype, pk_field, record), status_code=201)
+        columns = _columns_from_cfg(dt_cfg)
+        return HTMLResponse(_row_html(connector_name, datatype, pk_field, record, columns), status_code=201)
 
     @router.put("/admin/{connector_name}/{datatype}/{record_id}", response_class=HTMLResponse)
     async def admin_update(request: Request, connector_name: str, datatype: str, record_id: str):
@@ -291,6 +296,13 @@ def _pk_from_cfg(dt_cfg) -> str:
     return "id"
 
 
+def _columns_from_cfg(dt_cfg) -> list[str] | None:
+    """Return column names derived from seed data, or None if no seed data."""
+    if dt_cfg.seed_data:
+        return [k for k in dt_cfg.seed_data[0] if not k.startswith("__")]
+    return None
+
+
 def _mutations_html(mutations: list) -> str:
     import html as _html
 
@@ -357,20 +369,28 @@ def _mutations_html(mutations: list) -> str:
     return '<ul class="flex flex-col gap-2">' + "".join(items) + "</ul>"
 
 
-def _row_html(connector_name: str, datatype: str, pk_field: str, record: dict) -> str:
+def _row_html(
+    connector_name: str,
+    datatype: str,
+    pk_field: str,
+    record: dict,
+    columns: list[str] | None = None,
+) -> str:
     rid = str(record.get(pk_field, ""))
     is_deleted = "__deleted_at__" in record
     modified_at = record.get("__modified_at__", "")
     created_at = record.get("__created_at__", "")
     was_updated = modified_at and created_at and modified_at != created_at
     display = {k: v for k, v in record.items() if not k.startswith("__")}
+    col_list = columns if columns is not None else list(display.keys())
     row_cls = (
         "border-b border-slate-700 opacity-50 bg-red-950/20"
         if is_deleted
         else "border-b border-slate-700 hover:bg-slate-750 transition-colors"
     )
     cells = ""
-    for k, v in display.items():
+    for k in col_list:
+        v = display.get(k, "")
         val = str(v)
         if len(val) > 60:
             val = val[:57] + "…"
