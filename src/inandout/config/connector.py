@@ -178,9 +178,9 @@ class LinkedObject(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    field: str           # field in parent record holding child IDs (e.g. "line_item_ids")
-    datatype: str        # target datatype to ingest children into
-    detail_path: str     # path for child GET, ${id} interpolated
+    field: str  # field in parent record holding child IDs (e.g. "line_item_ids")
+    datatype: str  # target datatype to ingest children into
+    detail_path: str  # path for child GET, ${id} interpolated
     concurrency: int = 3
     primary_key: str = "id"  # field in child response used as external_id
 
@@ -206,11 +206,11 @@ class DatatypeConfig(BaseModel):
     strict_field_mapping: bool = False
     quality_rules: QualityRule | None = None
     max_concurrent_writes: int | None = None  # datatype-level override for writeback parallelism
-    linked_objects: list[LinkedObject] = []     # A3: linked/nested object resolution
+    linked_objects: list[LinkedObject] = []  # A3: linked/nested object resolution
     timestamp_fields: list[TimestampFieldConfig] = []  # A7: timestamp normalisation
-    pii_fields: list[str] = []                  # B6: fields containing PII
-    api_version: str | None = None              # A6: per-datatype API version override
-    seed_data: list[dict[str, Any]] = []        # Demo simulator: example records loaded at startup
+    pii_fields: list[str] = []  # B6: fields containing PII
+    api_version: str | None = None  # A6: per-datatype API version override
+    seed_data: list[dict[str, Any]] = []  # Demo simulator: example records loaded at startup
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":
@@ -238,7 +238,7 @@ class AccountConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     account_id: str
-    credential_ref: str          # per-account credentials
+    credential_ref: str  # per-account credentials
     base_url: str | None = None  # per-account base URL override (falls back to connection.base_url)
     display_name: str | None = None
     rate_limit: RateLimitConfig | None = None  # per-tenant rate limit override
@@ -253,10 +253,12 @@ class ConnectorConfig(BaseModel):
     description: str | None = None
     api_version: str = Field(min_length=1)
     version: str = "1.0.0"
-    api_version_header: str | None = None            # A6: HTTP header name for injecting api_version, e.g. "Salesforce-Version"
+    api_version_header: str | None = (
+        None  # A6: HTTP header name for injecting api_version, e.g. "Salesforce-Version"
+    )
     api_deprecation_deadline: str | None = None
     api_version_deprecation_date: str | None = None  # A6: ISO date string e.g. "2026-12-01"
-    api_version_warning_days: int = 60               # A6: warn when within this many days
+    api_version_warning_days: int = 60  # A6: warn when within this many days
     runtime_params: dict[str, RuntimeParamConfig] | None = None
     connection: ConnectionConfig
     auth: AuthConfig
@@ -275,9 +277,7 @@ class ConnectorConfig(BaseModel):
         graph: dict[str, list[str]] = {}
         for dtype_name, dtype_cfg in self.datatypes.items():
             if dtype_cfg.writeback is not None:
-                graph[dtype_name] = [
-                    dep.depends_on for dep in dtype_cfg.writeback.dependencies
-                ]
+                graph[dtype_name] = [dep.depends_on for dep in dtype_cfg.writeback.dependencies]
             else:
                 graph[dtype_name] = []
         if _has_cycle(graph):
@@ -303,9 +303,7 @@ class ConnectorFileConfig(BaseModel):
     def schema_version_present(cls, data: Any) -> Any:
         """CFG-005: schema_version and connector are required top-level keys."""
         if not isinstance(data, dict) or "schema_version" not in data:
-            raise ValueError(
-                "CFG-005: missing required top-level key: schema_version"
-            )
+            raise ValueError("CFG-005: missing required top-level key: schema_version")
         return data
 
     @model_validator(mode="after")
@@ -319,7 +317,5 @@ class ConnectorFileConfig(BaseModel):
                     bad.append(f"${{{token}}}")
         if bad:
             unique = sorted(set(bad))
-            raise ValueError(
-                f"CFG-002: unknown interpolation namespace(s): {', '.join(unique)}"
-            )
+            raise ValueError(f"CFG-002: unknown interpolation namespace(s): {', '.join(unique)}")
         return self

@@ -464,7 +464,8 @@ def build_connector_router(
                             )
                             if rec is None:
                                 return JSONResponse({"error": "not found"}, status_code=404)
-                            return JSONResponse(rec)
+                            display = {k: v for k, v in rec.items() if not k.startswith("__")}
+                            return JSONResponse(display)
 
                         if _action == "insert":
                             try:
@@ -474,9 +475,9 @@ def build_connector_router(
                             record = await store.create(
                                 connector_name, _dt_name, body, pk_field=_pk, source="engine"
                             )
-                            new_id = record.get(_pk, "")
+                            new_id = str(record.get(_pk, ""))
                             dispatcher.dispatch_nowait(
-                                connector, _dt_name, "create", str(new_id), record
+                                connector, _dt_name, "create", new_id, record
                             )
                             evs = await store.recent_mutations(connector_name, _dt_name, 1)
                             if evs:
@@ -485,7 +486,8 @@ def build_connector_router(
                             event_bus.publish_request(
                                 connector_name, _dt_name, "POST", str(request.url.path), 201, ms
                             )
-                            return JSONResponse({"id": str(new_id)}, status_code=201)
+                            display = {k: v for k, v in record.items() if not k.startswith("__")}
+                            return JSONResponse(display, status_code=201)
 
                         # update / archive / upsert
                         try:
@@ -514,7 +516,8 @@ def build_connector_router(
                         event_bus.publish_request(
                             connector_name, _dt_name, _method, str(request.url.path), 200, ms
                         )
-                        return JSONResponse(updated)
+                        display = {k: v for k, v in updated.items() if not k.startswith("__")}
+                        return JSONResponse(display)
 
                     _extra = _build_openapi_extra(_action, _seed, _pk)
 

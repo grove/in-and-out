@@ -137,7 +137,8 @@ simulator:
     uv run inandout simulator run \
       --connector connectors/hubspot.example.yaml \
       --connector connectors/salesforce.example.yaml \
-      --listen 0.0.0.0:6100
+      --listen 0.0.0.0:6100 \
+      --reload
 
 # Start the full demo stack: simulator + postgres + engine (requires Docker)
 demo:

@@ -1,4 +1,5 @@
 """Unit tests for the simulator EventBus."""
+
 from __future__ import annotations
 
 import asyncio

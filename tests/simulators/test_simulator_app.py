@@ -240,9 +240,7 @@ async def test_ui_record_page_unknown_returns_404(client: httpx.AsyncClient) -> 
 # Connector write endpoints: insert (POST without {external_id} in path)
 # ---------------------------------------------------------------------------
 
-_HUBSPOT_FIXTURE = (
-    Path(__file__).parents[2] / "connectors" / "hubspot.example.yaml"
-)
+_HUBSPOT_FIXTURE = Path(__file__).parents[2] / "connectors" / "hubspot.example.yaml"
 
 
 @pytest.fixture
@@ -263,7 +261,11 @@ async def hubspot_client():
 
 
 async def test_insert_endpoint_accepts_post_without_id(hubspot_client: httpx.AsyncClient) -> None:
-    """POST to an insert endpoint that has no ${external_id} must return 201."""
+    """POST to an insert endpoint that has no ${external_id} must return 201.
+
+    The simulator server assigns the id and stores/returns the body as-is,
+    matching the real HubSpot API shape: {id, properties: {...}}.
+    """
     resp = await hubspot_client.post(
         "/hubspot/crm/v3/objects/contacts",
         json={"properties": {"firstname": "Zara", "email": "zara@example.com"}},
@@ -271,9 +273,13 @@ async def test_insert_endpoint_accepts_post_without_id(hubspot_client: httpx.Asy
     assert resp.status_code == 201
     body = resp.json()
     assert "id" in body  # server-assigned id present
+    assert isinstance(body.get("properties"), dict)
+    assert body["properties"]["firstname"] == "Zara"
 
 
-async def test_insert_endpoint_has_no_record_id_query_param(hubspot_client: httpx.AsyncClient) -> None:
+async def test_insert_endpoint_has_no_record_id_query_param(
+    hubspot_client: httpx.AsyncClient,
+) -> None:
     """The OpenAPI schema for the insert endpoint must NOT include record_id as a query param."""
     resp = await hubspot_client.get("/hubspot/openapi.json")
     assert resp.status_code == 200

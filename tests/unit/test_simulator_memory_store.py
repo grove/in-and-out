@@ -1,4 +1,5 @@
 """Unit tests for the simulator MemoryStore."""
+
 from __future__ import annotations
 
 import asyncio

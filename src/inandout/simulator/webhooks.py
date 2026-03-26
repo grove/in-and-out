@@ -131,6 +131,5 @@ class WebhookDispatcher:
     ) -> None:
         """Schedule dispatch as a background task — never blocks the caller."""
         import asyncio
-        asyncio.create_task(
-            self.dispatch(connector, datatype, operation, record_id, record)
-        )
+
+        asyncio.create_task(self.dispatch(connector, datatype, operation, record_id, record))
