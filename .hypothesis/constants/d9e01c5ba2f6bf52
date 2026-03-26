@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/observability/sla.py
-# hypothesis_version: 6.151.9
-
-['check_sla_db_error', 'public', 'sync_sla_violated']

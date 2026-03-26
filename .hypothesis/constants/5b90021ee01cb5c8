@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/postgres/bulk_upsert.py
-# hypothesis_version: 6.151.9
-
-['(', ', ', ', NOW())', '.', '_ingested_at', '_raw_hash', '_run_id', 'bulk_upsert_complete', '{col} = {ph}']

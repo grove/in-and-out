@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/transport/auth.py
-# hypothesis_version: 6.151.9
-
-[15.0, 3600.0, 401, 3600, '${credential}', '.', ':', 'Authorization', 'PATCH', 'POST', 'PUT', '__pending__', 'access_token', 'body', 'client_credentials', 'client_id', 'client_secret', 'expires_at', 'expires_in', 'grant_type', 'header', 'method', 'password', 'query', 'refresh_token', 'scope', 'token', 'token_field', 'token_lifetime_secs', 'url', 'username']

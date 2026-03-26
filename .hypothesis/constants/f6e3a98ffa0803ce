@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/deadletter/transform.py
-# hypothesis_version: 6.151.9
-
-[10000, '_dl_transform', '_raw', 'dl_transform_dropped', 'dl_transform_upsert', 'dl_upsert_error', 'external_id', 'id', 'ingestion', 'raw', 'transform']

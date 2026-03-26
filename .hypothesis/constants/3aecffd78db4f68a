@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/writeback/validate.py
-# hypothesis_version: 6.151.9
-
-[401, 403, '/', 'ETag', 'GET', 'If-Match', '\\$\\{[^}]+\\}', 'delete', 'etag_probe_failed', 'failed', 'insert', 'lookup', 'n/a', 'ok', 'path', 'probe', 'unknown', 'update', 'writeback']

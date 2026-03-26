@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/migrations/versions/024_20260323_sync_lock_expiry.py
-# hypothesis_version: 6.151.9
-
-['023_20260323', '024_20260323']

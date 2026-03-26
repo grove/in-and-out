@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/transport/http.py
-# hypothesis_version: 6.151.9
-
-[1.0, 10.0, 30.0, 60.0, 300.0, 100, 429, '${watermark}', ',', '429', 'HttpTransportAdapter', 'POST', 'empty_page', 'graphql_data_path', 'graphql_query', 'graphql_variables', 'limit', 'limit_param', 'link', 'offset', 'offset_param', 'page', 'page_param', 'page_size', 'param', 'per_page', 'per_page_param', 'public', 'query_param', 's', 'since', 'until_param', 'value']

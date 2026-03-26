@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/transport/pre_request_auth.py
-# hypothesis_version: 6.151.9
-
-[15.0, 401, '.', ':', 'PATCH', 'POST', 'PUT', 'expires_at', 'password', 'token', 'username']

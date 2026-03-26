@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/postgres/checkpoint.py
-# hypothesis_version: 6.151.9
-
-['checkpointed_at', 'connector', 'cursor_value', 'datatype', 'page_number', 'records_committed', 'run_id']

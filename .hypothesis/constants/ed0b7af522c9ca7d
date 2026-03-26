@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/simulators/generic.py
-# hypothesis_version: 6.151.9
-
-[200, 201, 204, 400, 401, 404, 429, 500, '${done}', '${has_more}', '${total_count}', '-', '.', '/', '0', '1', 'GenericSimulator', 'Link', 'Retry-After', '[A-Za-z0-9_-]+', '[^/]+', '^', 'archive', 'auth_error', 'delete', 'empty_page', 'error', 'header', 'id', 'insert', 'list', 'lookup', 'oauth2', 'offset', 'page', 'page_param', 'param', 'rate limited', 'rate_limit', 'results', 'server_error', 'sim-new-id', 'total_pages_path', 'total_path', 'type', 'unauthorized', 'update', 'upsert', '{', '{cursor_id}']

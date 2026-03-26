@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/writeback.py
-# hypothesis_version: 6.151.9
-
-[0.0, '200', 'ETag', 'If-Match', 'WritebackConfig', 'after', 'allow', 'dead_letter', 'forbid', 'id', 'last_writer_wins', 'merge_fields', 'ok', 'server_wins', 'skip_and_warn', 'status', 'success']

@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/linter/rules.py
-# hypothesis_version: 6.151.9
-
-[', ', '-', '.', 'LINT001', 'LINT002', 'LINT003', 'LINT004', 'LINT005', 'LINT006', 'LINT007', 'LINT008', 'LINT009', 'LINT010', 'LINT011', '_', 'alerting', 'connector', 'connector.depends_on', 'credential_ref', 'cursor', 'depends_on', 'error', 'info', 'merge', 'model_dump', 'pii_fields', 'response_path', 'shared_table', 'source', 'source_field', 'split', 'strategy', 'supported_actions', 'warning', '…']

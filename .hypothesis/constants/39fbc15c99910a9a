@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/alerting/dispatcher.py
-# hypothesis_version: 6.151.9
-
-[10.0, 'alert_dispatched', 'circuit_breaker_open', 'connector', 'connector_recovered', 'custom_details', 'datatype', 'dedup_key', 'detail', 'error', 'event_action', 'event_type', 'icon_emoji', 'in-and-out', 'info', 'message', 'pagerduty', 'payload', 'resolve', 'routing_key', 'severity', 'sla_violation', 'slack', 'source', 'summary', 'text', 'trigger', 'username', 'warning', 'webhook']

@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/schema_registry/local.py
-# hypothesis_version: 6.151.9
-
-['BOOLEAN', 'DATE', 'FLOAT', 'INTEGER', 'JSONB', 'TEXT', 'TIMESTAMPTZ', 'UUID', 'bool', 'cast', 'date', 'datetime', 'float', 'int', 'json', 'source_field', 'str', 'target_field', 'uuid']

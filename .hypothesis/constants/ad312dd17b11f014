@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/api/routes.py
-# hypothesis_version: 6.151.9
-
-[0.0, 0.5, 0.8, 1.0, 300.0, 100, 422, 503, 1000, ' AND ', '/connectors', '/federation/status', '/health', '/sla', '/sync-runs', 'Max rows to return', 'WHERE ', 'api_lineage_error', 'api_path', 'api_sla_error', 'api_sync_runs_error', 'closed', 'connector = %s', 'datatype = %s', 'datatypes', 'degraded', 'fetched_at', 'force_full_sync', 'healthy', 'history_table', 'ingestion', 'last_sync_at', 'last_sync_status', 'name', 'ok', 'page_number', 'pause_connector', 'public', 'requeue_dead_letter', 'resume_connector', 'run_id', 'source_table', 'state', 'status = %s', 'tzinfo', 'unhealthy', 'watermark_at_fetch']

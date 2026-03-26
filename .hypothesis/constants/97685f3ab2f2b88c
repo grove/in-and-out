@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/testing/runner.py
-# hypothesis_version: 6.151.9
-
-[0.0, '0', '=', 'FAIL', 'PASS', 'classname', 'errors', 'failure', 'failures', 'message', 'name', 'test_yaml_valid', 'testcase', 'tests', 'testsuite', 'time', 'unicode', '✓', '✗']

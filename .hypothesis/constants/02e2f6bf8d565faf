@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/testing/cases.py
-# hypothesis_version: 6.151.9
-
-[200, 1000, '-', '.', '/', '; ', 'INOUT_CREDENTIAL_', 'Test', '_', 'create', 'credential_ref', 'cursor', 'delete', 'error', 'has_more_path', 'id', 'model_dump', 'name', 'next_cursor', 'offset', 'operations', 'response_path', 'results', 'strategy', 'supported_actions', 'test-1', 'test_lint_rules_pass', 'test_yaml_valid', 'total_path', 'update', 'upsert']

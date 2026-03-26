@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/field_mapper.py
-# hypothesis_version: 6.151.9
-
-['.', 'bool', 'date', 'datetime', 'float', 'int', 'str']

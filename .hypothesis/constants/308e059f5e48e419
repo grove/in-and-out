@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/simulators/config.py
-# hypothesis_version: 6.151.9
-
-[200, 404, 7200, 'Bearer', 'Not found', 'access_token', 'auth_error', 'empty_page', 'error', 'expires_in', 'message', 'rate_limit', 'server_error', 'sim_access_token', 'status', 'token_type']

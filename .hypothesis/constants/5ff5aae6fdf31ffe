@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/_duration.py
-# hypothesis_version: 6.151.9
-
-[1.0, 60.0, 3600.0, 86400.0, 'd', 'h', 'm', 's']

@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/auth.py
-# hypothesis_version: 6.151.9
-
-[3600.0, 'POST', 'X-Session-Token', 'allow', 'api_key', 'authorization_code', 'client_credentials', 'custom', 'forbid', 'header', 'ignore', 'jwt', 'oauth2', 'query', 'token', 'type']

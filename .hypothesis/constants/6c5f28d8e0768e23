@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/ingestion.py
-# hypothesis_version: 6.151.9
-
-[50.0, '30s', '4h', 'GET', 'POST', 'ScheduleConfig', 'after', 'allow', 'append', 'array', 'body_param', 'comma', 'completed', 'csv', 'cursor', 'done', 'error', 'failed', 'forbid', 'full_state', 'id', 'id_list', 'ignore', 'json_array', 'jsonl', 'list', 'notification', 'offset', 'overwrite', 'partial', 'properties', 'query_param', 'sequence', 'sort_filter', 'status', 'success', 'timestamp', 'updated_at']

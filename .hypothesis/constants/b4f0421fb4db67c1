@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/simulators/salesforce.py
-# hypothesis_version: 6.151.9
-
-[204, 404, 7200, '${done}', '${total_count}', '001A000001xAAAA', '001A000001yBBBB', '003A000001aAAAA', '003A000001bBBBB', '003A000001cCCCC', '10m', 'Acme Corp', 'Alice', 'Bearer', 'Bob', 'Carol', 'Email', 'FROM\\s+Account', 'FROM\\s+Contact', 'FirstName', 'GET', 'Globex', 'Id', 'Industry', 'Jones', 'LastModifiedDate', 'LastName', 'Manufacturing', 'NOT_FOUND', 'Name', 'PATCH', 'Salesforce CRM', 'Smith', 'Technology', 'Williams', 'access_token', 'accounts', 'alice@example.com', 'bob@example.com', 'carol@example.com', 'client_credentials', 'contacts', 'done', 'errorCode', 'expires_in', 'instance_url', 'list', 'nextRecordsUrl', 'oauth2', 'q', 'records', 'salesforce', 'salesforce_app', 'sim_access_token', 'token_type', 'totalSize', 'v59.0']

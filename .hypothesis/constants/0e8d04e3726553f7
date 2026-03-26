@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/bulk_export.py
-# hypothesis_version: 6.151.9
-
-[0.0, '.', 'GET', 'bulk_export_complete', 'bulk_export_job:', 'bulk_export_poll', 'csv', 'json_array', 'jsonl', 'utf-8']

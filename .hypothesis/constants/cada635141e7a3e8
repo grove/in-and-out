@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/migrations/versions/025_20260324_writeback_result_protection_level.py
-# hypothesis_version: 6.151.9
-
-['024_20260323', '025_20260324']

@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/webhook_lifecycle.py
-# hypothesis_version: 6.151.9
-
-[0.0, 60.0, 3600.0, 200, '${webhook_id}', '.', 'DELETE', 'GET', 'POST', 'PUT', 'active', 'webhook_deregistered', 'webhook_registered', 'webhook_renew_failed', 'webhook_renewed']

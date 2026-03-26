@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/deadletter/inspect.py
-# hypothesis_version: 6.151.9
-
-['error_class', 'error_message', 'external_id', 'failed_at', 'id', 'ingestion', 'raw', 'requeue_count']

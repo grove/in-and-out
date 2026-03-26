@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/deadletter/writeback.py
-# hypothesis_version: 6.151.9
-
-[b'null', '_action', 'error_class', 'error_message', 'errors', 'external_id', 'failed_at', 'id', 'public', 'raw', 'reason', 'replayed', 'requeue_count', 'update', 'writeback']

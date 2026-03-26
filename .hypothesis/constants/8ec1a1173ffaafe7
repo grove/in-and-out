@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/config/pagination.py
-# hypothesis_version: 6.151.9
-
-['CursorConfig', 'PaginationConfig', 'after', 'cursor', 'forbid', 'link_header', 'offset', 'page_number']

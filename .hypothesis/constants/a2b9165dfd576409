@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/migrations/versions/006_20260323_writeback_audit.py
-# hypothesis_version: 6.151.9
-
-['005_20260323', '006_20260323']

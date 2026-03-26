@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/ingestion/quality.py
-# hypothesis_version: 6.151.9
-
-['allowed_values', 'max_length', 'min_length', 'regex', 'required', 'unique_within_batch']

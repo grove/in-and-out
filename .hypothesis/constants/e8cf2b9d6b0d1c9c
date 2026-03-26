@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/writeback/daemon.py
-# hypothesis_version: 6.151.9
-
-[503, '*.yaml', '/health', '/ready', '5s', ':', 'connector_loaded', 'connectors', 'daemon_started', 'daemon_starting', 'daemon_stopped', 'daemon_stopping', 'draining', 'enabled', 'ok', 'ready', 'scheduling_enabled', 'schema_version_ok', 'status', 'warning', 'writeback', 'writeback_daemon', 'writeback_drained', 'writeback_poll_error']

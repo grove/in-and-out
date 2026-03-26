@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/observability/metrics.py
-# hypothesis_version: 6.151.9
-
-['change_type', 'connector', 'datatype', 'destination', 'namespace', 'operation', 'resolution', 'rule', 'slot_name', 'status_code', 'table', 'tool']

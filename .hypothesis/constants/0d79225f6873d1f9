@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/alerting/config.py
-# hypothesis_version: 6.151.9
-
-[10.0, ':warning:', 'POST', 'critical', 'error', 'forbid', 'in-and-out', 'info', 'warning']

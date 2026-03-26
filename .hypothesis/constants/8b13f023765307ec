@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/postgres/schema_drift.py
-# hypothesis_version: 6.151.9
-
-['.', '_', 'data', 'external_id', 'public', 'raw']

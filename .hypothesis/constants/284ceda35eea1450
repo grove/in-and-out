@@ -1,4 +1,0 @@
-# file: /Users/geir.gronmo/vibecoding/in-and-out/src/inandout/transport/rate_limiter.py
-# hypothesis_version: 6.151.9
-
-[0.1, 0.5, 1.0, 'capacity must be > 0', 'rate must be > 0', 'rate_limit_recovery']
