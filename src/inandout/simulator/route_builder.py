@@ -526,8 +526,14 @@ def build_connector_router(
                         _ep_with_id.__name__ = f"{_action}_{connector_name}_{_dt_name}"
                         _add(_fa_path, [_method], _ep_with_id, openapi_extra=_extra)
                     else:
-                        write_endpoint.__name__ = f"{_action}_{connector_name}_{_dt_name}"
-                        _add(_fa_path, [_method], write_endpoint, openapi_extra=_extra)
+                        # No {record_id} in the path — register a wrapper WITHOUT the
+                        # record_id parameter so FastAPI does not expose it as a query
+                        # parameter in the Swagger UI.
+                        async def _ep_no_id(request: Request) -> Response:
+                            return await write_endpoint(request, None)
+
+                        _ep_no_id.__name__ = f"{_action}_{connector_name}_{_dt_name}"
+                        _add(_fa_path, [_method], _ep_no_id, openapi_extra=_extra)
 
                 _make_write_handler()
 

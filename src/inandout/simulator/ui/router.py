@@ -139,12 +139,28 @@ def build_ui_router() -> APIRouter:
                 "record_id": record_id,
                 "record": record,
                 "record_json": json.dumps(display, indent=2),
+                "etag": record.get("__modified_at__", ""),
             },
         )
 
     # ------------------------------------------------------------------
     # Admin CRUD API (called by the UI's HTMX actions)
     # ------------------------------------------------------------------
+
+    @router.get("/admin/{connector_name}/{datatype}/{record_id}")
+    async def admin_get(request: Request, connector_name: str, datatype: str, record_id: str):
+        """Return the current record as JSON with an ETag header for optimistic locking."""
+        connectors = request.app.state.connectors
+        connector = next((c for c in connectors if c.name == connector_name), None)
+        if connector is None or datatype not in connector.datatypes:
+            return Response(status_code=404)
+        store: RecordStore = request.app.state.store
+        record = await store.get_by_id(connector_name, datatype, record_id)
+        if record is None:
+            return Response(status_code=404)
+        etag = record.get("__modified_at__", "")
+        display = {k: v for k, v in record.items() if not k.startswith("__")}
+        return JSONResponse(display, headers={"ETag": etag})
 
     @router.post("/admin/{connector_name}/{datatype}", response_class=HTMLResponse)
     async def admin_create(request: Request, connector_name: str, datatype: str):
@@ -174,6 +190,15 @@ def build_ui_router() -> APIRouter:
         if connector is None or datatype not in connector.datatypes:
             return Response(status_code=404)
         store: RecordStore = request.app.state.store
+        # Optimistic locking: reject the update if the caller's version is stale.
+        if_match = request.headers.get("if-match", "")
+        if if_match:
+            current = await store.get_by_id(connector_name, datatype, record_id)
+            if current and current.get("__modified_at__", "") != if_match:
+                return JSONResponse(
+                    {"detail": "Conflict: record was modified since you last loaded it."},
+                    status_code=412,
+                )
         try:
             body = await request.json()
         except Exception:
@@ -195,9 +220,16 @@ def build_ui_router() -> APIRouter:
         disp = request.app.state.dispatcher
         await disp.dispatch(connector, datatype, "update", record_id, updated)
         pk_field = _pk_from_cfg(dt_cfg)
+        # Refetch so the record dict contains __modified_at__ / __created_at__ meta-keys
+        # (store.update returns the raw merged data without them).
+        hydrated = await store.get_by_id(connector_name, datatype, record_id) or updated
+        display = {k: v for k, v in hydrated.items() if not k.startswith("__")}
         return HTMLResponse(
-            _row_html(connector_name, datatype, pk_field, updated),
-            headers={"X-Record-Json": json.dumps(updated)},
+            _row_html(connector_name, datatype, pk_field, hydrated),
+            headers={
+                "X-Record-Json": json.dumps(display),
+                "ETag": hydrated.get("__modified_at__", ""),
+            },
         )
 
     @router.delete("/admin/{connector_name}/{datatype}/{record_id}")
@@ -364,7 +396,8 @@ def _row_html(connector_name: str, datatype: str, pk_field: str, record: dict) -
             + (
                 f'<span id="recent-row-{rid}" data-ts="{modified_at}"'
                 f' class="ml-2 text-xs font-medium"></span>'
-                if was_updated else ""
+                if was_updated
+                else ""
             )
         )
     return (

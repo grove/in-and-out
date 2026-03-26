@@ -114,10 +114,12 @@
                         } else {
                             const latest = changes[changes.length - 1];
                             const opLabel = latest.op === 'delete' ? 'deleted' : latest.op === 'create' ? 'created' : 'updated';
-                            const n = changes.length;
+                            // Count distinct records, not total mutations.
+                            const distinctIds = new Set(changes.map(c => c.record_id));
+                            const n = distinctIds.size;
                             const noun = n === 1
                                 ? `<a href="/ui/${connector}/${datatype}/${latest.record_id}" class="underline hover:text-amber-200">${datatype}:${latest.record_id}</a> was ${opLabel}`
-                                : `${n} records changed`;
+                                : `${n} records with recent changes`;
                             banner.innerHTML = `<span class="mr-1">⚡</span>${noun} &mdash; <span class="opacity-75">${_relativeTime(latest.ts)}</span>`;
                             banner.classList.remove('hidden');
                             banner.classList.add('flex');
@@ -151,6 +153,9 @@
                 });
 
                 source.onopen = () => {
+                    // Expose the connection time so page scripts can distinguish
+                    // replayed historical events from truly concurrent mutations.
+                    window._sseConnectedAt = Date.now();
                     statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> live';
                 };
                 source.onerror = () => {
@@ -188,28 +193,26 @@
                     }
 
                     // Refresh the table rows if we're on the relevant listing page (live events only).
-                    // This updates cell values after an API PATCH/POST without requiring a full reload.
+                    // After the swap completes, flash the affected row.
                     if (isLive) {
                         const tbody = document.getElementById('records-tbody');
                         if (tbody && tbody.getAttribute('hx-get')) {
+                            const _flashId = 'row-' + d.record_id;
+                            const _flashCls = d.operation === 'create' ? 'flash-create' : 'flash-update';
+                            // Register listener BEFORE triggering the request so it is always in place.
+                            document.addEventListener('htmx:afterSwap', function onSwap(e) {
+                                if (e.detail.target && e.detail.target.id === 'records-tbody') {
+                                    document.removeEventListener('htmx:afterSwap', onSwap);
+                                    const row = document.getElementById(_flashId);
+                                    if (row) {
+                                        row.classList.remove('flash-create', 'flash-update');
+                                        void row.offsetWidth;
+                                        row.classList.add(_flashCls);
+                                    }
+                                }
+                            });
                             htmx.ajax('GET', tbody.getAttribute('hx-get'), { target: tbody, swap: 'innerHTML' });
                         }
-                    }
-
-                    // Flash updated row and update its data-ts label (live events only).
-                    if (isLive) {
-                        // Row flash is handled via the flash-* CSS class; applied after swap completes.
-                        document.addEventListener('htmx:afterSwap', function onSwap(e) {
-                            if (e.detail.target && e.detail.target.id === 'records-tbody') {
-                                document.removeEventListener('htmx:afterSwap', onSwap);
-                                const row = document.getElementById('row-' + d.record_id);
-                                if (row) {
-                                    row.classList.remove('flash-create', 'flash-update');
-                                    void row.offsetWidth;
-                                    row.classList.add(d.operation === 'create' ? 'flash-create' : 'flash-update');
-                                }
-                            }
-                        });
                     }
 
                     // Prepend to activity feed

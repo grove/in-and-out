@@ -121,8 +121,8 @@ def create_app(
 <head><meta charset="utf-8"><title>in-and-out Demo Simulator</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/static/tailwind.css"></head>
-<body class="bg-slate-900 text-slate-100 min-h-screen flex items-center justify-center">
-<div class="max-w-lg w-full px-6">
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+<div class="max-w-lg mx-auto px-6 py-16">
   <h1 class="text-3xl font-bold mb-1">in-and-out Simulator</h1>
   <p class="text-slate-400 mb-8">Fake API server for connector testing and demos.</p>
   <div class="flex gap-4 mb-8">
