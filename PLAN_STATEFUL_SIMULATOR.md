@@ -1,6 +1,6 @@
 # Plan: Stateful Demo Simulator
 
-**Status:** Proposed  
+**Status:** Implemented (P1–P4, commit c422127)  
 **Date:** 2026-03-26  
 **Audience:** Sales demos, stakeholder walkthroughs, developer onboarding
 

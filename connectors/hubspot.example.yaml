@@ -101,3 +101,33 @@ connector:
           update:
             method: PATCH
             path: /crm/v3/objects/contacts/${external_id}
+
+      # Demo simulator: example records loaded at startup.
+      # Set INOUT_HUBSPOT_BASE_URL=http://simulator:6100/hubspot to point
+      # the engine at the local simulator instead of the real HubSpot API.
+      seed_data:
+        - id: "1001"
+          firstname: Alice
+          lastname: Smith
+          email: alice.smith@example.com
+          lastmodifieddate: "2026-03-20T10:00:00Z"
+        - id: "1002"
+          firstname: Bob
+          lastname: Jones
+          email: bob.jones@example.com
+          lastmodifieddate: "2026-03-21T14:30:00Z"
+        - id: "1003"
+          firstname: Carol
+          lastname: Lee
+          email: carol.lee@example.com
+          lastmodifieddate: "2026-03-22T09:15:00Z"
+        - id: "1004"
+          firstname: David
+          lastname: Kim
+          email: david.kim@example.com
+          lastmodifieddate: "2026-03-23T11:45:00Z"
+        - id: "1005"
+          firstname: Eve
+          lastname: Chen
+          email: eve.chen@example.com
+          lastmodifieddate: "2026-03-24T08:00:00Z"

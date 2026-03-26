@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en" class="h-full">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}in-and-out Demo Simulator{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        slate: { 750: '#1a2744' },
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/htmx.org@1.9.10" defer></script>
+    <style>
+        @keyframes flash-green {
+
+            0%,
+            100% {
+                background: transparent
+            }
+
+            50% {
+                background: rgba(34, 197, 94, .25)
+            }
+        }
+
+        @keyframes flash-yellow {
+
+            0%,
+            100% {
+                background: transparent
+            }
+
+            50% {
+                background: rgba(251, 191, 36, .20)
+            }
+        }
+
+        .flash-create {
+            animation: flash-green .8s ease;
+        }
+
+        .flash-update {
+            animation: flash-yellow .8s ease;
+        }
+
+        .activity-item {
+            transition: opacity .3s;
+        }
+    </style>
+</head>
+
+<body class="h-full bg-slate-900 text-slate-100 font-sans">
+
+    <!-- Nav -->
+    <nav class="bg-slate-800 border-b border-slate-700 px-6 py-3 flex items-center gap-4">
+        <a href="/ui" class="flex items-center gap-2 text-sky-400 font-semibold text-lg hover:text-sky-300">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+            </svg>
+            in-and-out Simulator
+        </a>
+        <span class="text-slate-500 text-sm ml-auto">
+            <span id="sse-status" class="inline-flex items-center gap-1">
+                <span class="w-2 h-2 rounded-full bg-slate-500"></span> connecting…
+            </span>
+        </span>
+    </nav>
+
+    <!-- Content -->
+    <main class="p-6">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- SSE client -->
+    <script>
+            (function () {
+                const statusEl = document.getElementById('sse-status');
+                const source = new EventSource('/events');
+
+                source.onopen = () => {
+                    statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> live';
+                };
+                source.onerror = () => {
+                    statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span> disconnected';
+                };
+
+                source.addEventListener('mutation', function (e) {
+                    const d = JSON.parse(e.data);
+                    const key = d.connector + '-' + d.datatype;
+
+                    // Refresh the count badge by fetching the authoritative server count.
+                    const badge = document.getElementById('count-' + key);
+                    if (badge) {
+                        fetch('/ui/' + d.connector + '/' + d.datatype + '/_count')
+                            .then(r => r.text()).then(n => {
+                                badge.textContent = n.trim();
+                                badge.classList.add('ring-2', 'ring-sky-400');
+                                setTimeout(() => badge.classList.remove('ring-2', 'ring-sky-400'), 1200);
+                            });
+                    }
+
+                    // Flash updated row in table views (only for live events)
+                    const ageMs = Date.now() - new Date(d.timestamp).getTime();
+                    if (ageMs < 5000) {
+                        const row = document.getElementById('row-' + d.record_id);
+                        if (row) {
+                            row.classList.remove('flash-create', 'flash-update');
+                            void row.offsetWidth;
+                            row.classList.add(d.operation === 'create' ? 'flash-create' : 'flash-update');
+                        }
+                    }
+
+                    // Prepend to activity feed
+                    const feed = document.getElementById('activity-feed');
+                    if (feed) {
+                        const colours = { create: 'text-green-400', update: 'text-blue-400', delete: 'text-red-400' };
+                        const icons = { create: '＋', update: '✎', delete: '✕' };
+                        const src = d.source === 'ui' ? '🧑 You' : '⚙ Engine';
+                        const ts = new Date(d.timestamp).toLocaleTimeString();
+                        const li = document.createElement('li');
+                        li.className = 'activity-item flex items-start gap-2 py-1 border-b border-slate-700 text-sm';
+                        li.innerHTML = `
+            <span class="mt-0.5 font-mono font-bold ${colours[d.operation] || 'text-slate-400'}">${icons[d.operation] || '·'}</span>
+            <span class="flex-1">
+              <span class="font-medium">${src}</span>
+              <span class="text-slate-400"> ${d.operation}d </span>
+              <a href="/ui/${d.connector}/${d.datatype}/${d.record_id}"
+                 class="text-sky-400 hover:underline">${d.datatype}:${d.record_id}</a>
+            </span>
+            <span class="text-slate-500 text-xs whitespace-nowrap">${ts}</span>`;
+                        feed.prepend(li);
+                        while (feed.children.length > 30) feed.removeChild(feed.lastChild);
+                    }
+
+                    // Bubble as a DOM event so page-specific scripts can react.
+                    document.dispatchEvent(new CustomEvent('simulator:mutation', { detail: d }));
+                });
+
+                source.addEventListener('request', function (e) {
+                    const d = JSON.parse(e.data);
+                    const reqFeed = document.getElementById('request-feed');
+                    if (!reqFeed) return;
+                    const ts = new Date(d.timestamp).toLocaleTimeString();
+                    const ok = d.status < 400;
+                    const li = document.createElement('li');
+                    li.className = 'py-0.5 text-xs font-mono text-slate-400 border-b border-slate-800';
+                    li.innerHTML = `
+          <span class="${ok ? 'text-green-400' : 'text-red-400'}">${d.status}</span>
+          <span class="text-sky-300 ml-1">${d.method}</span>
+          <span class="ml-1 truncate">${d.path}</span>
+          <span class="ml-auto text-slate-500">${ts}</span>`;
+                    reqFeed.prepend(li);
+                    while (reqFeed.children.length > 50) reqFeed.removeChild(reqFeed.lastChild);
+                });
+            })();
+    </script>
+
+    {% block extra_scripts %}{% endblock %}
+</body>
+
+</html>

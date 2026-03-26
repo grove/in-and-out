@@ -72,6 +72,9 @@ control_app = typer.Typer(
 )
 app.add_typer(control_app, name="control")
 
+from inandout.simulator.cli import simulator_app  # noqa: E402
+app.add_typer(simulator_app, name="simulator")
+
 console = Console()
 err_console = Console(stderr=True, style="bold red")
 

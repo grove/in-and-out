@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — in-and-out Simulator{% endblock %}
+
+{% block content %}
+<div class="flex gap-6">
+
+    <!-- Main: connector cards -->
+    <div class="flex-1 min-w-0">
+        <h1 class="text-2xl font-bold text-slate-100 mb-6">Demo Dashboard</h1>
+
+        {% for connector in connectors %}
+        <section class="mb-8">
+            <div class="flex items-center gap-3 mb-3">
+                <h2 class="text-lg font-semibold text-sky-300">{{ connector.system }}</h2>
+                <span class="text-xs bg-slate-700 text-slate-300 px-2 py-0.5 rounded font-mono">{{ connector.name
+                    }}</span>
+                <span class="text-xs bg-slate-700 text-slate-300 px-2 py-0.5 rounded">{{ connector.generation_profile
+                    }}</span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {% for dt_name, dt_cfg in connector.datatypes.items() %}
+                <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col gap-3
+                    hover:border-sky-600 transition-colors">
+                    <div class="flex items-start justify-between">
+                        <div>
+                            <div class="font-semibold text-slate-100">{{ dt_name }}</div>
+                            {% if dt_cfg.description %}
+                            <div class="text-xs text-slate-400 mt-0.5">{{ dt_cfg.description }}</div>
+                            {% endif %}
+                        </div>
+                        <span id="count-{{ connector.name }}-{{ dt_name }}" class="bg-sky-900 text-sky-300 text-lg font-bold px-3 py-1 rounded-lg
+                         transition-all duration-300">
+                            {{ counts[connector.name][dt_name] }}
+                        </span>
+                    </div>
+
+                    <div class="flex items-center gap-2 text-xs text-slate-400">
+                        {% if dt_cfg.ingestion %}
+                        <span class="bg-green-900 text-green-300 px-1.5 py-0.5 rounded">ingest</span>
+                        {% endif %}
+                        {% if dt_cfg.writeback %}
+                        <span class="bg-blue-900 text-blue-300 px-1.5 py-0.5 rounded">writeback</span>
+                        {% endif %}
+                        {% if dt_cfg.ingestion %}
+                        <span class="font-mono">{{ dt_cfg.ingestion.list.pagination.strategy }}</span>
+                        {% endif %}
+                    </div>
+
+                    <a href="/ui/{{ connector.name }}/{{ dt_name }}" class="mt-auto text-center bg-sky-600 hover:bg-sky-500 text-white text-sm
+                    font-medium py-1.5 rounded-lg transition-colors">
+                        View Records
+                    </a>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endfor %}
+
+        <!-- Request log -->
+        <section class="mt-4">
+            <h2 class="text-base font-semibold text-slate-300 mb-2">Engine Request Log</h2>
+            <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 max-h-48 overflow-y-auto">
+                <ul id="request-feed" class="flex flex-col gap-0"></ul>
+                <p class="text-xs text-slate-500 italic" id="req-placeholder">
+                    Waiting for engine requests…
+                </p>
+            </div>
+        </section>
+    </div>
+
+    <!-- Sidebar: activity feed -->
+    <aside class="w-72 shrink-0">
+        <h2 class="text-base font-semibold text-slate-300 mb-3">Live Activity</h2>
+        <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 max-h-screen overflow-y-auto sticky top-4">
+            <ul id="activity-feed" class="flex flex-col gap-0">
+                {% for ev in recent_events %}
+                {% if ev.event_type == 'mutation' %}
+                {% set colour = {'create': 'text-green-400', 'update': 'text-blue-400', 'delete': 'text-red-400'} %}
+                {% set icon = {'create': '＋', 'update': '✎', 'delete': '✕'} %}
+                <li class="activity-item flex items-start gap-2 py-1 border-b border-slate-700 text-sm">
+                    <span class="mt-0.5 font-mono font-bold {{ colour.get(ev.operation, 'text-slate-400') }}">
+                        {{ icon.get(ev.operation, '·') }}
+                    </span>
+                    <span class="flex-1">
+                        <span class="font-medium">{{ '🧑 You' if ev.source == 'ui' else '⚙ Engine' }}</span>
+                        <span class="text-slate-400"> {{ ev.operation }}d </span>
+                        <a href="/ui/{{ ev.connector }}/{{ ev.datatype }}/{{ ev.record_id }}"
+                            class="text-sky-400 hover:underline">{{ ev.datatype }}:{{ ev.record_id }}</a>
+                    </span>
+                </li>
+                {% endif %}
+                {% endfor %}
+            </ul>
+            {% if not recent_events %}
+            <p class="text-xs text-slate-500 italic">No activity yet. Start the engine or create a record.</p>
+            {% endif %}
+        </div>
+    </aside>
+
+</div>
+{% endblock %}

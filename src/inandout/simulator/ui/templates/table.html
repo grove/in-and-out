@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}{{ datatype }} — {{ connector.name }} — Simulator{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav class="text-sm text-slate-400 mb-4 flex items-center gap-1">
+    <a href="/ui" class="hover:text-sky-400">Dashboard</a>
+    <span>/</span>
+    <span class="text-slate-300">{{ connector.name }}</span>
+    <span>/</span>
+    <span class="text-sky-300 font-medium">{{ datatype }}</span>
+</nav>
+
+<div class="flex items-center justify-between mb-4">
+    <h1 class="text-xl font-bold text-slate-100">
+        {{ datatype }}
+        <span id="count-{{ connector.name }}-{{ datatype }}"
+            class="text-sm font-normal bg-sky-900 text-sky-300 px-2 py-0.5 rounded ml-2 transition-all">
+            {{ live_count }}
+        </span>
+    </h1>
+    <button onclick="document.getElementById('new-record-form').classList.toggle('hidden')"
+        class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        + New Record
+    </button>
+</div>
+
+<!-- New record inline form -->
+<div id="new-record-form" class="hidden bg-slate-800 border border-slate-600 rounded-xl p-4 mb-4">
+    <h2 class="text-base font-semibold text-slate-100 mb-3">Create New Record</h2>
+    <div class="flex flex-col gap-3">
+        <textarea id="new-record-json" class="w-full bg-slate-900 text-slate-100 font-mono text-sm rounded-lg p-3
+                     border border-slate-600 focus:border-sky-500 focus:outline-none h-32"
+            placeholder='{"id": "1234", "name": "Alice"}'></textarea>
+        <div class="flex gap-2">
+            <button onclick="submitNewRecord('{{ connector.name }}', '{{ datatype }}')"
+                class="bg-green-600 hover:bg-green-500 text-white text-sm px-4 py-2 rounded-lg">
+                Create
+            </button>
+            <button onclick="document.getElementById('new-record-form').classList.add('hidden')"
+                class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm px-4 py-2 rounded-lg">
+                Cancel
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Records table -->
+<div class="bg-slate-800 rounded-xl border border-slate-700 overflow-x-auto">
+    {% set live_records = records | selectattr('__deleted_at__', 'undefined') | list %}
+    {% set all_keys = (live_records[0] if live_records else records[0]).keys() | list if records else [] %}
+    {% if records %}
+    <table class="w-full text-left">
+        <thead>
+            <tr class="border-b border-slate-700 bg-slate-750">
+                {% for key in all_keys %}
+                {% if key != '__deleted_at__' %}
+                <th class="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide">{{ key }}</th>
+                {% endif %}
+                {% endfor %}
+                <th class="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="records-tbody"
+               hx-get="/ui/{{ connector.name }}/{{ datatype }}/_rows"
+               hx-trigger="load"
+               hx-swap="innerHTML">
+        </tbody>
+    </table>
+    {% else %}
+    <div class="p-8 text-center text-slate-400">
+        <p class="text-lg">No records yet.</p>
+        <p class="text-sm mt-1">Create one above or start the engine to ingest data.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    async function submitNewRecord(connector, datatype) {
+        const raw = document.getElementById('new-record-json').value;
+        let body;
+        try { body = JSON.parse(raw); }
+        catch (e) { alert('Invalid JSON: ' + e.message); return; }
+        const resp = await fetch(`/admin/${connector}/${datatype}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+            const html = await resp.text();
+            const tbody = document.getElementById('records-tbody');
+            if (tbody) {
+                const tmp = document.createElement('tbody');
+                tmp.innerHTML = html;
+                const row = tmp.firstElementChild;
+                tbody.prepend(row);
+                row.classList.add('flash-create');
+            }
+            document.getElementById('new-record-form').classList.add('hidden');
+            document.getElementById('new-record-json').value = '';
+        } else {
+            alert('Failed to create record: ' + resp.status);
+        }
+    }
+</script>
+{% endblock %}

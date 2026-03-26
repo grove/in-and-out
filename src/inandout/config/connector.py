@@ -210,6 +210,7 @@ class DatatypeConfig(BaseModel):
     timestamp_fields: list[TimestampFieldConfig] = []  # A7: timestamp normalisation
     pii_fields: list[str] = []                  # B6: fields containing PII
     api_version: str | None = None              # A6: per-datatype API version override
+    seed_data: list[dict[str, Any]] = []        # Demo simulator: example records loaded at startup
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":

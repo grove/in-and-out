@@ -128,6 +128,21 @@ down:
 down-clean:
     docker compose down -v
 
+# ---------------------------------------------------------------------------
+# Demo simulator
+# ---------------------------------------------------------------------------
+
+# Run the stateful demo simulator locally (no engine required)
+simulator:
+    uv run inandout simulator run \
+      --connector connectors/hubspot.example.yaml \
+      --connector connectors/salesforce.example.yaml \
+      --listen 0.0.0.0:6100
+
+# Start the full demo stack: simulator + postgres + engine (requires Docker)
+demo:
+    docker compose --profile demo up -d
+
 # Tail logs from all services
 logs:
     docker compose logs -f

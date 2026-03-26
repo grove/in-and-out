@@ -13,6 +13,24 @@ services:
       interval: 5s
       retries: 5
 
+  simulator:
+    build: .
+    command: >
+      inandout simulator run
+      --connector /connectors/hubspot.example.yaml
+      --connector /connectors/salesforce.example.yaml
+      --listen 0.0.0.0:6100
+      --store sqlite:///data/demo.db
+    volumes:
+      - ./connectors:/connectors:ro
+      - simulator-data:/data
+    ports:
+      - "6100:6100"
+    environment:
+      INOUT_ENGINE_URL: http://ingest:9090
+    profiles:
+      - demo
+
   migrate:
     build: .
     command: inandout db upgrade --config /config/ingestion.yaml
@@ -37,6 +55,8 @@ services:
       - "9090:9090"
     environment:
       INOUT_DATABASE_URL: postgresql://inandout:inandout@postgres:5432/inandout
+      INOUT_HUBSPOT_BASE_URL: http://simulator:6100/hubspot
+      INOUT_SALESFORCE_BASE_URL: http://simulator:6100/salesforce
 
   writeback:
     build: .
@@ -51,3 +71,8 @@ services:
       - "9091:9090"
     environment:
       INOUT_DATABASE_URL: postgresql://inandout:inandout@postgres:5432/inandout
+      INOUT_HUBSPOT_BASE_URL: http://simulator:6100/hubspot
+      INOUT_SALESFORCE_BASE_URL: http://simulator:6100/salesforce
+
+volumes:
+  simulator-data:
