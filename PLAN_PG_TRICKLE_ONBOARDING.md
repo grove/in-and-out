@@ -42,7 +42,7 @@ If the `_id_{target}` stream table refreshes while system 3's initial ingestion 
 
 ### The Invariant
 
-**No delta row should be emitted for any system — including existing systems 1 and 2 — until system 3's initial load is complete and the operator has reviewed the identity re-resolution.**
+**No delta row for system 3 should be emitted until system 3's initial load is complete.** Whether delta emission for systems 1 and 2 is also paused during this window is an operator policy choice — the two modes have different tradeoffs, described in Section 4.
 
 ### The Ordering Requirement
 
@@ -246,12 +246,58 @@ SELECT pgtrickle.alter_stream_table(
 
 ## 4. Integration Pattern: Full Onboarding Workflow
 
-Combining existing and proposed mechanisms, the complete onboarding workflow for system 3:
+There are two modes, chosen based on how much confidence the operator has in the identity rules and how much downtime existing systems can tolerate.
+
+### Mode A: Zero-downtime (recommended when identity rules are trusted)
+
+Systems 1 and 2 keep flowing throughout. Only system 3's delta stream table is gated.
+
+The key insight: source gating on system 3's tables means the `_id_{target}` stream table never sees system 3's data during the initial load window, so identity resolution continues to run on exactly the same graph as before. No cluster re-merges fire while the gate is active. Systems 1 and 2 experience no interruption.
+
+Once the gate is lifted and identity resolution re-runs with system 3's data, any cluster re-merges that affect systems 1 and 2 flow through immediately as legitimate writeback changes — because they _are_ real changes: system 3 revealed that two records already in the pipeline represent the same entity.
+
+```
+Phase 1: Prepare
+├── Gate system 3 source tables only (existing: gate_source)
+├── Gate _delta_system3_* stream tables only (NEW: gate_stream_table)
+├── Store pending query for _id_* and downstream STs (NEW: pending_query)
+└── Deploy system 3 connector in ingestion_polling_readonly mode (in-and-out)
+
+Phase 2: Initial Load
+├── in-and-out runs full ingestion for system 3
+├── Source tables populate: inout_src_system3_*
+├── pg-trickle scheduler is idle for system 3 sources only (gated)
+└── Systems 1 and 2 continue operating with ZERO interruption
+
+Phase 3: Activate Identity Resolution
+├── Ungate system 3 source tables (existing: ungate_source)
+├── Activate pending queries (NEW: activate_pending_query)
+├── pg-trickle refreshes _fwd_*, _id_*, _resolved_*, {target}
+├── Systems 1 and 2 delta tables refresh — re-merge deltas flow to writeback
+├── _delta_system3_* is still gated — system 3 writeback suppressed
+└── Monitor cluster change metrics (NEW: clusters_merged in refresh_timeline)
+
+Phase 4: Review system 3 only
+├── Operator queries _id_{target} for cluster diffs involving system 3
+├── Operator uses in-and-out dry-run writeback to preview system 3 changes
+├── If clusters_merged is unexpected, investigate identity rules
+└── Decision: proceed or roll back
+
+Phase 5: Enable System 3 Writeback
+├── Ungate _delta_system3_* stream tables
+└── System 3 is now fully online
+```
+
+### Mode B: Conservative (use when identity rules are new or untrusted)
+
+All delta stream tables are gated until the operator has reviewed the full impact of the re-merge. Systems 1 and 2 writeback is paused for the duration of the review window.
+
+Use this mode when: the cluster re-merges from system 3 might be large or unexpected, when identity rules have not been validated against production data, or when changes to systems 1 and 2 require explicit sign-off before execution.
 
 ```
 Phase 1: Prepare
 ├── Gate system 3 source tables (existing: gate_source)
-├── Gate all _delta_* stream tables (NEW: gate_stream_table)
+├── Gate ALL _delta_* stream tables (NEW: gate_stream_table)
 ├── Store pending query for _id_* and downstream STs (NEW: pending_query)
 └── Deploy system 3 connector in ingestion_polling_readonly mode (in-and-out)
 
@@ -259,43 +305,44 @@ Phase 2: Initial Load
 ├── in-and-out runs full ingestion for system 3
 ├── Source tables populate: inout_src_system3_*
 ├── pg-trickle scheduler is idle for system 3 sources (gated)
-└── Systems 1 and 2 continue operating normally
+└── Systems 1 and 2 delta tables are gated — writeback is paused
 
 Phase 3: Activate Identity Resolution
 ├── Ungate system 3 source tables (existing: ungate_source)
 ├── Activate pending queries (NEW: activate_pending_query)
-├── pg-trickle scheduler refreshes _fwd_*, _id_*, _resolved_*, {target}
-├── _delta_* stream tables are still gated — no writeback occurs
+├── pg-trickle refreshes _fwd_*, _id_*, _resolved_*, {target}
+├── All _delta_* tables are still gated — no writeback occurs for any system
 └── Monitor cluster change metrics (NEW: clusters_merged in refresh_timeline)
 
-Phase 4: Review
-├── Operator queries _id_{target} for cluster diffs
-├── Operator uses in-and-out dry-run writeback to preview changes
+Phase 4: Review all systems
+├── Operator queries _id_{target} for all cluster diffs
+├── Operator uses in-and-out dry-run writeback for all three systems
 ├── If clusters_merged is unexpected, investigate identity rules
 └── Decision: proceed or roll back (cancel pending queries, re-gate)
 
 Phase 5: Enable Writeback
-├── Ungate _delta_* stream tables for systems 1 and 2 first (lower risk)
-├── Monitor writeback results
+├── Ungate _delta_system1_* and _delta_system2_* first
+├── Monitor writeback results for existing systems
 ├── Ungate _delta_system3_* stream tables
 └── System 3 is now fully online
 ```
 
-### Rollback Path
+### Rollback Path (both modes)
 
-If Phase 4 review reveals problems:
+If review reveals problems:
 
 ```sql
--- Roll back: freeze system 3's participation
+-- Roll back: revert to the original identity query
 SELECT pgtrickle.alter_stream_table(
     '_id_contact',
     query => '... original query without system 3 ...'
 );
+-- Or if using pending_query: SELECT pgtrickle.cancel_pending_query('_id_contact');
 
 -- Re-gate system 3 sources
 SELECT pgtrickle.gate_source('inout_src_system3_contacts');
 
--- Ungate deltas for systems 1 and 2 (restore normal operation)
+-- Restore normal operation for systems 1 and 2 (Mode B only)
 SELECT pgtrickle.ungate_stream_table('_delta_system1_contacts');
 SELECT pgtrickle.ungate_stream_table('_delta_system2_contacts');
 
@@ -327,10 +374,15 @@ Even with all proposed pg-trickle mechanisms, in-and-out has its own responsibil
 
 3. **Control table integration** — expose the onboarding workflow as control table commands:
    ```sql
+   -- Zero-downtime mode: only suppress system 3 deltas
    INSERT INTO inout_ops_control (connector, command, params)
-   VALUES ('system3', 'begin_onboarding', '{"gate_deltas": true}');
+   VALUES ('system3', 'begin_onboarding', '{"mode": "zero_downtime"}');
+
+   -- Conservative mode: suppress all delta tables during review
+   INSERT INTO inout_ops_control (connector, command, params)
+   VALUES ('system3', 'begin_onboarding', '{"mode": "conservative"}');
    ```
-   This orchestrates the multi-step sequence (gate sources, gate deltas, start ingestion) as a single operator action.
+   This orchestrates the multi-step sequence (gate sources, gate deltas, start ingestion) as a single operator action. The `mode` parameter controls which delta tables are gated.
 
 4. **Dry-run writeback includes cluster context** — when the operator runs dry-run writeback during Phase 4, the output should include `cluster_id` and a flag indicating whether the cluster was affected by the re-merge (new members from system 3).
 
