@@ -604,6 +604,185 @@ The bootstrap refresh requires a different preparation strategy from steady-stat
 4. **Set conservative cluster size alerts before bootstrap.** Any cluster that exceeds, say, 50 records after the bootstrap refresh should be held and reviewed before writeback fires. This catches junk value merges automatically.
 5. **Expect the bootstrap to be slow.** The full graph evaluation is O(n log n) or worse. For millions of records, this may take minutes to hours. Budget for it. Do not set pg-trickle timeouts that would interrupt a slow but legitimate bootstrap refresh.
 
+### 4.21 Asymmetric Identity Field Trust
+
+The document covers source priority for **conflict resolution** — when two sources disagree on a field value, higher-priority sources win. But source priority and identity edge trust are independent concerns, and OSI-mapping currently treats them as one.
+
+A source's identity field value may be authoritative for _winning_ conflicts while being untrustworthy for _creating_ identity edges:
+
+| Source | Tax ID quality | Should win conflicts? | Should create identity edges? |
+|---|---|---|---|
+| Government portal | Validated, official | Yes | Yes |
+| CRM (system 1) | Manually entered, typo-prone | Yes (high data quality otherwise) | **No** — too many entry errors |
+| Legacy ERP (system 3) | Imported from spreadsheet in 2018 | Low | **No** — unverified |
+
+If all three sources declare `tax_id: identity`, a typo in system 1's tax_id field (e.g., `12345` instead of `12346`) creates a false edge linking system 1's record to whoever has `12345` in any other system. The conflict resolution priority is irrelevant — the damage is done at the edge-creation stage.
+
+**What is needed:** A per-source-per-field trust configuration that separates "this source's value fills this field in the golden record" from "this source's value creates identity edges." In OSI-mapping YAML terms, this would look like:
+
+```yaml
+mappings:
+  - name: crm_contacts
+    source: crm
+    fields:
+      - source: tax_id
+        target: tax_id
+        identity: false    # contributes to the field, but not used for matching
+                           # (even though tax_id is declared identity on the target)
+```
+
+Until this is supported, the safest workaround is to exclude low-trust sources from the identity field declaration entirely and create a separate high-trust-only mapping for identity purposes — accepting the under-linking cost.
+
+### 4.22 Identity Rule Validation Against Production Data
+
+OSI-mapping's inline test framework validates known cases: given this input, assert this output. It cannot answer the more important pre-onboarding question: **"How well do our identity rules perform against the actual production dataset?"**
+
+Specifically, before the bootstrap refresh (§4.20), you need estimates of:
+- **Precision:** Of all the links the identity rules will create when system 3 joins, what fraction are genuine matches?
+- **Recall:** Of all the genuine matches that exist between system 3 and systems 1 and 2, what fraction will the identity rules detect?
+
+These cannot be computed without a ground truth sample. The approach:
+
+```
+1. Sample
+   Take a random sample of ~500 record pairs: 250 from each of
+   (system 1 × system 3) and (system 2 × system 3).
+   Include pairs that the identity rules WOULD link and pairs they WOULD NOT.
+
+2. Label
+   Human reviewers (or LLM, §7) label each pair: genuine_match / non_match.
+   Target: ~100 genuine matches out of 500 pairs (adjust sampling to ensure coverage).
+
+3. Evaluate
+   Run identity rules against the sample.
+   Compute:
+     precision = true_positives / (true_positives + false_positives)
+     recall    = true_positives / (true_positives + false_negatives)
+     F1        = 2 * (precision * recall) / (precision + recall)
+
+4. Threshold decision
+   If precision < 90%: the identity rules will create too many false positives.
+                       Tighten rules (add link groups, increase field specificity,
+                       add to blocklist) before bootstrap.
+   If recall   < 70%: the identity rules will miss too many genuine matches.
+                       Add normalisation expressions, add identity fields,
+                       consider LLM-assisted under-link detection post-bootstrap.
+```
+
+**Relationship to LLM curation (§7):** The ground-truth labelling step is a natural use case for LLM-assisted review. The LLM classifies each sampled pair; humans review only the LLM-uncertain cases. This makes the 500-pair evaluation tractable in hours rather than days.
+
+**This validation should be gating:** The bootstrap refresh should not proceed until precision and recall are at acceptable thresholds. An untested identity rule configuration against production data is the single highest-risk gap in the onboarding process.
+
+### 4.23 Schema Drift and Silent Identity Field Loss
+
+Identity resolution depends on identity fields being populated. If a source system's API schema changes — a field is renamed, moved into a nested object, or removed — the connector YAML stops reading it correctly. Affected rows ingest with NULL for that identity field. NULL values do not create identity edges. The identity graph silently degrades.
+
+Unlike a hard failure (connector crashes, ingestion stops), schema drift is **silent degradation**: the pipeline continues running, metrics look normal, but the identity graph is producing fewer links than it should. Previously linked clusters drift apart as `base` snapshots age out and the linking field disappears from new ingestion cycles.
+
+**Concrete sequence:**
+
+```
+2026-03-01: System 3 API has field "email"
+            → inout_src_system3_contacts.email = "alice@co.com"
+            → identity edge: system3 ↔ system1 via email ✓
+
+2026-04-15: System 3 API renames "email" to "primary_email"
+            → connector YAML still reads "email" → NULL
+            → inout_src_system3_contacts.email = NULL (for all new/updated rows)
+            → no identity edges created for any row ingested after 2026-04-15
+
+2026-05-01: Alice updates her phone number in system 3
+            → re-ingested with NULL email
+            → connected-components re-runs
+            → edge system3 ↔ system1 disappears (base row changed, email NULL)
+            → cluster splits
+            → writeback fires: system 1 receives delete delta for Alice's system3-derived fields
+```
+
+The silent split occurs on the next update to any affected record — not immediately after the schema change. Monitoring `_id_{target}` refresh metrics will not show an anomaly until records start being re-ingested with NULL identity fields.
+
+**Mitigations:**
+- **Schema validation on ingestion:** The ingestion daemon should validate that declared identity fields are non-NULL for at least X% of ingested records per run. A sudden drop in identity field population rate (e.g., `email` goes from 95% populated to 0%) should raise an alert before any records are committed.
+- **Schema change detection:** Compare the shape of the API response against the expected connector YAML schema on every sync run. Alert if declared identity fields are missing from the response.
+- **Identity field NULL rate in `pgt_refresh_history`:** Track `null_identity_field_pct` per source per field as a streaming metric. A spike means schema drift or a data quality regression.
+- **Connector YAML contract tests:** Before deploying a connector YAML change, run it against a live API sample and verify that identity fields are populated as expected.
+
+### 4.24 Multi-Tenancy Identity Isolation
+
+If the pipeline operates in a multi-tenant context — multiple customers, business units, or organisations sharing the same PostgreSQL database — identity resolution must never link records across tenant boundaries.
+
+Two contacts from different tenants who happen to share an email address are not the same person. But OSI-mapping's identity rules, unless explicitly scoped by tenant, will create an edge between them:
+
+```
+Tenant A: contact <alice@consultancy.com>, a consultant working for Tenant A
+Tenant B: contact <alice@consultancy.com>, the same consultant working for Tenant B
+
+Identity resolution: same email → same cluster
+Golden record: merged across tenants
+Writeback: Tenant A's system receives Tenant B's contact data (data leak)
+           Tenant B's system receives Tenant A's contact data (data leak)
+```
+
+This is not merely a linkage error — it is a security and compliance failure. Tenant data must never cross tenant boundaries, regardless of identity field matches.
+
+**Required mitigations:**
+
+1. **Tenant scoping as a mandatory partition key in identity resolution:**
+
+```yaml
+targets:
+  contact:
+    partition_by: tenant_id    # identity resolution only creates edges
+                                # within the same partition value
+    fields:
+      email: identity
+      tax_id: identity
+```
+
+This is not currently supported in OSI-mapping. The equivalent workaround is to run separate OSI-mapping instances per tenant (separate schemas or databases), which is operationally expensive but correct.
+
+2. **Forward view filtering:** The `_fwd_{mapping}` views must include a `WHERE tenant_id = current_tenant` predicate. This requires the tenant context to be available at view evaluation time — either as a session variable or baked into the view definition per tenant.
+
+3. **Row-level security on source tables:** PostgreSQL RLS policies on `inout_src_*` tables prevent cross-tenant reads at the database level, providing a defence-in-depth layer even if the OSI-mapping views are misconfigured.
+
+4. **No shared golden record:** The `{target}` analytics view must be per-tenant. A single shared `contact` view would expose all tenants' golden records to any consumer of that view.
+
+**This consideration is binary:** either the system correctly isolates tenants or it silently leaks data. There is no partial correctness. Multi-tenant pipelines must have tenant isolation validated in the test suite before any production deployment.
+
+### 4.25 Match Key Combinatorics and the Accumulator Cluster
+
+OSI-mapping's identity field declarations use OR-logic: a record is linked to a cluster if it matches on email **OR** tax_id **OR** phone **OR** any other declared identity field. Each new identity field added to the YAML is a new axis of potential links.
+
+As the number of identity fields grows, a structural risk emerges that is distinct from any individual field's false positive rate: **accumulator clusters**.
+
+An accumulator cluster forms when a series of individually plausible single-field matches create a large cluster whose members have no direct connection to most other members:
+
+```
+Record A: email=alice@co.com,  phone=555-1234,  tax=—
+Record B: email=—,             phone=555-1234,  tax=12345
+Record C: email=—,             phone=—,         tax=12345,  name=Alice Smith
+Record D: email=bob@co.com,    phone=—,         tax=—,      name=Alice Smith
+Record E: email=bob@co.com,    phone=555-9999,  tax=—
+
+Each edge is individually plausible:
+  A–B: same phone
+  B–C: same tax_id
+  C–D: same name
+  D–E: same email
+
+Cluster {A, B, C, D, E}: five records, no two sharing the same identity field value
+```
+
+Alice and Bob share nothing in common, but they are in the same cluster through a chain of coincidental single-field matches across four different identity fields. This is a generalisation of the transitivity problem (§4.16), but caused by the multiplication of identity fields rather than a shared intermediary.
+
+**The risk grows combinatorially.** With 2 identity fields, a record is linked only if it shares one of 2 values. With 5 identity fields, it can enter a cluster through any of 5 different doors. A cluster of 100 records with 5 identity fields has many more potential entry points than a cluster of 100 records with 2 identity fields.
+
+**Mitigations:**
+- **Minimum match count:** Require a record to match on at least 2 of N identity fields (not just 1) before creating an edge. This trades recall for precision — some genuine matches that share only one field will be missed, but accumulator clusters become much harder to form. Not currently supported in OSI-mapping; would require engine changes.
+- **Link group discipline:** Put each identity field in a link group that requires at least one corroborating field from the same source. A phone match alone is not sufficient; phone + country code, or phone + name initial.
+- **Cluster membership diff auditing:** When a record joins a cluster, record which identity field created the edge. If a cluster has members that entered through 4 or 5 different identity fields with no overlap, that cluster is an accumulator candidate.
+- **Progressive identity field rollout:** Don't declare all 5 identity fields at once during onboarding. Declare the 2 highest-confidence fields first (tax_id, email). Evaluate the resulting clusters. Add a third field (phone) only after confirming the 2-field clusters are correct. Each addition is a controlled experiment, not a simultaneous change to the full identity graph.
+
 ---
 
 ## 5. Record Linkage and Onboarding
