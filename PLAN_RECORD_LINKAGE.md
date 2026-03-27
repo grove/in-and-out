@@ -1808,6 +1808,221 @@ The cluster assignment at t=2 is not a valid intermediate state — it is an art
 
 ---
 
+### 4.55 Golden Record Field Conflict Resolution for Non-Identity Fields
+
+§4.26 covers the specific contradiction between a field being an identity key and a conflict-resolution target simultaneously. This section covers the separate, general problem of what value populates the golden record when cluster members disagree on ordinary non-identity fields such as `job_title`, `company_name`, `billing_address`, or `phone_number`.
+
+**The problem:**
+
+A cluster of three records representing the same contact may carry:
+
+| Source | first_name | job_title | phone |
+|---|---|---|---|
+| CRM (Salesforce) | Alice | VP of Sales | +1 415 555 0100 |
+| Support (HubSpot) | Alice | VP Sales | +1 415 555 0100 |
+| Finance | A. Smith | Director | +1 415 555 0101 |
+
+Which `job_title` and `phone` go in the golden record? The MDM must implement a policy. The choice of policy is not neutral — it directly affects what gets written back to all systems.
+
+**Common policies and their failure modes:**
+
+| Policy | Description | Failure mode |
+|---|---|---|
+| Most-recent-wins | Use value from most recently updated record | A stale Finance record updated yesterday overwrites a more accurate CRM record |
+| Source-priority | Prefer source A over B over C | Finance (low trust) wins because it was updated most recently in its own priority tier |
+| Most-populated | Use non-null value from highest-priority source | `NULL` in Salesforce is treated as "no data" but actually means "intentionally cleared" |
+| Majority vote | Use value held by the most sources | Works only for 3+ sources; two sources with different values deadlocks at 50% |
+| Longest value | Use the longest non-null string | `"VP of Sales (EMEA, APAC, LATAM, Global Accounts)"` wins over `"VP of Sales"` — not necessarily more accurate |
+
+**Why this interacts with identity resolution specifically:**
+
+1. **Writeback of the wrong field value can create new false-positive links.** The golden record writes `phone = +1 415 555 0101` (from Finance) to Salesforce. On the next ingest, Salesforce now carries the Finance phone number — creating a cross-source phone corroboration that did not exist before and may not be accurate.
+2. **Conflict resolution policy determines the corroboration feedback loop velocity (§4.48).** Most-recent-wins causes the freshest source to dominate writeback, which then echoes back into all sources. Source-priority causes one source to persistently dominate.
+3. **NULL-as-intentional-clear vs NULL-as-missing is undetectable.** If a Salesforce admin deliberately cleared a phone number because it is wrong, `most-populated` policy overwrites the deliberate erasure with the wrong value from another source.
+
+**Mitigations:**
+
+- **Explicit conflict resolution policy per field in the connector/mapping YAML:**
+  ```yaml
+  field_resolution:
+    job_title:
+      policy: source_priority
+      source_order: [salesforce, hubspot, finance]
+    phone:
+      policy: most_recent
+      max_age_days: 90  # ignore values older than 90 days
+    billing_address:
+      policy: source_priority
+      source_order: [finance, salesforce, hubspot]
+  ```
+- **NULL-semantics annotation:** Fields where NULL means "intentionally cleared" (not "unknown") must be annotated `null_means_cleared: true`. The conflict resolution logic treats an explicit NULL from a high-priority source as a definitive signal rather than falling through to the next source.
+- **Golden record provenance tracking:** The golden record table should carry `{field}_source` and `{field}_updated_at` columns so that each field's origin is auditable. When a wrong value appears in a downstream system, the source of that value can be traced without examining the full cluster history.
+- **Conflict rate monitoring:** For each field in the golden record, track the fraction of clusters that have conflicting values. A rising conflict rate on `email` or `phone` is a signal that source data quality is diverging — or that writeback is creating artificial values that are now being re-ingested as alternatives.
+
+---
+
+### 4.56 API Constraint Violations Silently Corrupting Round-Trip Identity
+
+When the MDM writes a golden record field back to a target system, the target system may silently truncate, transform, or reject the value due to its own schema constraints. On the next ingest, the modified value no longer matches the original — producing a false negative in identity resolution.
+
+**Truncation is the most common and most dangerous form:**
+
+```
+MDM golden record:  email = "alice.verylongname.with.subdomain@corporation.co.uk"  (55 chars)
+Target system:      email column is VARCHAR(40)
+Written back as:    "alice.verylongname.with.subdomain@cor"  (silently truncated)
+Re-ingested:        "alice.verylongname.with.subdomain@cor"
+OSI-mapping:        'alice.verylongname.with.subdomain@cor' ≠ 'alice.verylongname.with.subdomain@corporation.co.uk'
+Result:             False negative — one record leaves the cluster
+```
+
+The target system does not return an error — it stores what it can and returns a success response. The writeback daemon logs a successful write. On the next ingest, a subtly different value arrives and identity resolution silently splits the cluster.
+
+**Other constraint violation modes:**
+
+| Constraint type | Example | Identity effect |
+|---|---|---|
+| Character set narrowing | Target system is Latin-1-only; MDM writes UTF-8 `Müller`; stored as `M?ller` | False negative (normalised forms differ) |
+| Case enforcement | Target system uppercases all names; `alice` becomes `ALICE`; normalisation handles this if lowercased before comparison | Usually safe post-normalisation *if* normalisation runs before comparison |
+| Special character stripping | `alice+tag@co.com` → `alicetag@co.com` or `alice@co.com` | Either false negative or false positive depending on stripping rule |
+| Domain or format validation | Target system validates email format strictly; rejects writeback; old value persists | On re-ingest: old value; identity field diverges across systems |
+| Field-level encryption | Target system encrypts PII at rest and returns ciphertext in API responses | Ciphertext ingested as identity value → matches nothing → false negative |
+
+**Mitigations:**
+
+- **Pre-writeback constraint validation:** Before writing a field value to a target system, validate it against the target system's known constraints. The connector YAML should declare target-side constraints:
+  ```yaml
+  writeback_fields:
+    email:
+      max_length: 80        # target system VARCHAR(80)
+      charset: utf8mb4      # MySQL 4-byte UTF-8
+      case: preserve        # do not coerce
+  ```
+  A value that fails validation should be flagged for human review rather than truncated silently.
+- **Round-trip hash check:** After writeback, re-fetch the written field from the target system and compare it to what was written. A mismatch is a constraint violation. Log it, alert, and exclude the corrupted field value from identity matching until it is corrected.
+- **Target-side constraint audit at connector onboarding:** Before enabling writeback for system 3, query its schema for field length, character set, and format constraints. Document them in the connector YAML. Any identity field that the target system applies transformation rules to must not be used for cross-system matching via that system's re-ingested copy.
+
+---
+
+### 4.57 Cluster Merge Evidence Auditability
+
+In regulated industries — healthcare, financial services, legal, government — the question "why were these two records determined to represent the same entity?" is not merely operational; it is a compliance requirement. Regulators, patients, customers, and auditors may require a documented chain of evidence for any merge decision.
+
+OSI-mapping's identity resolution is a view pipeline: `_fwd_*` → `_id_*` (WITH RECURSIVE connected-components) → `_resolved_*`. The pipeline produces a correct answer given the current data, but it does not produce a log. There is no record of:
+
+- Which identity field value caused the edge between record A and record B
+- When that edge was first established
+- Whether the edge was established deterministically (exact match) or via a curation override
+- What the cluster membership was at any prior point in time
+
+**Why the view-only architecture makes this hard:**
+
+The `_id_{target}` view is re-evaluated on every refresh. The cluster assignment for any given record today tells you the current result, not the path. If the data that caused a merge was later corrected (e.g. a shared email was a data error and has been removed), the original merge reason is gone — but the downstream effects may persist in all systems' histories.
+
+**The two audit questions that must be answerable:**
+
+1. **Forward audit:** "What fields caused Record A to merge with Record B?" Required for: compliance review, debugging incorrect merges, explaining MDM decisions to affected data subjects (GDPR Art. 22 — automated processing).
+2. **Reverse audit:** "What was the cluster membership of Record A on date X?" Required for: retrospective investigation, legal discovery, incident response.
+
+**Mitigations:**
+
+- **Edge table:** Materialise the identity edges (not just the cluster assignments) as a persisted table updated on each refresh:
+  ```sql
+  CREATE TABLE identity_edges (
+    record_a_id       text NOT NULL,
+    record_b_id       text NOT NULL,
+    link_field        text NOT NULL,   -- which identity field produced this edge
+    link_value        text NOT NULL,   -- the shared value
+    first_seen_at     timestamptz NOT NULL DEFAULT now(),
+    last_confirmed_at timestamptz NOT NULL DEFAULT now(),
+    source            text,            -- 'algorithmic' | 'curation_override'
+    PRIMARY KEY (record_a_id, record_b_id, link_field)
+  );
+  ```
+- **Cluster assignment history:** On each refresh, snapshot any cluster assignments that changed into a `cluster_assignment_history` table (record_id, cluster_id, valid_from, valid_to). This enables the reverse audit query: "what cluster was this record in on 2025-01-15?"
+- **Override decisions carry a mandatory reason field:** Human curation overrides (§6) must require a `reason` text field. The reason is stored in the override table and forms part of the audit record for any merge affected by that override.
+- **Audit report generation:** Implement a query template that, given two record IDs, produces a human-readable audit report: "These records were merged because they share email `alice@co.com`, first observed on 2025-03-12. The link was confirmed by human curation on 2025-03-14 (operator: j.smith, reason: 'verified by phone')."
+
+---
+
+### 4.58 Stale Permanence of Curation Blocks (Over-Blocking)
+
+§4.52 covers the loss of curation overrides and silent reversion to the algorithmic default. This section covers the opposite failure: **curation blocks that persist indefinitely and become incorrect over time**.
+
+A block-merge override is typically placed because two records with matching identity field values are known to represent different entities. But entities change:
+
+| Scenario | Why the block was placed | Why it may later be wrong |
+|---|---|---|
+| Two employees with the same name and work email pattern | Different people: Alice Smith (Sales) and Alice Smith (Engineering) | One leaves; their email is reassigned to the other (or to a new hire with an alias) |
+| Parent company and subsidiary sharing a tax ID | Distinct legal entities at time of blocking | Subsidiary is acquired and fully merged into parent; now they are the same entity |
+| Ex-partners sharing an address | Distinct people living at the same address | One moves; the other retains the address; new records match correctly but the block prevents it |
+| Test record and production record with same email | Test record is genuinely different | Test record is deleted; a legitimate production record is created with the same email |
+
+**The structural problem:** Curation overrides have no built-in expiry mechanism. A block placed three years ago by an operator who has since left the company carries equal weight to a block placed yesterday. The override table grows monotonically. Over time, an increasing fraction of blocks may be invalid, silently preventing correct merges.
+
+This is the **false-negative equivalent of unchecked false positives**: incorrect blocks cause the same harm as incorrect matches — data is fragmented across systems, golden records are incomplete, writeback cannot synchronise fields across the full intended scope.
+
+**Mitigations:**
+
+- **Block expiry and review scheduling:** Every override row should carry a `review_due_at` date. Blocks on volatile data (email, address) should expire sooner than blocks on stable data (government identifiers, date of birth). An automated report surfaces overrides past their review date for operator action.
+  ```sql
+  ALTER TABLE identity_overrides ADD COLUMN review_due_at date;
+  ALTER TABLE identity_overrides ADD COLUMN last_reviewed_at timestamptz;
+  ALTER TABLE identity_overrides ADD COLUMN reviewed_by text;
+  ```
+- **Block trigger inventory:** When a block is created, record *why* the two records matched (which identity field value they shared). If that field value is later absent from both records — because the shared email was corrected — the block should be automatically flagged for review: its triggering condition no longer exists.
+- **Periodic block validity check:** A scheduled job re-evaluates each active block: do the two blocked records still share any identity field values? If they share no current identity field values, the block is no longer preventing any merge — but it may be masking the correct link to a third record. Flag these as dormant blocks for review.
+- **Block count as a leading indicator:** A steadily increasing block count with a low review rate is a leading indicator of accumulated stale blocks. Track `blocks_created / blocks_reviewed / blocks_expired` over time.
+
+---
+
+### 4.59 Mixed Entity Granularity Across Source Systems
+
+OSI-mapping's `_id_{entity_type}` view assumes one record per entity occurrence in each source system. In practice, different source systems model the same underlying entity at different granularities:
+
+**The granularity mismatch problem:**
+
+| Source system | Model | Record count for "Alice at Acme Corp" |
+|---|---|---|
+| CRM (Salesforce) | One Contact record per person | 1 |
+| Support (Zendesk) | One Contact per person | 1 |
+| Finance / billing | One BillingContact per person-account relationship | 3 (Alice has 3 active subscriptions) |
+| Event platform | One Attendee per person-event registration | 12 (Alice has attended 12 events) |
+| Healthcare EHR | One Encounter per visit | 47 (47 clinical encounters over 5 years) |
+
+When the Finance system is ingested, Alice appears as 3 records — one per subscription. All three carry her email and phone. Identity resolution links all three to her CRM record via email — correct. But now her cluster has 5 members (1 CRM + 1 Support + 3 Finance), and the golden record must pick values from a cluster whose Finance contribution has 3× the weight of the others.
+
+**Two distinct failure modes:**
+
+**Mode 1 — Artificial cluster inflation.** The Finance records have identical identity fields but different `subscription_id` values. They are not duplicates (§4.27) — they represent distinct business objects. Intra-source deduplication would wrongly merge them. But identity resolution can't tell that they are intentionally distinct; it sees three records with the same email and treats them as candidates for the same cluster.
+
+**Mode 2 — Cross-granularity writeback.** When the MDM writes back to Finance, it writes to all three BillingContact records. If Alice updates her email in the CRM, the golden record propagates the new email to all three Finance records — correct. But if Alice's Finance record 2 has a different phone number than records 1 and 3 (a work phone assigned to one subscription), the golden record's conflict resolution policy overwrites that subscription-specific phone silently.
+
+**Why the standard OSI-mapping model doesn't handle this:**
+
+The `_id_{target}` connected-components algorithm assigns all linked records to a single cluster ID. There is no concept of "this record is a role-occurrence of an entity rather than an entity occurrence." The cluster is flat.
+
+**Mitigations:**
+
+- **Entity granularity annotation at connector onboarding:** Every connector YAML must declare whether its records are entity records (one per person) or occurrence records (one per event/relationship/transaction):
+  ```yaml
+  record_granularity: entity     # one record represents one entity
+  # or
+  record_granularity: occurrence # one record represents one event or relationship
+  occurrence_key: subscription_id  # field that distinguishes occurrences
+  ```
+- **Occurrence-granularity sources excluded from cluster-size-limit rules (§4.4):** The cluster size limit exists to catch accumulator clusters. But an event-platform source with 47 attendance records per person will routinely breach the limit. The limit must account for expected occurrence frequency.
+- **Occurrence deduplication in the forward view:** For occurrence-granularity sources, deduplicate on the identity fields in the forward view before the identity resolution layer sees the data:
+  ```sql
+  -- _fwd_eventplatform_attendees: one row per person, not per attendance
+  SELECT DISTINCT ON (email) email, phone, name, max(last_seen_at) AS last_seen_at
+  FROM raw_attendees
+  GROUP BY email, phone, name
+  ```
+- **Writeback scope restriction:** For occurrence-granularity sources, writeback should update only identity fields shared across all occurrence records for that entity (or the most recent occurrence) — not all occurrence records.
+
+---
+
 ## 5. Record Linkage and Onboarding
 
 The three onboarding plans each interact with record linkage differently:
