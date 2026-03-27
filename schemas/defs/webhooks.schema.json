@@ -113,11 +113,16 @@
               "notification_external_id_field": {
                 "type": "string",
                 "default": "id",
-                "description": "Top-level payload field holding the external record ID for notification-only payloads."
+                "description": "Top-level payload field holding the external record ID for notification-only payloads and is_delete routes."
+              },
+              "is_delete": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true, this route IS a deletion signal — the event type alone implies the record was deleted. The engine extracts the ID from notification_external_id_field and synthesizes a delete record without inspecting the rest of the payload. Takes precedence over null_record_field. E.g. 'contact.deletion' (HubSpot), 'customer.delete' (Tripletex)."
               },
               "null_record_field": {
                 "type": "string",
-                "description": "Payload field name that, when present and null (JSON null), signals a hard delete. The record ID is taken from notification_external_id_field. E.g. 'value' for Tripletex (which sends {value: null} on delete). When absent, null-field delete detection is disabled for this route."
+                "description": "Payload field name that, when present and null (JSON null), signals a hard delete. Only consulted when is_delete is false. Useful for providers that reuse a single event type for upsert and delete (delete expressed as null payload). E.g. 'value' when a provider sends {value: null} on delete."
               }
             }
           }

@@ -562,36 +562,59 @@ async def handle_webhook(
 
     # Full-payload webhook: upsert the record directly.
 
-    # FEAT-WH-04: null-record-field delete detection.
-    # When the matched route declares null_record_field, check that specific
-    # field for null. Falls back to the legacy hardcoded "value" check only
-    # when no route is matched (belt-and-suspenders for unrouted payloads).
-    null_field: str | None = None
-    if matched_route is not None and matched_route.null_record_field is not None:
-        null_field = matched_route.null_record_field
-    elif matched_route is None and "value" in payload:
-        # Legacy fallback: no route matched but payload has a top-level "value"
-        # key that is null — treat as Tripletex-style delete.
-        null_field = "value"
-    if null_field is not None and null_field in payload and payload[null_field] is None:
-        ext_id_field = matched_route.notification_external_id_field if matched_route else "id"
-        top_level_id = payload.get(ext_id_field)
-        if top_level_id is None:
-            log.warning(
-                "webhook_null_record_missing_id", field=null_field, keys=list(payload.keys())
-            )
+    # FEAT-WH-04: delete detection — two mechanisms, is_delete takes precedence.
+    #
+    # Case 1 (is_delete): the route match IS the deletion signal; inspect nothing.
+    #   e.g. "customer.delete" (Tripletex), "contact.deletion" (HubSpot).
+    # Case 2 (null_record_field): a named payload field being null signals delete.
+    #   e.g. providers that reuse one event type for upsert+delete via null payload.
+    # Case 3 (legacy): no route matched, payload has top-level "value": null.
+
+    def _extract_delete_id(ext_field: str) -> tuple[int | str | None, bool]:
+        """Return (top_level_id, failed). failed=True if the field was absent."""
+        val = payload.get(ext_field)
+        return val, val is None
+
+    if matched_route is not None and matched_route.is_delete:
+        ext_id_field = matched_route.notification_external_id_field
+        top_level_id, missing = _extract_delete_id(ext_id_field)
+        if missing:
+            log.warning("webhook_is_delete_missing_id", field=ext_id_field, keys=list(payload.keys()))
             return JSONResponse(
-                {"error": "delete payload has null value and no id field"}, status_code=422
+                {"error": f"delete event missing '{ext_id_field}' id field"}, status_code=422
             )
         pk_field_name = (
             ingestion_cfg.primary_key
             if isinstance(ingestion_cfg.primary_key, str)
             else (ingestion_cfg.primary_key[0] if ingestion_cfg.primary_key else "id")
         )
-        # Build a minimal record; upsert will keep the existing row if present,
-        # or create a stub that downstream reconciliation can clean up.
         payload = {pk_field_name: top_level_id, "_deleted": True}
-        log.info("webhook_null_value_delete_synthesised", external_id=str(top_level_id))
+        log.info("webhook_delete_event_synthesised", external_id=str(top_level_id), route=matched_route.match)
+    else:
+        null_field: str | None = None
+        if matched_route is not None and matched_route.null_record_field is not None:
+            null_field = matched_route.null_record_field
+        elif matched_route is None and "value" in payload:
+            # Legacy fallback: no route matched but payload has a top-level "value"
+            # key that is null — treat as Tripletex-style delete.
+            null_field = "value"
+        if null_field is not None and null_field in payload and payload[null_field] is None:
+            ext_id_field = matched_route.notification_external_id_field if matched_route else "id"
+            top_level_id = payload.get(ext_id_field)
+            if top_level_id is None:
+                log.warning(
+                    "webhook_null_record_missing_id", field=null_field, keys=list(payload.keys())
+                )
+                return JSONResponse(
+                    {"error": "delete payload has null value and no id field"}, status_code=422
+                )
+            pk_field_name = (
+                ingestion_cfg.primary_key
+                if isinstance(ingestion_cfg.primary_key, str)
+                else (ingestion_cfg.primary_key[0] if ingestion_cfg.primary_key else "id")
+            )
+            payload = {pk_field_name: top_level_id, "_deleted": True}
+            log.info("webhook_null_value_delete_synthesised", external_id=str(top_level_id))
 
     external_id = _extract_external_id(payload, ingestion_cfg.primary_key)
     if external_id is None:

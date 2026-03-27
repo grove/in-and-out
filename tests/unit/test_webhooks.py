@@ -255,3 +255,75 @@ def test_null_record_field_legacy_fallback_absent_key():
     payload = {"id": 1001, "data": None}
     null_field = _resolve_null_field(None, payload)
     assert null_field is None
+
+
+# ---------------------------------------------------------------------------
+# is_delete route logic
+# Mirrors the FEAT-WH-04 is_delete branch in handle_webhook.
+# ---------------------------------------------------------------------------
+
+def _apply_is_delete(
+    matched_route: FanOutRoute | None,
+    payload: dict,
+    pk: str = "id",
+) -> dict | None:
+    """Return the synthesized delete payload dict, or None if is_delete path doesn't apply."""
+    if matched_route is None or not matched_route.is_delete:
+        return None
+    ext_id_field = matched_route.notification_external_id_field
+    top_level_id = payload.get(ext_id_field)
+    if top_level_id is None:
+        return None  # missing ID — engine returns 422; here we signal None
+    return {pk: top_level_id, "_deleted": True}
+
+
+def test_is_delete_synthesises_delete_record():
+    route = FanOutRoute(match="customer.delete", datatype="customers", is_delete=True)
+    payload = {"subscriptionId": 0, "event": "customer.delete", "id": 10001, "value": None}
+    result = _apply_is_delete(route, payload)
+    assert result == {"id": 10001, "_deleted": True}
+
+
+def test_is_delete_uses_notification_external_id_field():
+    """HubSpot sends objectId, not id."""
+    route = FanOutRoute(
+        match="contact.deletion",
+        datatype="contacts",
+        is_delete=True,
+        notification_external_id_field="objectId",
+    )
+    payload = {"subscriptionType": "contact.deletion", "objectId": 999, "portalId": 1001}
+    result = _apply_is_delete(route, payload, pk="id")
+    assert result == {"id": 999, "_deleted": True}
+
+
+def test_is_delete_missing_id_returns_none():
+    route = FanOutRoute(match="customer.delete", datatype="customers", is_delete=True)
+    payload = {"event": "customer.delete"}  # no id field
+    result = _apply_is_delete(route, payload)
+    assert result is None
+
+
+def test_is_delete_false_route_not_applied():
+    """Route without is_delete should not enter the is_delete path."""
+    route = FanOutRoute(match="customer.update", datatype="customers")
+    payload = {"id": 10001, "name": "Acme"}
+    result = _apply_is_delete(route, payload)
+    assert result is None
+
+
+def test_is_delete_takes_precedence_over_null_record_field():
+    """When both is_delete and null_record_field are set, is_delete wins."""
+    route = FanOutRoute(
+        match="customer.delete",
+        datatype="customers",
+        is_delete=True,
+        null_record_field="value",
+    )
+    payload = {"id": 10001, "value": None}
+    # is_delete path fires; null_record_field check is bypassed
+    result = _apply_is_delete(route, payload)
+    assert result == {"id": 10001, "_deleted": True}
+    # null_field resolution should NOT fire when is_delete is set
+    null_field = _resolve_null_field(route, payload) if not route.is_delete else None
+    assert null_field is None

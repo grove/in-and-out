@@ -153,3 +153,40 @@ def test_fan_out_route_null_record_field_in_fan_out_config():
     create_route = fan_out.routes[1]
     assert delete_route.null_record_field == "value"
     assert create_route.null_record_field is None
+
+
+# --- FanOutRoute.is_delete ---
+
+
+def test_fan_out_route_is_delete_defaults_false():
+    route = FanOutRoute(match="customer.delete", datatype="customers")
+    assert route.is_delete is False
+
+
+def test_fan_out_route_is_delete_set():
+    route = FanOutRoute(match="customer.delete", datatype="customers", is_delete=True)
+    assert route.is_delete is True
+
+
+def test_fan_out_route_is_delete_with_custom_id_field():
+    # HubSpot-style: id is in "objectId", not the default "id"
+    route = FanOutRoute(
+        match="contact.deletion",
+        datatype="contacts",
+        is_delete=True,
+        notification_external_id_field="objectId",
+    )
+    assert route.is_delete is True
+    assert route.notification_external_id_field == "objectId"
+
+
+def test_fan_out_route_is_delete_and_null_record_field_coexist():
+    # is_delete takes precedence — both can be set without validation error
+    route = FanOutRoute(
+        match="customer.delete",
+        datatype="customers",
+        is_delete=True,
+        null_record_field="value",
+    )
+    assert route.is_delete is True
+    assert route.null_record_field == "value"
