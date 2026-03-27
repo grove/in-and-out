@@ -14,6 +14,7 @@ connectors can be served by the same process without path collisions.
 
 from __future__ import annotations
 
+import json
 import time
 from urllib.parse import urlparse
 from typing import Any
@@ -495,6 +496,7 @@ def build_connector_router(
                         str(request.url.path),
                         200,
                         ms,
+                        request_headers_json=json.dumps(dict(request.headers)),
                     )
                     return JSONResponse(body, headers=headers_out)
 
@@ -568,6 +570,7 @@ def build_connector_router(
                                 str(request.url.path),
                                 204 if deleted else 404,
                                 ms,
+                                request_headers_json=json.dumps(dict(request.headers)),
                             )
                             return Response(status_code=204 if deleted else 404)
 
@@ -582,6 +585,7 @@ def build_connector_router(
                                 str(request.url.path),
                                 200 if rec else 404,
                                 ms,
+                                request_headers_json=json.dumps(dict(request.headers)),
                             )
                             if rec is None:
                                 return JSONResponse({"error": "not found"}, status_code=404)
@@ -605,7 +609,9 @@ def build_connector_router(
                                 event_bus.publish_mutation(evs[0])
                             ms = int((time.monotonic() - t0) * 1000)
                             event_bus.publish_request(
-                                connector_name, _dt_name, "POST", str(request.url.path), 201, ms
+                                connector_name, _dt_name, "POST", str(request.url.path), 201, ms,
+                                request_body_json=json.dumps(body),
+                                request_headers_json=json.dumps(dict(request.headers)),
                             )
                             display = {k: v for k, v in record.items() if not k.startswith("__")}
                             return JSONResponse(display, status_code=201)
@@ -626,7 +632,9 @@ def build_connector_router(
                         if updated is None:
                             ms = int((time.monotonic() - t0) * 1000)
                             event_bus.publish_request(
-                                connector_name, _dt_name, _method, str(request.url.path), 404, ms
+                                connector_name, _dt_name, _method, str(request.url.path), 404, ms,
+                                request_body_json=json.dumps(body),
+                                request_headers_json=json.dumps(dict(request.headers)),
                             )
                             return JSONResponse({"error": "not found"}, status_code=404)
                         dispatcher.dispatch_nowait(connector, _dt_name, "update", rid, updated)
@@ -635,7 +643,9 @@ def build_connector_router(
                             event_bus.publish_mutation(evs[0])
                         ms = int((time.monotonic() - t0) * 1000)
                         event_bus.publish_request(
-                            connector_name, _dt_name, _method, str(request.url.path), 200, ms
+                            connector_name, _dt_name, _method, str(request.url.path), 200, ms,
+                            request_body_json=json.dumps(body),
+                            request_headers_json=json.dumps(dict(request.headers)),
                         )
                         display = {k: v for k, v in updated.items() if not k.startswith("__")}
                         return JSONResponse(display)
@@ -803,6 +813,8 @@ def _add_webhook_registration_routes(
                     path=reg.register_path,
                     status=200,
                     duration_ms=elapsed,
+                    request_body_json=json.dumps(body),
+                    request_headers_json=json.dumps(dict(request.headers)),
                 )
             return JSONResponse(resp, status_code=200)
 

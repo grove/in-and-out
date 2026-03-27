@@ -27,6 +27,9 @@ class SimulatorEvent:
     duration_ms: int = 0  # round-trip ms             (request/webhook events)
     webhook_url: str = ""  # full URL                  (webhook events)
     payload_json: str = ""  # serialised payload        (webhook events)
+    sent_headers_json: str = ""  # headers sent with webhook (webhook events)
+    request_body_json: str = ""  # request body JSON          (request events)
+    request_headers_json: str = ""  # received headers JSON   (request events)
     timestamp: str = field(default_factory=_now_iso)
     event_id: str = field(default_factory=_new_id)
 
@@ -82,6 +85,8 @@ class EventBus:
         path: str,
         status: int,
         duration_ms: int = 0,
+        request_body_json: str = "",
+        request_headers_json: str = "",
     ) -> None:
         self.publish(
             SimulatorEvent(
@@ -92,6 +97,8 @@ class EventBus:
                 path=path,
                 status=status,
                 duration_ms=duration_ms,
+                request_body_json=request_body_json,
+                request_headers_json=request_headers_json,
             )
         )
 
@@ -105,6 +112,7 @@ class EventBus:
         status: int,
         duration_ms: int = 0,
         payload_json: str = "",
+        sent_headers_json: str = "",
     ) -> None:
         self.publish(
             SimulatorEvent(
@@ -117,6 +125,7 @@ class EventBus:
                 status=status,
                 duration_ms=duration_ms,
                 payload_json=payload_json,
+                sent_headers_json=sent_headers_json,
             )
         )
 

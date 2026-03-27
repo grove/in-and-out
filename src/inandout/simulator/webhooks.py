@@ -52,11 +52,18 @@ def _sign(payload_bytes: bytes, secret: str, algorithm: str, encoding: str = "he
 class WebhookDispatcher:
     """Dispatch outbound webhook events to the engine's webhook endpoint."""
 
-    def __init__(self, engine_url: str = "http://localhost:9090", webhook_subscriptions: dict | None = None) -> None:
+    def __init__(
+        self,
+        engine_url: str = "http://localhost:9090",
+        webhook_subscriptions: dict | None = None,
+        event_bus=None,
+    ) -> None:
         self._engine_url = engine_url.rstrip("/")
         # Shared subscription registry: connector_name → {sub_id: body}.
         # When set, per_route_registration dispatch is skipped if no subscriptions exist.
         self._webhook_subscriptions = webhook_subscriptions
+        # Optional event bus — when set, dispatch() publishes webhook events itself.
+        self._event_bus = event_bus
         # Shared client — caller must call aclose() when done.
         # Use a short connect timeout so a missing engine doesn't stall the event loop.
         self._client = httpx.AsyncClient(
@@ -112,9 +119,6 @@ class WebhookDispatcher:
         if not path:
             return None
 
-        url = f"{self._engine_url}{path}"
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-
         registration = getattr(webhook_cfg, "registration", None)
         per_route = registration and getattr(registration, "per_route_registration", False)
 
@@ -125,6 +129,28 @@ class WebhookDispatcher:
             active_subs = self._webhook_subscriptions.get(connector.name, {})
             if not active_subs:
                 return None
+
+        # For per_route connectors, resolve the callback URL from the registered
+        # subscription that matches this event_type.  Fall back to engine_url+path
+        # only if no matching subscription is found.
+        if per_route and self._webhook_subscriptions is not None:
+            active_subs = self._webhook_subscriptions.get(connector.name, {})
+            cb_param = getattr(registration, "callback_url_runtime_param", "callback_url") if registration else "callback_url"
+            url: str | None = None
+            for sub in active_subs.values():
+                if sub.get("event") == event_type:
+                    url = sub.get(cb_param)
+                    break
+            if url is None:
+                # No matching subscription — use first available callback URL
+                for sub in active_subs.values():
+                    url = sub.get(cb_param)
+                    break
+            if url is None:
+                url = f"{self._engine_url}{path}"
+        else:
+            url = f"{self._engine_url}{path}"
+        headers: dict[str, str] = {"Content-Type": "application/json"}
 
         if per_route:
             # FEAT-SIM-01: registration-based payload (e.g. Tripletex).
@@ -173,28 +199,45 @@ class WebhookDispatcher:
             t0 = time.monotonic()
             resp = await self._client.post(url, content=payload_bytes, headers=headers)
             duration_ms = int((time.monotonic() - t0) * 1000)
-            return {
+            result = {
                 "url": url,
                 "status": resp.status_code,
                 "duration_ms": duration_ms,
                 "payload_json": payload_json,
+                "sent_headers": headers,
                 "connector": connector.name,
                 "datatype": datatype,
                 "operation": operation,
                 "record_id": record_id,
             }
         except Exception as exc:
-            return {
+            result = {
                 "url": url,
                 "status": 0,
                 "duration_ms": 0,
                 "payload_json": payload_json,
+                "sent_headers": headers,
                 "error": str(exc),
                 "connector": connector.name,
                 "datatype": datatype,
                 "operation": operation,
                 "record_id": record_id,
             }
+
+        if self._event_bus is not None:
+            self._event_bus.publish_webhook(
+                connector=result["connector"],
+                datatype=result["datatype"],
+                operation=result["operation"],
+                record_id=result["record_id"],
+                url=result["url"],
+                status=result["status"],
+                duration_ms=result["duration_ms"],
+                payload_json=result.get("payload_json", ""),
+                sent_headers_json=json.dumps(result.get("sent_headers", {})),
+            )
+
+        return result
 
     def dispatch_nowait(
         self,

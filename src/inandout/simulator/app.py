@@ -53,7 +53,11 @@ def create_app(
     # it only fires outbound webhooks for per_route connectors once subscriptions exist.
     webhook_subscriptions: dict[str, dict[int, dict]] = {}
 
-    dispatcher = WebhookDispatcher(engine_url=engine_url, webhook_subscriptions=webhook_subscriptions)
+    dispatcher = WebhookDispatcher(
+        engine_url=engine_url,
+        webhook_subscriptions=webhook_subscriptions,
+        event_bus=event_bus,
+    )
 
     connector_configs: list[ConnectorConfig] = []
     for path in connector_paths:
@@ -98,7 +102,8 @@ def create_app(
             if connector.webhooks.registration:
                 webhook_note = (
                     f"\n> **Outbound webhooks:** the engine registers subscriptions via "
-                    f"the endpoints below and the simulator pushes events to {target}."
+                    f"the endpoints below. The simulator dispatches events to the "
+                    f"**callback URL supplied in each registration body**."
                 )
             else:
                 webhook_note = (

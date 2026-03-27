@@ -102,6 +102,7 @@ def build_ui_router() -> APIRouter:
             counts[conn.name] = {}
             for dt_name in conn.datatypes:
                 counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+        connector_systems = {conn.name: conn.system for conn in connectors}
         webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
         return templates.TemplateResponse(
             request,
@@ -109,6 +110,7 @@ def build_ui_router() -> APIRouter:
             {
                 "connectors": connectors,
                 "counts": counts,
+                "connector_systems": connector_systems,
                 "webhook_subscriptions": webhook_subscriptions,
             },
         )
@@ -446,20 +448,9 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        wh = await disp.dispatch(
+        await disp.dispatch(
             connector, datatype, "create", str(record.get(pk_field, "")), record
         )
-        if wh:
-            request.app.state.event_bus.publish_webhook(
-                wh["connector"],
-                wh["datatype"],
-                wh["operation"],
-                wh["record_id"],
-                wh["url"],
-                wh["status"],
-                wh["duration_ms"],
-                wh.get("payload_json", ""),
-            )
         columns = _columns_from_cfg(dt_cfg)
         return HTMLResponse(
             _row_html(connector_name, datatype, pk_field, record, columns), status_code=201
@@ -501,17 +492,6 @@ def build_ui_router() -> APIRouter:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
         wh = await disp.dispatch(connector, datatype, "update", record_id, updated)
-        if wh:
-            request.app.state.event_bus.publish_webhook(
-                wh["connector"],
-                wh["datatype"],
-                wh["operation"],
-                wh["record_id"],
-                wh["url"],
-                wh["status"],
-                wh["duration_ms"],
-                wh.get("payload_json", ""),
-            )
         pk_field = _pk_from_cfg(dt_cfg)
         # Refetch so the record dict contains __modified_at__ / __created_at__ meta-keys
         # (store.update returns the raw merged data without them).
@@ -539,18 +519,7 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        wh = await disp.dispatch(connector, datatype, "delete", record_id, None)
-        if wh:
-            request.app.state.event_bus.publish_webhook(
-                wh["connector"],
-                wh["datatype"],
-                wh["operation"],
-                wh["record_id"],
-                wh["url"],
-                wh["status"],
-                wh["duration_ms"],
-                wh.get("payload_json", ""),
-            )
+        await disp.dispatch(connector, datatype, "delete", record_id, None)
         # Return a struck-through row with a Restore button instead of removing.
         dt_cfg = connector.datatypes[datatype]
         pk_field = _pk_from_cfg(dt_cfg)
@@ -573,18 +542,7 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        wh = await disp.dispatch(connector, datatype, "create", record_id, restored)
-        if wh:
-            request.app.state.event_bus.publish_webhook(
-                wh["connector"],
-                wh["datatype"],
-                wh["operation"],
-                wh["record_id"],
-                wh["url"],
-                wh["status"],
-                wh["duration_ms"],
-                wh.get("payload_json", ""),
-            )
+        await disp.dispatch(connector, datatype, "create", record_id, restored)
         dt_cfg = connector.datatypes[datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         return HTMLResponse(_row_html(connector_name, datatype, pk_field, restored))
