@@ -52,8 +52,11 @@ def _sign(payload_bytes: bytes, secret: str, algorithm: str, encoding: str = "he
 class WebhookDispatcher:
     """Dispatch outbound webhook events to the engine's webhook endpoint."""
 
-    def __init__(self, engine_url: str = "http://localhost:9090") -> None:
+    def __init__(self, engine_url: str = "http://localhost:9090", webhook_subscriptions: dict | None = None) -> None:
         self._engine_url = engine_url.rstrip("/")
+        # Shared subscription registry: connector_name → {sub_id: body}.
+        # When set, per_route_registration dispatch is skipped if no subscriptions exist.
+        self._webhook_subscriptions = webhook_subscriptions
         # Shared client — caller must call aclose() when done.
         # Use a short connect timeout so a missing engine doesn't stall the event loop.
         self._client = httpx.AsyncClient(
@@ -114,6 +117,14 @@ class WebhookDispatcher:
 
         registration = getattr(webhook_cfg, "registration", None)
         per_route = registration and getattr(registration, "per_route_registration", False)
+
+        # For registration-based connectors, skip dispatch until the engine has
+        # registered at least one subscription (otherwise every UI mutation would
+        # fire a failing outbound webhook before the engine is set up).
+        if per_route and self._webhook_subscriptions is not None:
+            active_subs = self._webhook_subscriptions.get(connector.name, {})
+            if not active_subs:
+                return None
 
         if per_route:
             # FEAT-SIM-01: registration-based payload (e.g. Tripletex).

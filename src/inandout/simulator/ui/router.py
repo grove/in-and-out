@@ -88,6 +88,7 @@ def build_ui_router() -> APIRouter:
         connector_systems = {conn.name: conn.system for conn in connectors}
         all_events = request.app.state.event_bus.recent(limit=200)
         webhook_events = [e for e in all_events if e.event_type == "webhook"]
+        webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
         return templates.TemplateResponse(
             request,
             "webhooks.html",
@@ -96,6 +97,7 @@ def build_ui_router() -> APIRouter:
                 "counts": counts,
                 "connector_systems": connector_systems,
                 "events": webhook_events,
+                "webhook_subscriptions": webhook_subscriptions,
             },
         )
 

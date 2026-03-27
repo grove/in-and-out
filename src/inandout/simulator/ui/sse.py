@@ -22,9 +22,9 @@ async def sse_endpoint(request: Request) -> StreamingResponse:
     queue = event_bus.subscribe()
 
     async def generate():
-        # Replay recent history so newly-opened tabs see context immediately.
-        for ev in event_bus.recent(limit=30):
-            yield ev.to_sse()
+        # NOTE: history is rendered server-side by the Jinja templates.
+        # Replaying it here caused duplicates (Jinja row + SSE row for the same event).
+        # SSE only pushes live events that arrive *after* the connection is established.
         try:
             while not await request.is_disconnected():
                 try:

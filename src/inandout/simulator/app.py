@@ -47,7 +47,13 @@ def create_app(
     """
     store = _make_store(store_dsn)
     event_bus = EventBus()
-    dispatcher = WebhookDispatcher(engine_url=engine_url)
+
+    # Shared webhook subscription registry.  route_builder writes into this when
+    # the engine POSTs to registration endpoints; WebhookDispatcher reads it so
+    # it only fires outbound webhooks for per_route connectors once subscriptions exist.
+    webhook_subscriptions: dict[str, dict[int, dict]] = {}
+
+    dispatcher = WebhookDispatcher(engine_url=engine_url, webhook_subscriptions=webhook_subscriptions)
 
     connector_configs: list[ConnectorConfig] = []
     for path in connector_paths:
@@ -73,6 +79,7 @@ def create_app(
     app.state.event_bus = event_bus
     app.state.dispatcher = dispatcher
     app.state.page_size = page_size
+    app.state.webhook_subscriptions = webhook_subscriptions
 
     for connector in connector_configs:
         app.state.connectors.append(connector)
@@ -109,6 +116,9 @@ def create_app(
             version="0.1.0",
             docs_url="/docs",
             redoc_url="/redoc",
+            servers=[
+                {"url": connector.connection.base_url, "description": f"Live {connector.system} API"},
+            ],
         )
         api_router = build_connector_router(
             connector,
@@ -116,6 +126,7 @@ def create_app(
             event_bus,
             dispatcher,
             default_page_size=page_size,
+            webhook_subscriptions_store=webhook_subscriptions,
         )
         sub.include_router(api_router)
         app.mount(f"/{connector.name}", sub)

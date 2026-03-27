@@ -293,6 +293,7 @@ def build_connector_router(
     event_bus: EventBus,
     dispatcher: WebhookDispatcher,
     default_page_size: int = 20,
+    webhook_subscriptions_store: dict | None = None,
 ) -> APIRouter:
     """Return a FastAPI ``APIRouter`` with all routes for *connector*.
 
@@ -679,7 +680,9 @@ def build_connector_router(
     # path lives on *this* process, so we generate matching handlers here.
     # Subscriptions are kept in a simple in-memory dict scoped to the router.
     if connector.webhooks and connector.webhooks.registration:
-        _add_webhook_registration_routes(connector, _add, registered)
+        _add_webhook_registration_routes(
+            connector, _add, registered, webhook_subscriptions_store=webhook_subscriptions_store
+        )
 
     return router
 
@@ -721,6 +724,7 @@ def _add_webhook_registration_routes(
     connector: ConnectorConfig,
     _add,
     registered: set[tuple[str, str]],
+    webhook_subscriptions_store: dict | None = None,
 ) -> None:
     """Register POST/DELETE/PUT/GET routes for the webhook lifecycle API."""
     import itertools
@@ -728,8 +732,13 @@ def _add_webhook_registration_routes(
     reg = connector.webhooks.registration  # type: ignore[union-attr]
     id_path = reg.id_response_path  # e.g. "value.id"
 
-    # Shared in-memory subscription store (keyed by integer ID).
-    subscriptions: dict[int, dict] = {}
+    # Use the shared store when available so the UI and dispatcher can see
+    # active subscriptions; fall back to a process-local dict.
+    if webhook_subscriptions_store is not None:
+        webhook_subscriptions_store.setdefault(connector.name, {})
+        subscriptions: dict[int, dict] = webhook_subscriptions_store[connector.name]
+    else:
+        subscriptions = {}
     counter = itertools.count(1)
 
     # Build example body once — shown in Swagger so callers can see the expected shape.

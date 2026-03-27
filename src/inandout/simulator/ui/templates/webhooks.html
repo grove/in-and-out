@@ -4,6 +4,197 @@
 {% block content %}
 <div class="flex flex-col gap-4 h-full">
 
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Active webhook registrations (registration-based connectors only)   -->
+    <!-- ------------------------------------------------------------------ -->
+    {% set reg_connectors = connectors | selectattr("webhooks") | selectattr("webhooks.registration") | list %}
+    {% if reg_connectors %}
+    <div class="shrink-0">
+        <h2 class="text-sm font-semibold text-slate-300 mb-2">Active Registrations</h2>
+        {% for conn in reg_connectors %}
+        {% set subs = webhook_subscriptions.get(conn.name, {}) %}
+        <div class="bg-slate-800 rounded-xl border border-slate-700 mb-3">
+            <div class="flex items-center gap-2 px-4 py-2 border-b border-slate-700">
+                <span class="text-xs font-semibold text-slate-200">{{ conn.system }}</span>
+                <span class="text-xs text-slate-500 font-mono">{{ conn.name }}</span>
+                {% if subs %}
+                <span class="ml-auto text-xs bg-green-900/50 text-green-400 border border-green-700 px-2 py-0.5 rounded-full">{{ subs | length }} active</span>
+                {% else %}
+                <span class="ml-auto text-xs bg-slate-700 text-slate-400 px-2 py-0.5 rounded-full">none registered</span>
+                {% endif %}
+            </div>
+            {% if subs %}
+            <table class="w-full text-xs font-mono">
+                <thead class="bg-slate-800/80">
+                    <tr>
+                        <th class="px-4 py-1.5 text-left text-slate-500 font-medium w-10">ID</th>
+                        <th class="px-4 py-1.5 text-left text-slate-500 font-medium w-32">Event</th>
+                        <th class="px-4 py-1.5 text-left text-slate-500 font-medium">Callback URL</th>
+                        <th class="px-4 py-1.5 text-left text-slate-500 font-medium w-20">Auth header</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for sub_id, sub in subs.items() %}
+                    <tr class="border-t border-slate-700/50">
+                        <td class="px-4 py-1.5 text-slate-400">{{ sub_id }}</td>
+                        <td class="px-4 py-1.5 text-sky-300">{{ sub.get("event", "—") }}</td>
+                        <td class="px-4 py-1.5 text-slate-300 break-all">{{ sub.get(conn.webhooks.registration.callback_url_runtime_param, "—") }}</td>
+                        <td class="px-4 py-1.5 text-slate-500">{{ sub.get("authHeaderName", "—") }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="px-4 py-3 text-xs text-slate-500 italic">Engine has not registered any subscriptions yet. Start the engine to trigger registration.</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Outbound webhook event log                                           -->
+    <!-- ------------------------------------------------------------------ -->
+    <div class="flex items-center gap-3 shrink-0">
+        <h2 class="text-sm font-semibold text-slate-300">Outbound Events</h2>
+        <span class="text-xs text-slate-500 tabular-nums" id="wh-count">{{ events | length }} events loaded</span>
+        <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear display</button>
+    </div>
+
+    <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
+        <table class="w-full text-xs font-mono">
+            <thead class="sticky top-0 z-10 bg-slate-800 border-b border-slate-700">
+                <tr>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-14">Status</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-8">Op</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-36">System / Datatype</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide">URL</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Duration</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-24 text-right">Time</th>
+                </tr>
+            </thead>
+            <tbody id="webhook-log-body">
+                {% for ev in events %}
+                {% set ok = ev.status >= 200 and ev.status < 300 %}
+                {% set failed = ev.status == 0 %}
+                {% set status_cls = 'text-red-400' if failed else ('text-green-400' if ok else 'text-amber-400') %}
+                {% set status_text = 'ERR' if failed else ev.status %}
+                {% set op_icons = {'create': '＋', 'update': '✎', 'delete': '✕'} %}
+                {% set sys = connector_systems.get(ev.connector, ev.connector) if ev.connector else '' %}
+                {% set detail_id = 'wh-detail-' ~ loop.index %}
+                <tr class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
+                    onclick="document.getElementById('{{ detail_id }}').classList.toggle('hidden')">
+                    <td class="px-3 py-1.5 {{ status_cls }}">{{ status_text }}</td>
+                    <td class="px-3 py-1.5 text-slate-400">{{ op_icons.get(ev.operation, '·') }}</td>
+                    <td class="px-3 py-1.5 text-sky-300">{{ sys }}{% if ev.datatype %}/{{ ev.datatype }}{% endif %}</td>
+                    <td class="px-3 py-1.5 text-slate-400 max-w-0 truncate" title="{{ ev.webhook_url }}">{{ '/' ~ ev.webhook_url.split('/', 3)[3] if ev.webhook_url else '' }}</td>
+                    <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">{{ ev.duration_ms }}ms</td>
+                    <td class="px-3 py-1.5 text-slate-600 text-right">{{ ev.timestamp[11:19] if ev.timestamp else '' }}</td>
+                </tr>
+                <tr id="{{ detail_id }}" class="hidden border-b border-slate-700">
+                    <td colspan="6" class="px-4 py-3 bg-slate-900/50 text-xs font-mono space-y-2">
+                        <div class="break-all"><span class="text-slate-500 mr-1">url</span><span class="text-sky-300">{{ ev.webhook_url }}</span></div>
+                        <div>
+                            <span class="text-slate-500 mr-1">record</span>
+                            {% if ev.connector and ev.datatype and ev.record_id %}
+                            <a href="/ui/{{ ev.connector }}/{{ ev.datatype }}/{{ ev.record_id }}" class="text-sky-400 hover:underline">{{ ev.datatype }}:{{ ev.record_id }}</a>
+                            {% else %}<span class="text-slate-300">—</span>{% endif %}
+                        </div>
+                        {% if ev.payload_json %}
+                        <pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80">{{ ev.payload_json }}</pre>
+                        {% endif %}
+                        <div class="text-slate-600">{{ ev.timestamp }}</div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">No outbound webhooks fired yet. Create or update a record to trigger one.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const body = document.getElementById('webhook-log-body');
+        const countEl = document.getElementById('wh-count');
+        let liveCount = 0;  // increments for SSE rows (separate from Jinja-rendered rows)
+        const opIcons = { create: '＋', update: '✎', delete: '✕' };
+
+        document.addEventListener('simulator:webhook', function (e) {
+            const d = e.detail;
+            const ok = d.status >= 200 && d.status < 300;
+            const failed = d.status === 0;
+            const statusCls = failed ? 'text-red-400' : ok ? 'text-green-400' : 'text-amber-400';
+            const statusText = failed ? 'ERR' : d.status;
+            const sys = (window._connectorSystems && window._connectorSystems[d.connector])
+                ? window._connectorSystems[d.connector] : (d.connector || '');
+            const ts = d.timestamp ? d.timestamp.substring(11, 19) : '';
+            const shortPath = d.webhook_url ? ('/' + d.webhook_url.split('/').slice(3).join('/')) : '';
+
+            let prettyPayload = '';
+            if (d.payload_json) {
+                try { prettyPayload = JSON.stringify(JSON.parse(d.payload_json), null, 2); }
+                catch (_) { prettyPayload = d.payload_json; }
+            }
+
+            const placeholder = body.querySelector('td[colspan="6"]');
+            if (placeholder && placeholder.closest('tr')) placeholder.closest('tr').remove();
+
+            // Use a stable detail-row ID so the toggle knows exactly which row to open.
+            liveCount++;
+            const detailId = 'wh-detail-live-' + liveCount;
+
+            const summaryRow = document.createElement('tr');
+            summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
+            summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
+            summaryRow.innerHTML = `
+                <td class="px-3 py-1.5 ${statusCls}">${statusText}</td>
+                <td class="px-3 py-1.5 text-slate-400">${opIcons[d.operation] || '·'}</td>
+                <td class="px-3 py-1.5 text-sky-300">${sys}${d.datatype ? '/' + d.datatype : ''}</td>
+                <td class="px-3 py-1.5 text-slate-400 max-w-0 truncate" title="${d.webhook_url || ''}">${shortPath}</td>
+                <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">${d.duration_ms}ms</td>
+                <td class="px-3 py-1.5 text-slate-600 text-right">${ts}</td>`;
+
+            const detailRow = document.createElement('tr');
+            detailRow.id = detailId;
+            detailRow.className = 'hidden border-b border-slate-700';
+            detailRow.innerHTML = `
+                <td colspan="6" class="px-4 py-3 bg-slate-900/50 text-xs font-mono space-y-2">
+                    <div class="break-all"><span class="text-slate-500 mr-1">url</span><span class="text-sky-300">${d.webhook_url || '—'}</span></div>
+                    <div><span class="text-slate-500 mr-1">record</span><a href="/ui/${d.connector}/${d.datatype}/${d.record_id}" class="text-sky-400 hover:underline">${d.datatype}:${d.record_id}</a></div>
+                    ${prettyPayload ? `<pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80">${prettyPayload.replace(/</g, '&lt;')}</pre>` : ''}
+                    <div class="text-slate-600">${d.timestamp || ''}</div>
+                </td>`;
+
+            body.insertBefore(detailRow, body.firstChild);
+            body.insertBefore(summaryRow, body.firstChild);
+
+            const total = parseInt(countEl?.textContent) || 0;
+            if (countEl) countEl.textContent = (total + 1) + ' events loaded';
+
+            // Trim old rows to keep DOM lean (each event = 2 rows).
+            while (body.children.length > 400) body.removeChild(body.lastChild);
+        });
+    });
+
+    function clearLog() {
+        const body = document.getElementById('webhook-log-body');
+        body.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New webhooks will appear here.</td></tr>';
+        const countEl = document.getElementById('wh-count');
+        if (countEl) countEl.textContent = '0 events loaded';
+    }
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="flex flex-col gap-4 h-full">
+
     <div class="flex items-center gap-3 shrink-0">
         <h1 class="text-lg font-bold text-slate-100">Outbound Webhooks</h1>
         <span class="text-xs text-slate-500 tabular-nums" id="wh-count">{{ events | length }} events loaded</span>
