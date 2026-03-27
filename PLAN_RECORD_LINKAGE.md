@@ -1452,6 +1452,187 @@ No single field provides high coverage across all three sources. Cross-source id
 
 ---
 
+### 4.45 Identifier Temporal Reuse (The Recycled Identifier Problem)
+
+Identity fields are assumed to refer permanently to one entity. In practice, identifiers are recycled by the issuing authority long after their original owner stops using them:
+
+| Identifier type | Recycling mechanism | Typical lifespan before reassignment |
+|---|---|---|
+| Mobile phone number | Carrier reassignment after 90–180 days inactivity | 3–12 months |
+| Email domain (company) | Domain acquired after bankruptcy; new owner receives all old emails | 6–24 months |
+| Company registration number | Some registries reassign dissolved company numbers | Jurisdiction-dependent |
+| IP address / device fingerprint | DHCP, carrier-grade NAT, device resale | Minutes to months |
+
+**The failure mode:**
+
+Person A held phone `+44 7700 900123` until 2023. Person B was issued the same number in 2024. System 3 ingests Person B's record with `+44 7700 900123`. OSI-mapping links B's record to Person A's cluster because the phone number matches an existing identity field value.
+
+Person B is now merged with Person A's golden record. Writeback may update Person A's account across all systems with Person B's data, and vice versa. There is no data quality error detectable at the record level — both records have valid, properly formatted phone numbers.
+
+**Why this differs from §4.12 (temporal lifecycle):** §4.12 covers an entity that changes its identity field values over time. This section covers a static record whose identity field value was previously held by a different entity. The record itself is current and correct.
+
+**Mitigations:**
+
+- **Recency-weighted identity fields:** Phone and email used for cross-system matching should carry a `last_confirmed_at` timestamp. An identity field value that has not appeared in any ingest for more than N months should carry reduced confidence and eventually be excluded from active matching. This is an extension of §4.14 (link confidence decay) applied specifically to identifier reuse risk.
+- **Velocity alert on new-record-to-existing-cluster matches:** If a newly created record immediately links to a cluster whose members were created significantly earlier, flag for human review. Legitimate matches for brand-new records linking to old clusters exist (returning customers) but the age gap is a useful heuristic.
+- **Phone number portability and carrier validation:** For phone numbers specifically, carrier lookup APIs can confirm current assignment. This is expensive to run inline but viable as a nightly validation job for identity fields that anchor large clusters.
+- **Document recycle risk per field type in connector YAML:** A `recycle_risk: high|medium|low` annotation on identity fields informs the confidence decay schedule in §4.14.
+
+---
+
+### 4.46 NULL and Empty-String Pollution in Identity Fields
+
+Two pre-normalisation corruption classes that silently produce mass false-positive links before any identity logic runs:
+
+**Class 1: Empty string treated as a meaningful value**
+
+Many source systems and connectors write `''` (empty string) for unknown, N/A, or absent identity field values rather than `NULL`. PostgreSQL evaluates:
+
+```sql
+WHERE a.email = b.email  -- NULL = NULL is FALSE (correct)
+WHERE a.email = b.email  -- '' = '' is TRUE (wrong)
+```
+
+Every record with an empty-string email is in the same link group. In a 100,000-record Contacts table where 30% of records have no email address but the connector writes `''` for missing values, 30,000 records instantly form one cluster.
+
+**Class 2: Integer type coercion destroys leading zeros**
+
+Some connectors (or intermediate ETL steps) store phone numbers as `bigint` or `integer` instead of `text`. Leading zeros are stripped silently:
+
+| Original value | Stored as bigint | Effect |
+|---|---|---|
+| `0044 7700 900123` (UK international) | `447700900123` | Format change only |
+| `020 7946 0123` (UK London) | `2079460123` | Leading zero dropped |
+| `0612345678` (Netherlands mobile) | `612345678` | Leading zero dropped; becomes 9-digit |
+
+The stripped value now fails to match the correctly formatted value from another system. This is a systematic false-negative generator for any country where national phone numbers begin with 0 (Netherlands, France, Germany, UK domestic format, Australia, etc.).
+
+The inverse also occurs: if System A stores `020 7946 0123` and System B stored the same number as integer `2079460123`, normalisation (`regexp_replace(phone, '\D', '', 'g')`) produces `02079460123` and `2079460123` respectively — still no match.
+
+**Mitigations:**
+
+- **Connector validation rule:** Reject empty strings for identity fields at ingest time. The connector YAML or forward view should coerce `''` to `NULL` before the record reaches `inout_src_*`.
+  ```sql
+  -- In _fwd_{connector}_{type} view:
+  NULLIF(trim(email), '') AS email
+  ```
+- **Phone number storage contract:** All phone number identity fields must be stored as `text`, never as numeric types. Assert in the connector CI pipeline that phone columns have `text` or `varchar` type.
+- **International format normalisation:** Store phones in E.164 format (`+cc-number`) at ingest. This requires knowing the country code, which the connector must supply or infer. A missing country code is preferable to a dropped leading zero — missing produces a null match (no link); dropped zero produces a wrong match (false link).
+- **Null-rate and empty-string-rate monitoring:** Alert when the empty-string rate for any identity field exceeds 0% in a new source, and when it changes by more than 1% between syncs.
+
+---
+
+### 4.47 Test, Synthetic, and Demo Record Contamination
+
+Source systems expose test records, sandbox contacts, and demo data through the same API endpoint as production data. These are records created by developers, QA engineers, sales demo scripts, and onboarding workflows. They are structurally identical to real records and arrive with syntactically valid identity field values.
+
+**Examples of contaminating test records:**
+
+| Field | Test value | Contamination effect |
+|---|---|---|
+| email | `test@example.com`, `qa@yourcompany.com` | Links all test records together; `example.com` domain is IANA-reserved and unusable but syntactically valid |
+| phone | `555-0100`, `07700 900000` (UK Ofcom test range) | Clusters all records with test phone numbers |
+| name | `Test Contact`, `DO NOT DELETE`, `ZZZZ Placeholder` | Harms name-based fuzzy matching benchmarks |
+| company | `Test Company`, `Acme Corp` (fictional name in widespread use) | Acme Corp appears in millions of CRM records across unrelated customers |
+
+**Why this is distinct from token pollution (§4.40):** Token pollution concerns real values (a real company's shared fax number) that are legitimately high-frequency. Test record contamination concerns synthetic values that should not be present in production data at all. The detection mechanism differs:
+
+- Token pollution: frequency analysis (real value, high cardinality)
+- Test contamination: pattern matching (known test patterns, IANA reserved domains, regex for known test strings)
+
+**Compounding effect with frequency blocklist (§4.40):** If enough connectors include test records with `test@example.com`, the value's frequency rises above the blocklist threshold. The blocklist now suppresses it — but silent suppression means the test records become singletons rather than clustering together, making them harder to identify and purge.
+
+**Mitigations:**
+
+- **Test record filter at connector level:** Each connector YAML should declare filter expressions applied before records reach `inout_src_*`:
+  ```yaml
+  exclude_filter: "email LIKE '%@example.com' OR email LIKE '%@test.%' OR name ILIKE 'test %' OR name ILIKE '% test'"
+  ```
+- **IANA reserved domain blocklist:** `example.com`, `example.net`, `example.org`, `test`, `localhost` should be unconditionally excluded from email identity matching.
+- **Pre-onboarding test record audit:** Before bootstrapping system 3, count records matching known test patterns. Any significant count (>0.1% of total) must be filtered or purged from the source before the bootstrap.
+- **Post-bootstrap test record detection:** Run pattern scan after bootstrap. Test records that slipped through are identifiable by inspection of the singleton cluster population (§4.19) — singletons with test-pattern values are likely test records, not genuine under-links.
+
+---
+
+### 4.48 The Writeback-Induced Corroboration Feedback Loop
+
+This section describes a subtle variant of §4.38 (derived source data). §4.38 covers a one-time onboarding event where System 3 was pre-populated from a System 1 export. This section covers an ongoing, live mechanism that operates continuously through the writeback pipeline.
+
+**The loop:**
+
+```
+t=0:  System A has alice@co.com. System B has no email for Alice.
+t=1:  Identity resolution: A and B are in the same cluster via name + phone.
+t=2:  Writeback: MDM writes alice@co.com to System B (sourced from System A).
+t=3:  System B next sync: alice@co.com is now present in System B's ingest.
+t=4:  Identity resolution: alice@co.com appears in both A and B.
+      Confidence: "email corroborated by two independent sources" ← FALSE.
+t=5:  Writeback now has a higher-confidence basis to propagate Alice's identity
+      to any new record that matches on email alone (previously required name+phone).
+```
+
+Each writeback cycle in which a field is written to a target system and then re-ingested strengthens the apparent multi-source corroboration of that field. The MDM acts as an amplifier: it takes a single-source observation, distributes it to N systems, and then re-ingests those N copies as N independent observations.
+
+**Why this is dangerous at scale:**
+
+In a steady-state three-system deployment running hourly syncs, a single confident false merge in week 1 can, by week 4, have produced email corroboration across all three systems — making it appear triple-confirmed when the original source was a single mistaken record. The error is self-reinforcing and increasingly difficult to unwind.
+
+**Distinction from §4.10:** §4.10 covers the case where writeback causes the *target system* to update a field to a new value, which then re-ingests and changes the link graph. §4.48 covers the case where the target system simply stores the written-back value and re-ingests it without changing it — inflating apparent corroboration with no field update occurring.
+
+**Mitigations:**
+
+- **Writeback provenance tagging:** Tag each identity field value with `source_origin: 'writeback'` or `source_origin: 'native'` at ingest time. In the forward view, values written back by the MDM carry a `writeback_echo: true` flag. Identity resolution excludes these from corroboration counting — they are single-source observations regardless of how many systems now hold them.
+  ```sql
+  -- In _fwd_hubspot_contacts:
+  CASE WHEN updated_by_source = 'mdm_writeback' THEN NULL ELSE email END AS email
+  ```
+- **Writeback field exclusion from identity matching:** The most conservative mitigation: fields written back by the MDM are excluded from identity field evaluation entirely. Identity is resolved only on fields the source system populated natively.
+- **Corroboration audit query:** Regularly run a report that identifies clusters where all sources' identity field values share the same first-seen-at timestamp via writeback (i.e., all copies arrived at approximately the same time following a writeback event). These are echo clusters masquerading as corroborated clusters.
+
+---
+
+### 4.49 GDPR Purpose Limitation for Identity Matching (Art. 5(1)(b))
+
+§4.7 covers the mechanics of GDPR erasure on identity fields. This section covers a prior legal question: **whether using a given identity field as a match key is a lawful processing operation at all**, given the original collection basis.
+
+**The problem:**
+
+GDPR Art. 5(1)(b) requires that personal data collected for one purpose not be used for incompatible purposes without a new legal basis. Different data flows have different collection contexts:
+
+| Source system | Typical legal basis | Example data collected |
+|---|---|---|
+| CRM (System 1) | Legitimate interest / contract | email, phone, company name |
+| Support ticket system (System 2) | Contract (support service) | email, name, device info |
+| Finance / billing (System 3) | Contract (payment) | name, billing address, VAT number |
+
+Using an email collected under the support ticket basis **as an identity key** to link to the marketing CRM record is a processing operation. That processing requires a legal basis compatible with the original collection. `Legitimate interest` for identity matching is generally arguable, but:
+
+1. The Data Protection Impact Assessment (DPIA) must explicitly cover identity matching as a processing purpose.
+2. If System 3's billing address was collected under contractual basis for invoicing, using it to cross-reference marketing records may fall outside that basis.
+3. If a subject withdraws consent for marketing, the MDM must not use their marketing-consented email as a bridge to link their support or billing records — the withdrawal may dissolve the identity link's legal basis.
+
+**The data minimisation question (Art. 5(1)(c)):**
+
+If a unique match can be achieved with email alone, is it lawful to also store phone + company + address as identity keys? GDPR data minimisation requires that processing use the minimum data adequate for the purpose. Storing five identity fields when two would suffice may not satisfy minimisation.
+
+**Practical implications for this pipeline:**
+
+- The DPIA for the MDM deployment must list each identity field in use, the source system it originates from, the legal basis under which it was collected, and the argument for why using it as a match key is compatible with that basis.
+- An `identity_fields` section in the connector YAML should carry a `legal_basis` annotation:
+  ```yaml
+  identity_fields:
+    - field: email
+      legal_basis: contract
+      dpia_reference: "DPIA-2025-003 §4.2"
+    - field: phone
+      legal_basis: legitimate_interest
+      dpia_reference: "DPIA-2025-003 §4.3"
+  ```
+- Consent withdrawal must trigger suppression of that field from identity matching — not just from the golden record output — so that the withdrawn field can no longer create or sustain a cluster link. This integrates with the erasure mechanics in §4.7 but operates at the matching layer, not only the storage layer.
+- Consult legal counsel before deploying cross-system identity matching across sources with materially different collection bases (e.g. support + marketing + billing).
+
+---
+
 ## 5. Record Linkage and Onboarding
 
 The three onboarding plans each interact with record linkage differently:
