@@ -12,6 +12,7 @@
 
 - [Configuration Reference](./configuration.md)
 - [Connector Authoring Guide](./connector-authoring.md)
+- [Plugin Hooks](./plugin-hooks.md)
 - [CLI Reference](./cli.md)
 - [Database & Migrations](./database.md)
 - [OSI-Mapping Integration Contract](./osi-mapping-contract.md)
