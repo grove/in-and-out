@@ -600,9 +600,317 @@ These rules run after identity resolution proposes edges, filtering them into ac
 
 ---
 
-## 7. Pros and Cons of Human Curation
+## 7. LLM-Assisted Curation
 
-### 7.1 Advantages
+### 7.1 The Scalability Problem LLMs Solve
+
+The core weakness of human curation is throughput. At 30 seconds per link decision, 5,000 uncertain links take 42 hours of human time. Auto-curation rules (§6.6) reduce this queue by handling the easy cases (high-fanout → block, strong multi-field match → accept), but the remaining cases — the ones where context matters — still need judgment.
+
+LLMs are well-suited to this specific judgment task. Each link curation decision is a self-contained, context-rich question: "Given these two records, are they the same real-world entity?" The input is structured (field names and values), the output is a classification (link / no_link / uncertain), and the reasoning can be explained.
+
+### 7.2 What LLMs Can Do
+
+**Task 1: Classify uncertain link proposals**
+
+For each edge flagged by auto-curation rules as `queue_for_review`, an LLM examines the two records and decides:
+
+```
+Record A (System 1 — CRM):
+  name: "Alice Smith"
+  email: "alice@company.com"
+  phone: "+1-555-1234"
+  address: "123 Main St, Springfield, IL"
+
+Record B (System 3 — ERP):
+  name: "A. Smith"
+  email: "alice@company.com"
+  phone: null
+  address: "123 Main Street, Springfield"
+
+Identity field matched: email
+Question: Are these the same person?
+
+LLM reasoning: The email addresses match exactly. The names are compatible
+("A. Smith" is a plausible abbreviation of "Alice Smith"). The addresses
+match after normalisation ("St" vs "Street"). Phone is missing in System 3,
+which provides no evidence either way. High confidence these are the same entity.
+
+Decision: link
+Confidence: 0.95
+```
+
+This is a task that requires:
+- Understanding that "A. Smith" is an abbreviation of "Alice Smith" (not a different person)
+- Understanding that "St" and "Street" are the same
+- Weighing the significance of a missing phone number (neutral, not negative)
+- Combining weak signals into an overall judgment
+
+SQL-based auto-curation rules cannot do this. Levenshtein distance on names would give a low score for "A. Smith" vs "Alice Smith" (edit distance 6), potentially rejecting a correct match. An LLM understands the semantic relationship.
+
+**Task 2: Detect under-linked entities (missed matches)**
+
+LLMs can scan separate clusters for records that should have been linked but weren't, because the identity fields don't match exactly:
+
+```
+Cluster 17: {System 1: "Alice Smith" <alice@company.com>}
+Cluster 42: {System 3: "Alice R. Smith" <asmith@company.com>}
+
+No identity field match:
+  - email: "alice@company.com" ≠ "asmith@company.com"
+  - name: "Alice Smith" ≠ "Alice R. Smith" (not identity field — uses coalesce strategy)
+
+LLM reasoning: These are likely the same person. "asmith@company.com" is a
+common corporate email pattern for "Alice Smith". The name "Alice R. Smith"
+includes a middle initial. Both are at the same company domain. Recommend
+reviewing for manual link.
+
+Decision: queue_for_review (suspected under-link)
+```
+
+This is the hardest task for rule-based systems. There is no deterministic criterion that matches `alice@company.com` to `asmith@company.com` — it requires understanding corporate email conventions. An LLM can surface these as candidates for a human to confirm (or auto-link at high confidence).
+
+**Task 3: Identify junk values**
+
+LLMs can classify identity values as genuine or junk without a pre-populated blocklist:
+
+```
+Identity value: "info@company.com" (appears in 340 records across 3 systems)
+LLM reasoning: "info@" is a generic departmental email, not a personal identifier.
+Linking 340 records on this value would create a false mega-cluster.
+Decision: add to blocklist
+```
+
+```
+Identity value: "john.smith@gmail.com" (appears in 12 records across 2 systems)
+LLM reasoning: This is a personal email. However, "John Smith" is a very
+common name. 12 records is plausible for coincidental sharing of a common
+name's email. Recommend reviewing the 12 records individually.
+Decision: queue_for_review
+```
+
+**Task 4: Explain curation decisions**
+
+Even when the final decision-maker is human, an LLM pre-processes each case with an explanation. This reduces the 30-second human review to a 5-second confirmation:
+
+```
+Proposed link: System 1 C-1042 ↔ System 3 ERP-9001
+LLM recommendation: LINK (confidence: 0.92)
+Reason: Same email address. Names differ ("Alice Smith" vs "A. Smith") but
+are compatible — likely abbreviation. Addresses are in the same city. No
+contradicting evidence.
+
+[✓ Accept]  [✗ Reject]  [? Defer]
+```
+
+### 7.3 Architecture: Where the LLM Fits
+
+The LLM sits in the curation layer, between identity resolution and the override table. It does not replace identity resolution — it reviews its output.
+
+```
+_id_{target} refreshes
+        ↓
+Auto-curation rules run (§6.6)
+        ↓
+┌─────────────────────────────────────────────┐
+│ Cases routed to LLM:                         │
+│  • queue_for_review edges                    │
+│  • Suspected under-links (cluster pairs)     │
+│  • New junk value candidates                 │
+│                                              │
+│ LLM outputs:                                 │
+│  • auto_link (high confidence)  → override   │
+│  • auto_no_link (high confidence) → override │
+│  • uncertain → human queue                   │
+│  • blocklist_candidate → blocklist           │
+└─────────────────────────────────────────────┘
+        ↓
+Human reviews only LLM-uncertain cases
+        ↓
+Override table updated → next refresh incorporates
+```
+
+**The LLM does NOT:**
+- Modify the `_id_{target}` view or its SQL
+- Run inside PostgreSQL or pg-trickle
+- Have write access to source tables
+- Make irreversible decisions without operator configuration
+
+**The LLM DOES:**
+- Read record pairs from the curation queue
+- Produce a classification + confidence score + natural language reasoning
+- Write to the override table (if configured for auto-accept above a confidence threshold)
+- Write to the human review queue (if confidence is below threshold)
+
+### 7.4 Implementation: LLM Curation Daemon
+
+A new in-and-out daemon mode that processes the curation queue:
+
+```python
+# Pseudocode for LLM curation loop
+for edge in curation_queue.where(status='pending_llm'):
+    record_a = fetch_record(edge.source_a, edge.external_id_a)
+    record_b = fetch_record(edge.source_b, edge.external_id_b)
+
+    prompt = build_prompt(record_a, record_b, edge.identity_field, edge.identity_value)
+    response = llm.complete(prompt)
+
+    decision = parse_decision(response)  # link / no_link / uncertain
+    confidence = parse_confidence(response)
+
+    if confidence >= config.auto_accept_threshold:  # e.g., 0.90
+        # Write directly to override table
+        write_override(edge, decision, reason=response.reasoning, decided_by='llm')
+        edge.status = 'resolved_by_llm'
+    else:
+        # Queue for human with LLM's reasoning attached
+        edge.llm_recommendation = decision
+        edge.llm_confidence = confidence
+        edge.llm_reasoning = response.reasoning
+        edge.status = 'pending_human'
+```
+
+### 7.5 The Prompt
+
+The prompt structure for link classification:
+
+```
+You are reviewing a proposed identity link in a Master Data Management system.
+Two records from different source systems matched on an identity field and may
+represent the same real-world entity. Your job is to assess whether they are
+truly the same entity.
+
+MATCHED IDENTITY FIELD: {field_name}
+MATCHED VALUE: {value}
+
+RECORD A (Source: {source_a}):
+{formatted_fields_a}
+
+RECORD B (Source: {source_b}):
+{formatted_fields_b}
+
+Consider:
+1. Are the non-identity fields consistent with being the same entity?
+   (Names compatible? Addresses in the same area? Dates reasonable?)
+2. Could the matched identity value be coincidental?
+   (Common name? Shared/generic email? Reassigned phone number?)
+3. Are there any fields that contradict the match?
+   (Different gender? Incompatible dates of birth? Different countries?)
+
+Respond with:
+- decision: "link" | "no_link" | "uncertain"
+- confidence: 0.0 to 1.0
+- reasoning: one paragraph explaining your assessment
+```
+
+For under-link detection (scanning separate clusters):
+
+```
+You are reviewing two separate clusters in a Master Data Management system.
+These records did NOT match on any identity field, but they may represent the
+same real-world entity. Your job is to assess whether they should be linked.
+
+CLUSTER {cluster_a} records:
+{formatted_records_a}
+
+CLUSTER {cluster_b} records:
+{formatted_records_b}
+
+Consider:
+1. Could these be the same entity despite the identity fields not matching?
+   (Typos? Nicknames? Different email formats? Name changes?)
+2. How strong is the evidence for a match?
+3. What is the risk if they are falsely linked?
+
+Respond with:
+- decision: "suggest_link" | "no_link" | "uncertain"
+- confidence: 0.0 to 1.0
+- reasoning: one paragraph explaining your assessment
+```
+
+### 7.6 Confidence Calibration
+
+The LLM's confidence score must be calibrated against actual outcomes. Uncalibrated, LLMs tend toward overconfidence — a model that says "0.95 confidence" may only be correct 80% of the time.
+
+**Calibration approach:**
+1. During initial deployment, set `auto_accept_threshold` to 1.0 (effectively disabling auto-accept — all decisions go to human review).
+2. Humans review all LLM recommendations. Track accuracy: what percentage of LLM "link" decisions at confidence 0.9+ were accepted by the human? What percentage of "no_link" decisions?
+3. Once the observed accuracy matches the stated confidence (e.g., 95% of 0.95-confidence decisions are correct), lower the auto-accept threshold to that level.
+4. Continue monitoring. If accuracy drops (e.g., due to a new source system with different data patterns), raise the threshold.
+
+**Expected outcome:** After calibration, the LLM handles 80–95% of the curation queue automatically. The human reviews only the 5–20% where the LLM is genuinely uncertain. This reduces the 42-hour review queue to 2–8 hours.
+
+### 7.7 LLM for Under-Link Detection at Scale
+
+Under-link detection (Task 2 in §7.2) is the hardest curation problem because it requires comparing clusters that the identity rules _didn't_ connect. Naively, this is O(n²) on the number of clusters — impractical for large datasets.
+
+**Approach: Embedding-based candidate retrieval + LLM verification**
+
+1. **Embed each cluster** into a vector using a text embedding model (records concatenated into a text representation).
+2. **Nearest-neighbour search** using vector similarity (cosine distance) to find cluster pairs that are close in embedding space but not linked by identity rules.
+3. **LLM reviews** only the top-K nearest candidates per cluster — a tractable number.
+
+```
+Step 1: Embed
+  Cluster 17 → vector [0.23, -0.14, ...]  (from "Alice Smith alice@company.com 123 Main St")
+  Cluster 42 → vector [0.22, -0.15, ...]  (from "Alice R. Smith asmith@company.com 123 Main Street")
+
+Step 2: Nearest neighbours
+  Cluster 17's nearest unlinked cluster: Cluster 42 (cosine similarity: 0.97)
+
+Step 3: LLM review
+  "Are Cluster 17 and Cluster 42 the same entity?" → "Yes, likely — recommend link"
+```
+
+This scales to millions of clusters because embedding + ANN search is O(n log n), and the LLM only reviews the small number of high-similarity candidates.
+
+### 7.8 Can LLMs Replace Human Curation?
+
+**Short answer:** For routine link decisions, yes. For high-stakes or ambiguous decisions, no.
+
+| Curation Task | LLM Can Replace Human? | Why |
+|---|---|---|
+| Classifying clear matches (abbreviation, formatting differences) | **Yes** | LLMs handle semantic similarity well. After calibration, accuracy matches or exceeds a distracted human reviewer. |
+| Detecting junk values | **Yes** | LLMs recognise generic/placeholder values reliably. |
+| Classifying clear non-matches (contradicting fields) | **Yes** | LLMs detect contradictions (different DOB, different gender) consistently. |
+| Ambiguous matches (similar but not clearly same entity) | **Partially** | LLM provides a recommendation + reasoning, but the final decision should be human. The cost of a wrong link (data corruption) exceeds the cost of human review time. |
+| Under-link detection (missed matches) | **Partially** | The embedding + LLM approach surfaces candidates, but confirming a merge across clusters changes the golden record for potentially hundreds of downstream records. Human sign-off is appropriate. |
+| Regulatory-sensitive links | **No** | In healthcare and finance, automated PII cross-referencing may require documented human judgment. An LLM decision may not satisfy audit requirements. |
+| Novel data patterns | **No** | When a new source system has data patterns the LLM hasn't seen (industry-specific IDs, non-Latin scripts, domain-specific abbreviations), the LLM's confidence is unreliable until re-calibrated. |
+
+**Practical model:** LLM handles the long tail of moderately uncertain decisions. Humans handle the small number of genuinely ambiguous cases and the regulatory-sensitive ones. The LLM-to-human escalation path is always available.
+
+### 7.9 Risks of LLM-Assisted Curation
+
+| Risk | Detail | Mitigation |
+|---|---|---|
+| **Hallucinated reasoning** | The LLM may produce plausible-sounding reasoning for an incorrect decision. A human reviewer trusting the reasoning without checking the data could approve a bad link. | Always display both the LLM reasoning AND the raw record data. The reasoning is a convenience, not a substitute for the data. |
+| **Overconfidence** | LLMs may report high confidence on decisions they should be uncertain about. Without calibration, the auto-accept threshold lets bad decisions through. | Mandatory calibration period (§7.6). Never auto-accept before calibration. |
+| **PII in prompts** | The LLM prompt contains record data, which is PII. Sending PII to an external LLM API (OpenAI, Anthropic) may violate data residency or privacy requirements. | Use a self-hosted model (e.g., local Llama, Mistral) or an API with a Data Processing Agreement and no training on customer data. This is a deployment constraint, not an architectural one. |
+| **Cost** | At $0.01–0.10 per LLM call (depending on model and token count), 5,000 curation decisions cost $50–500. Acceptable for onboarding; may be costly for continuous steady-state curation. | Batch calls. Use a smaller/cheaper model for clear cases, escalate to a larger model for ambiguous ones. |
+| **Inconsistency** | The same record pair presented twice may get different LLM responses (non-deterministic generation). This is confusing if a human overrides an LLM decision and the LLM later contradicts itself. | Set temperature to 0. Cache decisions. Once a decision is made (by LLM or human), store it in the override table — don't re-evaluate. |
+| **Bias amplification** | If the LLM has biases about name patterns (e.g., assuming names from certain cultures are more likely to be the same person), it may systematically over-link or under-link records from those groups. | Audit LLM decisions by demographic segment. Compare acceptance rates across name origins, geographies, and source systems. |
+
+### 7.10 Updated Curation Spectrum
+
+With LLM-assisted curation, the spectrum from §7.3 expands:
+
+```
+← Less curation                                                         More curation →
+
+No review       Blocklist    Auto-rules    LLM-assisted     LLM + human     Human review
+(fully          only         + blocklist   (auto-accept     (LLM pre-       of ALL links
+ automated)                                above threshold) processes,       (full manual)
+                                                            human confirms
+                                                            uncertain)
+```
+
+**Updated recommendation for this system:** Blocklist + auto-curation rules + LLM-assisted curation with human review of LLM-uncertain cases. This achieves the quality of human curation at the throughput of automation for the ~85% of cases where the LLM is confident.
+
+---
+
+## 8. Pros and Cons of Human Curation
+
+### 8.1 Advantages
 
 | Advantage | Detail |
 |---|---|
@@ -613,7 +921,7 @@ These rules run after identity resolution proposes edges, filtering them into ac
 | **Regulatory compliance** | For regulated industries (healthcare, finance), automated cross-referencing of PII may require human sign-off. The curation audit trail satisfies this. |
 | **Reduces onboarding risk** | Curation during the gating or shadow window catches linkage errors before writeback executes, reducing the blast radius of system 3 joining. |
 
-### 7.2 Disadvantages
+### 8.2 Disadvantages
 
 | Disadvantage | Detail | Severity |
 |---|---|---|
@@ -624,26 +932,26 @@ These rules run after identity resolution proposes edges, filtering them into ac
 | **Requires UI investment** | Effective curation requires a purpose-built interface: side-by-side record comparison, cluster visualisation, bulk actions. A SQL table is not a usable curation interface for operators. | **Medium** — an MVP can use a spreadsheet-style view over the curation queue table, but a production system needs a proper UI. |
 | **Incompatible with real-time pipelines** | If the pipeline runs on a 30-second refresh cycle, there is no natural pause for human review. Curation requires either a batch window or an asynchronous hold (gating). | **Medium** — use delta gating or shadow mode to create the review window. |
 
-### 7.3 The Curation Spectrum
+### 8.3 The Curation Spectrum
 
 Curation is not binary (all-or-nothing). The right level depends on the organisation:
 
 ```
 ← Less curation                                     More curation →
 
-No review        Blocklist     Auto-curation    Human review      Human review
-(fully           only          rules +          of uncertain      of ALL links
- automated)                    blocklist        links only        (full manual
+No review        Blocklist     Auto-curation    LLM-assisted      Human review
+(fully           only          rules +          (§7) + human      of ALL links
+ automated)                    blocklist        for uncertain     (full manual
                                                                    MDM)
 ```
 
-**Recommended position for this system:** Blocklist + auto-curation rules + human review of uncertain links. This catches the most dangerous errors (junk values, high-fanout clusters) while keeping the review queue small enough for a single operator.
+**Recommended position for this system:** Blocklist + auto-curation rules + LLM-assisted curation with human review of LLM-uncertain cases (see §7.10).
 
 ---
 
-## 8. Integration Design: Where Curation Fits in the Pipeline
+## 9. Integration Design: Where Curation Fits in the Pipeline
 
-### 8.1 Two Possible Architectures
+### 9.1 Two Possible Architectures
 
 **Architecture A: Curation before identity resolution**
 
@@ -674,7 +982,7 @@ Identity resolution runs normally. A curation check process examines the results
 
 **In the context of onboarding:** Architecture B works naturally with gating and extended shadow mode. The delta gating window or the shadow hold provides the time for the curation cycle. The golden record may be "wrong" during the review, but no writeback executes because deltas are held.
 
-### 8.2 Pipeline With Curation
+### 9.2 Pipeline With Curation
 
 ```
                     ┌──────────────────────────────────────────────┐
@@ -698,7 +1006,7 @@ Identity resolution runs normally. A curation check process examines the results
                     └──────────────────────────────────────────────┘
 ```
 
-### 8.3 Interaction With pg-trickle
+### 9.3 Interaction With pg-trickle
 
 The curation check runs as a **post-refresh hook** — after `_id_{target}` is refreshed but before (or concurrently with) downstream refresh. This can be achieved via:
 
@@ -710,9 +1018,9 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 ---
 
-## 9. Recommendations
+## 10. Recommendations
 
-### 9.1 Before Onboarding System 3
+### 10.1 Before Onboarding System 3
 
 1. **Audit system 3's identity fields.** Run data quality checks:
    - NULL ratio per identity field
@@ -729,13 +1037,14 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 5. **Set cluster size alerts.** Configure monitoring to alert if any cluster exceeds a reasonable threshold (e.g., 100 records).
 
-### 9.2 During Onboarding
+### 10.2 During Onboarding
 
-6. **Use extended shadow mode with curation.** This provides:
+6. **Use extended shadow mode with LLM-assisted curation.** This provides:
    - Immediate visibility into linkage consequences (system-3-caused deltas held in shadow)
    - Time for curation (delta tables are held; no writeback executes)
    - Attribution (which changes were caused by system 3 vs independent)
    - A natural curation queue (the shadow comparison tables contain exactly the records that need review)
+   - LLM pre-processing of the curation queue (§7) to reduce human review time by ~85%
 
 7. **Review in priority order:**
    - First: `system3_caused` `new_record` rows (cross-system inserts — highest risk)
@@ -745,7 +1054,7 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 8. **Run at least two shadow comparison cycles.** The first cycle catches obvious problems. The second cycle after corrections (overrides applied) confirms convergence.
 
-### 9.3 Ongoing (Post-Onboarding)
+### 10.3 Ongoing (Post-Onboarding)
 
 9. **Monitor cluster metrics.** Use `clusters_merged` / `clusters_split` from `pgt_refresh_history` to detect unexpected linkage changes during steady-state operation.
 
@@ -755,7 +1064,7 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 ---
 
-## 10. Open Questions
+## 11. Open Questions
 
 1. **Should OSI-mapping natively support a link override table?** Currently, implementing overrides requires modifying the generated `_id_{target}` view SQL. It would be cleaner if OSI-mapping's YAML supported an `overrides:` section that the engine incorporates automatically. This is a feature request for OSI-mapping, not pg-trickle.
 
@@ -768,3 +1077,7 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 5. **How does curation interact with real-time writeback?** In steady state (post-onboarding), should new links always be auto-accepted, or should the curation queue remain active? If active, there must be a mechanism to hold writeback for clusters with pending curation decisions — essentially permanent shadow mode for uncertain links.
 
 6. **Can probabilistic scoring supplement deterministic linkage without replacing it?** A hybrid model: deterministic matching for the `_id_{target}` view (fast, SQL-native), supplemented by a Python/external scoring step that evaluates uncertain edges and auto-accepts or queues them. This keeps the pg-trickle pipeline simple while adding sophistication where needed.
+
+7. **What is the right LLM deployment model for curation?** Self-hosted models avoid PII concerns but require GPU infrastructure. API-based models (with DPAs) are simpler to deploy but add latency and cost. For onboarding (batch, non-real-time), API-based is likely acceptable. For steady-state continuous curation, self-hosted may be required for cost and latency reasons.
+
+8. **Should LLM curation decisions be treated as first-class overrides or as soft suggestions?** If LLM decisions go directly to the override table, they have the same authority as human decisions and persist until explicitly removed. If they are treated as suggestions, they need human confirmation but reduce the cognitive load per decision. The choice depends on the organisation's risk tolerance and the LLM's calibrated accuracy.
