@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Union
 
 from fastapi import FastAPI, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +29,56 @@ def _make_store(store_dsn: str) -> RecordStore:
         path = store_dsn[len("sqlite:///") :]
         return SQLiteStore(path)
     raise ValueError(f"Unknown store DSN: {store_dsn!r}.  Use 'memory' or 'sqlite:///path.db'.")
+
+
+# Injected into every connector Swagger page to make 4xx/5xx responses visually prominent.
+_SWAGGER_ERROR_SCRIPT = """
+<style>
+  .sim-err-row { background: rgba(239,68,68,.10) !important; outline: 1px solid rgba(239,68,68,.4); }
+  .sim-err-status { color: #f87171 !important; font-weight: 700 !important; font-size: 1.05em; }
+</style>
+<script>
+(function () {
+  'use strict';
+  function _highlight() {
+    document.querySelectorAll(
+      '.swagger-ui table.responses-table td.response-col_status'
+    ).forEach(function (el) {
+      if (el.dataset.simHighlighted) return;
+      var status = parseInt(el.textContent.trim(), 10);
+      if (status >= 400) {
+        el.dataset.simHighlighted = '1';
+        el.classList.add('sim-err-status');
+        var row = el.closest('tr');
+        if (row) row.classList.add('sim-err-row');
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    });
+  }
+  var obs = new MutationObserver(_highlight);
+  document.addEventListener('DOMContentLoaded', function () {
+    obs.observe(document.body, { subtree: true, childList: true });
+  });
+})();
+</script>
+"""
+
+
+def _make_swagger_endpoint(connector_name: str, title: str):
+    """Return a custom /docs handler that injects the error-highlight script."""
+    async def swagger_docs(request: Request) -> HTMLResponse:
+        root_path = request.scope.get("root_path", "").rstrip("/")
+        html = get_swagger_ui_html(
+            openapi_url=root_path + "/openapi.json",
+            title=title,
+            swagger_favicon_url="",
+        )
+        body = html.body.decode()
+        body = body.replace("</body>", _SWAGGER_ERROR_SCRIPT + "\n</body>")
+        return HTMLResponse(content=body)
+
+    swagger_docs.__name__ = f"swagger_docs_{connector_name}"
+    return swagger_docs
 
 
 def create_app(
@@ -96,7 +147,7 @@ def create_app(
             title=f"{connector.system} Simulator",
             description=description,
             version="0.1.0",
-            docs_url="/docs",
+            docs_url=None,       # custom /docs endpoint below (error highlighting)
             redoc_url="/redoc",
             servers=[
                 {
@@ -105,6 +156,12 @@ def create_app(
                 },
             ],
             root_path_in_servers=False,
+        )
+        sub.add_api_route(
+            "/docs",
+            _make_swagger_endpoint(connector.name, f"{connector.system} Simulator"),
+            include_in_schema=False,
+            response_class=HTMLResponse,
         )
         api_router = build_connector_router(
             connector,
