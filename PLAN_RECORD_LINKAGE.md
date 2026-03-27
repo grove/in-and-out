@@ -468,6 +468,142 @@ This requires the writeback daemon to parse structured error responses from APIs
 
 Similarly, a `404 Not Found` response during an update writeback is evidence of a **wrong external_id** — the pipeline believes a record exists in system 3 but it doesn't. This is either a deletion the pipeline didn't know about, or an external_id mismatch caused by an incorrect link. Both cases should surface as curation candidates rather than plain errors.
 
+### 4.16 Transitivity Is an Assumption, Not a Law
+
+OSI-mapping's connected-components algorithm is mathematically correct: if A–B is an edge and B–C is an edge, then {A, B, C} is a cluster. But the underlying assumption — that shared identity field values mean shared real-world identity — is not always transitive in practice.
+
+```
+Record A: executive Alice, phone +1-555-1234 (her assistant's number)
+Record B: assistant Carol, phone +1-555-1234 (her own number)
+Record C: executive Bob,   phone +1-555-1234 (also uses Carol's number)
+
+Edge A–B: phone match  ✓ (same assistant — plausible link, but wrong)
+Edge B–C: phone match  ✓ (same assistant — plausible link, but wrong)
+
+Result: cluster {A, B, C} — Alice, Carol, and Bob merged into one entity
+Direct edge A–C: does not exist (different people, no shared field)
+```
+
+There is no direct false positive between A and C. The merge happens because of a valid-looking chain through B. This is the hardest class of linkage error to detect: there is no single wrong edge to flag — the problem is the combination of two correct-looking edges that happen to pass through a shared intermediary.
+
+**Why this matters differently from other false positives:**
+- The curation queue will not flag A–C as a suspicious link, because A and C have no direct edge — only the indirect cluster membership.
+- The cluster may look reasonable in isolation: all three records share the same phone number, so the cluster appears internally consistent.
+- Splitting requires identifying that B is the hub, not a member, and that A–B and B–C are both coincidental.
+
+**Mitigations:**
+- **Hub detection:** If a single record contributes edges to more than N other records in the same cluster, it may be an intermediary rather than a genuine shared identity. Flag it for curation.
+- **Cross-field corroboration:** Before accepting a transitive link, require at least one direct field match between the terminal records (A and C must agree on at least one identity field, not just both agree with B). This is stricter than current OSI-mapping semantics but prevents transitive false positives.
+- **Link group transitivity control:** Consider whether identity fields should create transitive edges at all, or only within a link group. E.g., phone matches create edges within a link group; two records in the same cluster via different link groups may not actually be the same entity.
+
+### 4.17 Soft Deletes
+
+Most CRMs and ERPs do not hard-delete records. They set a flag — `is_deleted = true`, `archived_at`, `status = 'inactive'` — and the record continues to exist in the database with all its field values intact.
+
+In OSI-mapping's pipeline, a soft-deleted record in a source system is indistinguishable from an active record unless the connector YAML explicitly filters it out. If it is not filtered, it continues to participate in identity resolution:
+
+```
+System 3: contact ERP-9001
+  name:       "Alice Smith"
+  email:      "alice@co.com"
+  is_deleted: true   ← soft-deleted 6 months ago, but still in the API response
+  updated_at: 2025-09-01
+
+System 1: contact C-1042
+  name:       "Alice Chen"
+  email:      "alice@co.com"
+  is_deleted: false
+
+Identity resolution: same email → same cluster
+Golden record: Alice Smith or Alice Chen (depending on conflict resolution priority)
+Writeback: system 1 receives update to align with golden record
+```
+
+Alice left the organisation 6 months ago. Her soft-deleted record still bridges to an active contact in system 1, updating that contact based on stale, logically-deleted data.
+
+**The problem compounds with company-level soft deletes.** A company that was soft-deleted in system 3 may still link to active companies in systems 1 and 2 via tax_id, pulling those active records into a cluster driven by a defunct entity.
+
+**Mitigations:**
+- **Ingest-time filtering:** The connector YAML should support a `filter:` expression that excludes soft-deleted records from identity resolution. Soft-deleted records should be ingested into a separate partition or simply excluded from `inout_src_*` and stored in a separate `inout_src_*_deleted` table for audit purposes only.
+- **Active-only identity resolution:** Identity fields for soft-deleted records should not create edges. Only active records should be identity anchors. A soft-deleted record may still appear in the golden record as a historical contributor, but it should not drive cluster membership.
+- **Propagate soft deletes:** When a source record is soft-deleted, the ingestion daemon should treat it as a logical delete — writing a delete delta rather than ignoring the `is_deleted` flag.
+
+### 4.18 Multi-Valued Identity Fields
+
+OSI-mapping expects scalar identity fields: one email per record, one tax_id per record. Real-world data frequently violates this assumption.
+
+| Scenario | Source data | OSI-mapping behaviour |
+|---|---|---|
+| Person with multiple emails | `emails: ["alice@co.com", "a.smith@personal.com"]` | Only one can be declared as the identity field. The other is ignored for matching. Under-linking results. |
+| Company with multiple tax IDs | `tax_ids: ["US-12345", "EU-67890"]` (post-acquisition) | Only one tax_id can be identity. The second is invisible to the linker. |
+| Phone stored as array | `phones: ["+1-555-1234", "+1-555-5678"]` | Array-valued identity fields are not supported. The field cannot be used for matching. |
+| Contact with work + personal email | Both in separate fields | Only the declared field is used. Matching only occurs on whichever field was chosen. |
+
+**The consequence:** Records that should be linked because they share one of N email addresses will not be linked if the matching address is not in the declared identity field slot. This is an architectural under-linking risk that grows with the richness of source data.
+
+**Options:**
+1. **Pre-ingestion normalisation:** Flatten multi-valued fields before ingestion. Choose one canonical value per record (e.g., the primary email) and write it to the scalar identity field. Document the selection rule in the connector YAML.
+2. **Multiple identity declarations:** Declare multiple fields as identity (e.g., `work_email` and `personal_email`). OSI-mapping creates an edge if either matches. This works if the fields are separate columns, not array elements.
+3. **Explode-and-match (not currently supported):** A forward view that unnests array elements and creates one logical row per value, with the same `_src_id`. Identity resolution runs on the exploded view, then collapses back to source rows. This would require OSI-mapping engine support for array-valued identity fields.
+4. **LLM-assisted matching (**§7**):** Use embedding similarity to surface candidate under-links that the scalar identity resolution missed, then review with LLM or human.
+
+### 4.19 Cluster Singleton Monitoring
+
+A **singleton cluster** is a cluster containing records from only one source system — a record that matched nothing in any other system. In a well-functioning pipeline after full onboarding, singleton counts should be:
+
+- **Expected for system-exclusive entities:** Some contacts genuinely exist only in system 3. Singletons for these are correct.
+- **Suspicious if widespread for an existing system:** If system 1 has 40% singletons after system 3 joins, that means 40% of system 1's contacts have no match in system 3 or system 2. This is either correct (system 1 has unique data) or a sign of under-linking — system 3 has these contacts but the identity rules didn't match them.
+
+Currently there is no metric tracking singleton ratio per source system over time. A rising singleton count in an existing system after onboarding is an early warning of under-linking.
+
+**Recommended monitoring:**
+
+```sql
+-- Singleton ratio per source system
+SELECT
+    source,
+    COUNT(*) FILTER (WHERE cluster_size = 1)  AS singletons,
+    COUNT(*)                                   AS total,
+    ROUND(100.0 *
+        COUNT(*) FILTER (WHERE cluster_size = 1) / COUNT(*), 2) AS singleton_pct
+FROM (
+    SELECT
+        source,
+        COUNT(*) OVER (PARTITION BY _cluster_id) AS cluster_size
+    FROM _id_contact
+) sub
+GROUP BY source
+ORDER BY singleton_pct DESC;
+```
+
+**Expected pattern after adding system 3:**
+- System 3 singletons: high initially (system 3 has many exclusive records), decreasing as ingestion and identity resolution converge.
+- System 1 and 2 singletons: should not change significantly from pre-onboarding baseline. A significant increase means system 3 is not linking to records it should.
+
+This metric should be tracked in `pgt_refresh_history` as a per-source-system aggregate alongside `clusters_merged` / `clusters_split`.
+
+### 4.20 The Bootstrap Problem: The Highest-Risk Refresh
+
+The first time identity resolution runs against the full combined dataset (all three systems, all records), it is not an incremental update — it is a full batch evaluation of the complete identity graph. Every record from system 3 is new. Every potential edge involving system 3 is evaluated simultaneously. The connected-components algorithm runs to completion across the entire graph in a single refresh.
+
+This single refresh is the highest-risk moment in the pipeline's lifetime.
+
+**Why it is uniquely dangerous:**
+- **Maximum new edges:** All system 3 identity edges are created at once. Any junk value in system 3 that creates a high-fanout edge links thousands of records in one shot.
+- **No incremental visibility:** In steady state, DIFFERENTIAL refresh means each cycle affects a small subset of clusters. A problem (new junk value, wrong identity rule) affects a bounded number of clusters per cycle. At bootstrap, there is no such bound — a single bad rule produces the full extent of its damage immediately.
+- **Gating does not prevent the blast:** Source gating prevents identity resolution from running during ingestion. But when the gate lifts, the full resolution runs at once. The blast is deferred, not diminished.
+- **Cluster metrics are not comparable:** Pre-bootstrap, the baseline `clusters_merged` count is zero. The first refresh will show a large `clusters_merged` number — but is it large because the data is rich with real matches, or because something is wrong? There is no prior run to compare against.
+
+**Managing the bootstrap refresh:**
+
+The bootstrap refresh requires a different preparation strategy from steady-state change management:
+
+1. **Run identity resolution against a sample first.** Before ungating all of system 3, ungate a random 1–5% sample. Run identity resolution. Inspect the resulting clusters. Do they look reasonable? Is the singleton ratio sensible? Are there any unexpectedly large clusters? Fix any problems before running against the full dataset.
+2. **Establish a baseline before adding system 3.** Snapshot the current cluster count, singleton counts per system, and cluster size distribution while the pipeline is healthy (systems 1 and 2 only). This gives a comparison baseline for the post-bootstrap result.
+3. **Gate delta tables through bootstrap (Mode B).** Writeback should not execute until the operator has reviewed the bootstrap result. The bootstrap refresh and the first writeback are two separate decisions.
+4. **Set conservative cluster size alerts before bootstrap.** Any cluster that exceeds, say, 50 records after the bootstrap refresh should be held and reviewed before writeback fires. This catches junk value merges automatically.
+5. **Expect the bootstrap to be slow.** The full graph evaluation is O(n log n) or worse. For millions of records, this may take minutes to hours. Budget for it. Do not set pg-trickle timeouts that would interrupt a slow but legitimate bootstrap refresh.
+
 ---
 
 ## 5. Record Linkage and Onboarding
