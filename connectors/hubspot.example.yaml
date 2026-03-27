@@ -12,7 +12,7 @@ connector:
   api_deprecation_deadline: null
 
   connection:
-    base_url: https://api.hubapi.com/crm/v3
+    base_url: https://api.hubapi.com
     timeout:
       connect: "10s"
       read: "30s"
@@ -75,7 +75,7 @@ connector:
           interval: "5m"
         list:
           method: GET
-          path: /objects/contacts
+          path: /crm/v3/objects/contacts
           record_selector: results
           pagination:
             strategy: cursor
@@ -101,16 +101,16 @@ connector:
         operations:
           lookup:
             method: GET
-            path: /objects/contacts/${external_id}
+            path: /crm/v3/objects/contacts/${external_id}
           update:
             method: PATCH
-            path: /objects/contacts/${external_id}
+            path: /crm/v3/objects/contacts/${external_id}
           insert:
             method: POST
-            path: /objects/contacts
+            path: /crm/v3/objects/contacts
           delete:
             method: DELETE
-            path: /objects/contacts/${external_id}
+            path: /crm/v3/objects/contacts/${external_id}
 
       simulator:
         # Single template record; seed_count tells the simulator to generate 5 records from it.
@@ -118,17 +118,17 @@ connector:
         # the engine at the local simulator instead of the real HubSpot API.
         seed_count: 5
         seed_data:
-        - id: "1001"
-          createdAt: "2026-03-20T10:00:00.000Z"
-          updatedAt: "2026-03-20T10:00:00.000Z"
-          archived: false
-          properties:
-            hs_object_id: "1001"
-            firstname: Alice
-            lastname: Smith
-            email: alice.smith@example.com
-            createdate: "2026-03-20T10:00:00.000Z"
-            lastmodifieddate: "2026-03-20T10:00:00.000Z"
+          - id: "1001"
+            createdAt: "2026-03-20T10:00:00.000Z"
+            updatedAt: "2026-03-20T10:00:00.000Z"
+            archived: false
+            properties:
+              hs_object_id: "1001"
+              firstname: Alice
+              lastname: Smith
+              email: alice.smith@example.com
+              createdate: "2026-03-20T10:00:00.000Z"
+              lastmodifieddate: "2026-03-20T10:00:00.000Z"
 
     companies:
       description: HubSpot CRM companies
@@ -141,7 +141,7 @@ connector:
           interval: "5m"
         list:
           method: GET
-          path: /objects/companies
+          path: /crm/v3/objects/companies
           record_selector: results
           pagination:
             strategy: cursor
@@ -167,16 +167,16 @@ connector:
         operations:
           lookup:
             method: GET
-            path: /objects/companies/${external_id}
+            path: /crm/v3/objects/companies/${external_id}
           update:
             method: PATCH
-            path: /objects/companies/${external_id}
+            path: /crm/v3/objects/companies/${external_id}
           insert:
             method: POST
-            path: /objects/companies
+            path: /crm/v3/objects/companies
           delete:
             method: DELETE
-            path: /objects/companies/${external_id}
+            path: /crm/v3/objects/companies/${external_id}
 
       simulator:
         seed_count: 3
@@ -206,7 +206,7 @@ connector:
           interval: "10m"
         list:
           method: GET
-          path: /associations/contacts/companies/batch/read
+          path: /crm/v3/associations/contacts/companies/batch/read
           record_selector: results
           pagination:
             strategy: cursor

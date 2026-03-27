@@ -104,40 +104,98 @@ def _build_openapi_extra(
     if action == "list":
         params: list[dict] = []
         if filter_param:
-            params.append({
-                "name": filter_param,
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "description": "Incremental filter: return records modified after this watermark",
-                "example": "2026-01-01T00:00:00Z",
-            })
-        if pagination is not None:
-            strategy = pagination.strategy
-            if strategy == PaginationStrategy.cursor and pagination.cursor:
-                params.append({
-                    "name": pagination.cursor.request_param,
+            params.append(
+                {
+                    "name": filter_param,
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string"},
-                    "description": "Cursor token for the next page (from previous response)",
-                })
+                    "description": "Incremental filter: return records modified after this watermark",
+                    "example": "2026-01-01T00:00:00Z",
+                }
+            )
+        if pagination is not None:
+            strategy = pagination.strategy
+            if strategy == PaginationStrategy.cursor and pagination.cursor:
+                params.append(
+                    {
+                        "name": pagination.cursor.request_param,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Cursor token for the next page (from previous response)",
+                    }
+                )
             elif strategy == PaginationStrategy.offset:
                 off_cfg = pagination.offset or {}
                 off_p = off_cfg.get("param", "offset") if isinstance(off_cfg, dict) else "offset"
-                lim_p = off_cfg.get("limit_param", "limit") if isinstance(off_cfg, dict) else "limit"
-                params.append({"name": off_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 0}, "description": "Offset (number of records to skip)"})
-                params.append({"name": lim_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 20}, "description": "Maximum records per page"})
+                lim_p = (
+                    off_cfg.get("limit_param", "limit") if isinstance(off_cfg, dict) else "limit"
+                )
+                params.append(
+                    {
+                        "name": off_p,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "default": 0},
+                        "description": "Offset (number of records to skip)",
+                    }
+                )
+                params.append(
+                    {
+                        "name": lim_p,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "default": 20},
+                        "description": "Maximum records per page",
+                    }
+                )
             elif strategy == PaginationStrategy.page_number:
                 pn_cfg = pagination.page_number or {}
                 page_p = pn_cfg.get("page_param", "page") if isinstance(pn_cfg, dict) else "page"
-                pp_p = pn_cfg.get("per_page_param", "per_page") if isinstance(pn_cfg, dict) else "per_page"
-                params.append({"name": page_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 1}, "description": "Page number (1-based)"})
-                params.append({"name": pp_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 20}, "description": "Records per page"})
+                pp_p = (
+                    pn_cfg.get("per_page_param", "per_page")
+                    if isinstance(pn_cfg, dict)
+                    else "per_page"
+                )
+                params.append(
+                    {
+                        "name": page_p,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "default": 1},
+                        "description": "Page number (1-based)",
+                    }
+                )
+                params.append(
+                    {
+                        "name": pp_p,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "default": 20},
+                        "description": "Records per page",
+                    }
+                )
             elif strategy == PaginationStrategy.keyset and pagination.keyset:
                 ks = pagination.keyset
-                params.append({"name": ks.request_param, "in": "query", "required": False, "schema": {"type": "string"}, "description": f"Keyset cursor: return records with {ks.keyset_field} > this value"})
-                params.append({"name": ks.page_size_param, "in": "query", "required": False, "schema": {"type": "integer", "default": ks.page_size}, "description": "Page size"})
+                params.append(
+                    {
+                        "name": ks.request_param,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": f"Keyset cursor: return records with {ks.keyset_field} > this value",
+                    }
+                )
+                params.append(
+                    {
+                        "name": ks.page_size_param,
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "default": ks.page_size},
+                        "description": "Page size",
+                    }
+                )
         if params:
             extra["parameters"] = params
 
@@ -244,13 +302,23 @@ def build_connector_router(
     # Track (method, path) pairs to avoid duplicate registrations.
     registered: set[tuple[str, str]] = set()
 
-    def _add(path: str, methods: list[str], handler, openapi_extra: dict | None = None) -> None:
+    def _add(
+        path: str,
+        methods: list[str],
+        handler,
+        openapi_extra: dict | None = None,
+        summary: str | None = None,
+    ) -> None:
         for m in methods:
             key = (m.upper(), path)
             if key not in registered:
                 registered.add(key)
                 router.add_api_route(
-                    path, handler, methods=[m], openapi_extra=openapi_extra or None
+                    path,
+                    handler,
+                    methods=[m],
+                    openapi_extra=openapi_extra or None,
+                    summary=summary,
                 )
 
     connector_name = connector.name
@@ -275,7 +343,7 @@ def build_connector_router(
             token_endpoint.__name__ = f"token_{connector_name}"
             return token_endpoint
 
-        _add(token_url_path, ["POST"], _make_token_handler())
+        _add(token_url_path, ["POST"], _make_token_handler(), summary="Token")
 
     # ------------------------------------------------------------------
     # Per-datatype routes
@@ -429,7 +497,7 @@ def build_connector_router(
                     )
                     return JSONResponse(body, headers=headers_out)
 
-                list_endpoint.__name__ = f"list_{connector_name}_{dt_name}"
+                list_endpoint.__name__ = f"list_{dt_name}"
                 return list_endpoint
 
             _add(
@@ -444,6 +512,7 @@ def build_connector_router(
                     pagination=pagination,
                     filter_param=filter_param,
                 ),
+                summary=f"List {dt_name}",
             )
 
         # ----------------------------------------------------------
@@ -571,14 +640,25 @@ def build_connector_router(
                         return JSONResponse(display)
 
                     _extra = _build_openapi_extra(_action, _seed, _pk)
+                    _action_labels = {
+                        "lookup": "Get",
+                        "insert": "Create",
+                        "update": "Update",
+                        "delete": "Delete",
+                        "archive": "Archive",
+                        "upsert": "Upsert",
+                    }
+                    _summary = f"{_action_labels.get(_action, _action.title())} {_dt_name}"
 
                     if _has_id:
 
                         async def _ep_with_id(request: Request, record_id: str) -> Response:
                             return await write_endpoint(request, record_id)
 
-                        _ep_with_id.__name__ = f"{_action}_{connector_name}_{_dt_name}"
-                        _add(_fa_path, [_method], _ep_with_id, openapi_extra=_extra)
+                        _ep_with_id.__name__ = f"{_action}_{_dt_name}"
+                        _add(
+                            _fa_path, [_method], _ep_with_id, openapi_extra=_extra, summary=_summary
+                        )
                     else:
                         # No {record_id} in the path — register a wrapper WITHOUT the
                         # record_id parameter so FastAPI does not expose it as a query
@@ -586,8 +666,8 @@ def build_connector_router(
                         async def _ep_no_id(request: Request) -> Response:
                             return await write_endpoint(request, None)
 
-                        _ep_no_id.__name__ = f"{_action}_{connector_name}_{_dt_name}"
-                        _add(_fa_path, [_method], _ep_no_id, openapi_extra=_extra)
+                        _ep_no_id.__name__ = f"{_action}_{_dt_name}"
+                        _add(_fa_path, [_method], _ep_no_id, openapi_extra=_extra, summary=_summary)
 
                 _make_write_handler()
 
@@ -609,6 +689,34 @@ def _wh_path_to_fa(path: str) -> str:
     return path.replace("${webhook_id}", "{webhook_id}")
 
 
+def _build_registration_example(connector: ConnectorConfig) -> dict:
+    """Build an OpenAPI example request body for the webhook registration POST."""
+    reg = connector.webhooks.registration  # type: ignore[union-attr]
+    wh = connector.webhooks  # type: ignore[union-attr]
+
+    # Seed the body from register_body_extra, resolving placeholder tokens to
+    # human-readable example strings so Swagger is self-documenting.
+    body: dict = {}
+    first_event: str | None = None
+    if wh.fan_out and wh.fan_out.routes:
+        first_event = wh.fan_out.routes[0].match
+
+    for key, val_template in reg.register_body_extra.items():
+        if "${route_event}" in val_template:
+            body[key] = first_event or "<event_type>"
+        elif val_template.startswith("${credential:"):
+            cred_name = val_template[len("${credential:") :].rstrip("}")
+            body[key] = f"<{cred_name}>"
+        else:
+            body[key] = val_template
+
+    # Add the callback URL field last.
+    webhook_path = wh.path if wh else "/webhooks/<connector>"
+    body[reg.callback_url_runtime_param] = f"http://engine:9090{webhook_path}"
+
+    return body
+
+
 def _add_webhook_registration_routes(
     connector: ConnectorConfig,
     _add,
@@ -623,6 +731,40 @@ def _add_webhook_registration_routes(
     # Shared in-memory subscription store (keyed by integer ID).
     subscriptions: dict[int, dict] = {}
     counter = itertools.count(1)
+
+    # Build example body once — shown in Swagger so callers can see the expected shape.
+    example_body = _build_registration_example(connector)
+    id_example: dict = {}
+    _set_path(id_example, id_path, 42)
+    register_openapi_extra = {
+        "summary": "Register webhook subscription",
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "register": {
+                            "summary": "Registration payload",
+                            "value": example_body,
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "created": {
+                                "summary": "Subscription created",
+                                "value": id_example,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    }
 
     # ------------------------------------------------------------------
     # POST {register_path} — accept a new subscription, return the ID
@@ -641,7 +783,13 @@ def _add_webhook_registration_routes(
         _register.__name__ = f"webhook_register_{connector.name}"
         return _register
 
-    _add(register_fa_path, ["POST"], _make_register())
+    _add(
+        register_fa_path,
+        ["POST"],
+        _make_register(),
+        openapi_extra=register_openapi_extra,
+        summary="Register webhook subscription",
+    )
 
     # ------------------------------------------------------------------
     # DELETE {deregister_path} — remove a subscription
@@ -657,7 +805,7 @@ def _add_webhook_registration_routes(
             _deregister.__name__ = f"webhook_deregister_{connector.name}"
             return _deregister
 
-        _add(dereg_fa, ["DELETE"], _make_deregister())
+        _add(dereg_fa, ["DELETE"], _make_deregister(), summary="Deregister webhook subscription")
 
     # ------------------------------------------------------------------
     # PUT {renew_path} — renew / heartbeat (no-op, always 200)
@@ -674,7 +822,7 @@ def _add_webhook_registration_routes(
             _renew.__name__ = f"webhook_renew_{connector.name}"
             return _renew
 
-        _add(renew_fa, ["PUT"], _make_renew())
+        _add(renew_fa, ["PUT"], _make_renew(), summary="Renew webhook subscription")
 
     # ------------------------------------------------------------------
     # GET {health_check_path} — verify subscription still exists
@@ -693,4 +841,4 @@ def _add_webhook_registration_routes(
             _health.__name__ = f"webhook_health_{connector.name}"
             return _health
 
-        _add(health_fa, ["GET"], _make_health())
+        _add(health_fa, ["GET"], _make_health(), summary="Webhook subscription health check")

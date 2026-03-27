@@ -77,11 +77,35 @@ def create_app(
     for connector in connector_configs:
         app.state.connectors.append(connector)
 
+        # Build the sub-app description: connector prose + scope note + webhook info.
+        scope_note = (
+            "\n\n---\n"
+            "> **Simulator scope:** These endpoints represent only the resources "
+            "described in the connector specification. This is a purpose-built test "
+            "double for the in-and-out engine — it is **not** intended to be a "
+            f"complete implementation of the {connector.system} API.\n"
+        )
+        webhook_note = ""
+        if connector.webhooks:
+            target = f"`{engine_url}{connector.webhooks.path}`"
+            if connector.webhooks.registration:
+                webhook_note = (
+                    f"\n> **Outbound webhooks:** the engine registers subscriptions via "
+                    f"the endpoints below and the simulator pushes events to {target}."
+                )
+            else:
+                webhook_note = (
+                    f"\n> **Outbound webhooks:** on every mutation the simulator pushes "
+                    f"events directly to {target} (the engine's ingest endpoint)."
+                )
+
+        description = (connector.description or f"Simulated {connector.system} API.") + scope_note + webhook_note
+
         # Each connector gets its own sub-application so it has a dedicated
         # Swagger UI at /{connector.name}/docs with the correct title/description.
         sub = FastAPI(
             title=f"{connector.system} Simulator",
-            description=connector.description or f"Simulated {connector.system} API.",
+            description=description,
             version="0.1.0",
             docs_url="/docs",
             redoc_url="/redoc",
