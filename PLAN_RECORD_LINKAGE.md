@@ -1299,6 +1299,159 @@ These three represent the same address. Standard normalisation cannot bridge the
 
 ---
 
+### 4.40 High-Frequency Non-Discriminating Identity Values (Token Pollution)
+
+Some values that legitimately appear in identity fields carry near-zero discriminating power because they are genuinely shared by many distinct entities:
+
+- Catch-all email addresses: `info@company.com`, `billing@company.com`, `noreply@company.com`
+- Shared office main phone: the main switchboard number for a large organisation
+- Generic addresses: `1600 Amphitheatre Pkwy` — valid, but thousands of employees share it
+- Tax IDs of a parent holding company attributed to all subsidiaries
+
+When such a value appears in a link group, it becomes a hub. The `WITH RECURSIVE` query forms a star cluster of potentially thousands of records that are false positives. The values are syntactically valid, pass normalisation and format checks, and no individual record is wrong. The problem exists only at the distribution level.
+
+**Detection:**
+
+```sql
+-- Flag any email value appearing in more than N records (run per identity field, per source)
+SELECT email, count(*) AS record_count
+FROM inout_src_hubspot_contacts
+WHERE email IS NOT NULL
+GROUP BY email
+HAVING count(*) > 5
+ORDER BY record_count DESC;
+```
+
+**Mitigations:**
+
+- **Frequency-based blocklist:** Any identity field value appearing in more than a threshold fraction of records (e.g. >0.1%) should be excluded from link group matching. Persist in `identity_value_blocklist(field, value, reason, added_at)`. The blocklist must be reviewed at each connector onboarding.
+- **Cardinality monitoring:** Alert when any single identity field value clusters more than 50 records.
+- **Connector YAML hint:** A `require_selective: true` flag triggers per-field distribution checks at ingest.
+- **Pre-bootstrap gate:** Run distribution analysis on all identity fields before ungating system 3. Any value used by more than 10 records must be reviewed before opening the main gate.
+
+---
+
+### 4.41 The Per-Field Independence Assumption (Single-Signal Cluster Formation)
+
+OSI-mapping evaluates each link group independently: if two records share email → they are linked; if they share phone → they are linked. Transitivity then merges everything those links touch. There is no mechanism to require that at least N of M fields must agree before a link is asserted.
+
+**The trap in action:**
+
+```
+Record A: email=x,  phone=null,  company=Acme
+Record B: email=x,  phone=555,   company=null
+Record C: email=null, phone=555, company=Widgets
+
+A–B link: email match (valid)
+B–C link: phone match (valid)
+A–C: no shared signal, but transitively in the same cluster
+```
+
+A and C are now in the same cluster even though they share nothing. A is pulled into C's identity solely via a two-hop transit through B. Each individual link is justified; the resulting cluster is not backed by direct evidence between its most distant members.
+
+**Why this compounds over time:** Every additional link group added to the OSI-mapping YAML increases graph connectivity — not just the precision of each individual link. A system with five link groups can form clusters through four-hop transitive chains where the end records share no signals whatsoever.
+
+**Mitigations:**
+
+- When designing link groups in OSI-mapping YAML, prefer fewer, higher-quality fields over many fields.
+- Compute a "direct corroboration count" for each cluster pair: how many distinct identity fields are shared between every pair of records in the cluster. Expose this in the monitoring dashboard.
+- Set human curation review thresholds for clusters whose member pairs have zero direct corroboration (linked solely by transitive intermediaries).
+- Before adding a new link group, simulate the resulting cluster size distribution in a staging environment — the expected cluster size impact is not linear.
+
+---
+
+### 4.42 Surrogate Key Leakage into Identity Fields
+
+A common connector-authoring mistake is declaring internal surrogate keys as cross-system identity fields:
+
+```yaml
+# WRONG: these are system-internal keys with no semantic meaning across systems
+identity_fields:
+  - salesforce_id       # Only meaningful inside Salesforce
+  - internal_row_id     # Sequential integer assigned independently by each system
+  - record_guid         # UUID generated locally, not shared
+```
+
+**The problem has two failure modes:**
+
+**Mode 1 — Zero links (usually):** Because each system generates its own surrogate keys independently, values never match. No cross-system links are produced. The field pollutes the link group count and adds compute overhead with no benefit.
+
+**Mode 2 — Catastrophic false positives (when namespaces collide):** If two systems use sequential integers, record `id=4891` in CRM A links to record `id=4891` in CRM B — completely wrong. This is particularly dangerous for Contacts tables where both systems start at ID 1 and increment. In a 50,000-record dataset, every record in A will merge with a record in B, producing 50,000 false-positive clusters.
+
+UUID v1 (time-based) carries a non-negligible collision probability across systems running simultaneously on similar hardware. UUID v4 is safe in practice but the authoring error should still be caught.
+
+**Mitigations:**
+
+- **Connector review checklist:** "Is this identity field semantically meaningful to an external observer who has no access to the source system? If not, it is a surrogate key and must not be declared as an identity field."
+- **CI validation:** An identity field with cardinality equal to the total record count is definitionally a surrogate key. Assert in the validation pipeline that identity fields used for cross-system linking have duplicate values across at least one source (i.e. they are non-unique in at least one context — meaning multiple records may share the same email, etc.).
+- **Schema annotation:** Add `internal_key: true` to connector YAML fields that are system-internal references. The validation pipeline rejects these if they appear in `identity_fields`.
+
+---
+
+### 4.43 Bulk Import and Historical Backfill Hazard
+
+The bootstrap problem (§4.20) covers the risk of the very first data load when the identity graph is empty. This section covers a distinct, often more dangerous hazard: **mid-lifecycle bulk imports** — data migrations, historical backfills, post-acquisition CRM consolidations — that occur while writeback is actively running.
+
+**Why mid-lifecycle bulk imports are more dangerous than bootstrap:**
+
+1. The existing cluster graph participates. New records form edges not only with each other but with all existing records.
+2. Writeback is uninhibited. As each batch of records arrives and triggers identity re-evaluation, cluster changes fire writeback to all connected systems immediately.
+3. Data quality corrections cannot be applied retroactively. If bad values in the import batch cause false merges, the writeback has already propagated to all systems before the corrections are applied.
+
+**The sequence of harm:**
+
+```
+t=0:  bulk import begins — 200,000 records written to inout_src_*
+t=1:  _id_contact re-evaluates — transient super-clusters form
+t=2:  _delta_contact fires — thousands of writeback events generated
+t=3:  writeback propagates to all systems
+t=4:  import data quality corrections applied — false merges identified
+t=5:  corrections require manual reconciliation across all systems
+```
+
+**Distinguishing from the bootstrap problem (§4.20):**
+- Bootstrap: first load, identity graph is empty, writeback systems are gated, no propagation risk.
+- Bulk import: mid-lifecycle, active graph, writeback running uninhibited.
+
+**Mitigations:**
+
+- Gate all ingest deltas before the import begins: `SELECT pgtrickle.gate_source('inout_src_*', 'bulk_import_lock');`
+- Apply a full data quality pass to the import batch in a staging table before committing to `inout_src_*`: deduplication, format normalisation, blocklist checks.
+- Run the identity resolution preview (§4.22) against the staged batch to inspect cluster size changes before committing.
+- Ungate only after the cluster distribution has stabilised for at least one full refresh cycle with no cluster size alerts.
+- Treat every medium-to-large data migration as equivalent to a new-system onboarding. Apply Mode B gating (PLAN_ONBOARDING_PROPOSAL.md) even for existing systems receiving bulk data.
+
+---
+
+### 4.44 Signal Coverage Asymmetry and the Fragile Transitivity Chain
+
+In a three-source deployment, identity field coverage is rarely uniform across sources:
+
+| Field        | Source A (CRM) | Source B (Support) | Source C (Finance) |
+|---|---|---|---|
+| email        | 92%            | 78%                | 3%                 |
+| phone        | 45%            | 81%                | 12%                |
+| company_name | 87%            | 23%                | 95%                |
+
+No single field provides high coverage across all three sources. Cross-source identity therefore depends on transitivity: A–B via email, B–C via phone, so A–C by transitivity — even though A and C share no direct identity signal.
+
+**The fragile transitivity chain has three failure modes:**
+
+1. **Source removal collapses the chain.** If source B is removed, all A–C links dissolve. A and C share no direct signals. An entire region of the identity graph collapses silently, without any error — records simply become singletons.
+
+2. **New signal causes mass-merge.** Adding source D with high email coverage across all three sources suddenly creates direct A–D, B–D, C–D links via email, and by transitivity, merges previously-isolated records. The resulting cluster growth event is proportional to source D's coverage — potentially linking the entire record population.
+
+3. **Asymmetric link confidence.** The A–B link (via 92%/78% email coverage) is structurally stronger than B–C (via 23%/12% shared coverage). There is no way to model this confidence asymmetry: the graph treats all transitive edges as equivalent.
+
+**Mitigations:**
+
+- **Coverage matrix audit at onboarding:** For every (source, identity_field) pair, compute coverage %. Document which source pairs have direct shared coverage vs. transitively-only coverage. The transitively-only pairs are structurally fragile.
+- **Redundancy requirement:** Before going live, verify that at least two source pairs have direct coverage on at least one common identity field. If the only connectivity between two sources is transitive via a third, document this explicitly and monitor it.
+- **Fragile-link detection:** Identify clusters where records from source A and source C share no direct identity signal — linked only through source-B intermediaries. Flag these for human review.
+- **New-source impact simulation:** Before onboarding a new source, simulate the link groups it will create and estimate the number of new cluster merges. A high-coverage source bringing a previously-missing field is the highest-risk new-source type.
+
+---
+
 ## 5. Record Linkage and Onboarding
 
 The three onboarding plans each interact with record linkage differently:
