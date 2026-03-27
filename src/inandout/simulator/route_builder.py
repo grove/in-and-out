@@ -436,7 +436,7 @@ def build_connector_router(
                 _make_list_handler(),
                 openapi_extra=_build_openapi_extra(
                     "list",
-                    dt_cfg.seed_data,
+                    dt_cfg.simulator.seed_data if dt_cfg.simulator else [],
                     pk_field,
                     selector=record_selector,
                     pagination=pagination,
@@ -469,7 +469,7 @@ def build_connector_router(
                     _has_id=has_id,
                     _cursor_field=cursor_field_wb,
                     _fa_path=fa_path,
-                    _seed=dt_cfg.seed_data,
+                    _seed=dt_cfg.simulator.seed_data if dt_cfg.simulator else [],
                 ):
                     async def write_endpoint(
                         request: Request,
@@ -589,4 +589,106 @@ def build_connector_router(
 
                 _make_write_handler()
 
+    # ------------------------------------------------------------------
+    # Webhook registration endpoints (derived from registration config)
+    # ------------------------------------------------------------------
+    # When the engine calls WebhookLifecycleManager.register() it POSTs to
+    # the connector's registration.register_path.  In the simulator that
+    # path lives on *this* process, so we generate matching handlers here.
+    # Subscriptions are kept in a simple in-memory dict scoped to the router.
+    if connector.webhooks and connector.webhooks.registration:
+        _add_webhook_registration_routes(connector, _add, registered)
+
     return router
+
+
+def _wh_path_to_fa(path: str) -> str:
+    """Convert ``${webhook_id}`` tokens to FastAPI ``{webhook_id}``."""
+    return path.replace("${webhook_id}", "{webhook_id}")
+
+
+def _add_webhook_registration_routes(
+    connector: ConnectorConfig,
+    _add,
+    registered: set[tuple[str, str]],
+) -> None:
+    """Register POST/DELETE/PUT/GET routes for the webhook lifecycle API."""
+    import itertools
+
+    reg = connector.webhooks.registration  # type: ignore[union-attr]
+    id_path = reg.id_response_path  # e.g. "value.id"
+
+    # Shared in-memory subscription store (keyed by integer ID).
+    subscriptions: dict[int, dict] = {}
+    counter = itertools.count(1)
+
+    # ------------------------------------------------------------------
+    # POST {register_path} — accept a new subscription, return the ID
+    # ------------------------------------------------------------------
+    register_fa_path = reg.register_path
+
+    def _make_register():
+        async def _register(request: Request) -> JSONResponse:
+            body = await request.json()
+            sub_id = next(counter)
+            subscriptions[sub_id] = {**body, "__id": sub_id, "__active": True}
+            resp: dict = {}
+            _set_path(resp, id_path, sub_id)
+            return JSONResponse(resp, status_code=200)
+
+        _register.__name__ = f"wh_register_{connector.name}"
+        return _register
+
+    _add(register_fa_path, ["POST"], _make_register())
+
+    # ------------------------------------------------------------------
+    # DELETE {deregister_path} — remove a subscription
+    # ------------------------------------------------------------------
+    if reg.deregister_path:
+        dereg_fa = _wh_path_to_fa(reg.deregister_path)
+
+        def _make_deregister():
+            async def _deregister(request: Request, webhook_id: int) -> JSONResponse:
+                subscriptions.pop(webhook_id, None)
+                return JSONResponse({}, status_code=200)
+
+            _deregister.__name__ = f"wh_deregister_{connector.name}"
+            return _deregister
+
+        _add(dereg_fa, ["DELETE"], _make_deregister())
+
+    # ------------------------------------------------------------------
+    # PUT {renew_path} — renew / heartbeat (no-op, always 200)
+    # ------------------------------------------------------------------
+    if reg.renew_path:
+        renew_fa = _wh_path_to_fa(reg.renew_path)
+
+        def _make_renew():
+            async def _renew(request: Request, webhook_id: int) -> JSONResponse:
+                if webhook_id in subscriptions:
+                    subscriptions[webhook_id]["__active"] = True
+                return JSONResponse({}, status_code=200)
+
+            _renew.__name__ = f"wh_renew_{connector.name}"
+            return _renew
+
+        _add(renew_fa, ["PUT"], _make_renew())
+
+    # ------------------------------------------------------------------
+    # GET {health_check_path} — verify subscription still exists
+    # ------------------------------------------------------------------
+    if reg.health_check_path:
+        health_fa = _wh_path_to_fa(reg.health_check_path)
+
+        def _make_health():
+            async def _health(request: Request, webhook_id: int) -> JSONResponse:
+                if webhook_id not in subscriptions:
+                    return JSONResponse({"error": "not found"}, status_code=404)
+                resp: dict = {}
+                _set_path(resp, id_path, webhook_id)
+                return JSONResponse(resp, status_code=200)
+
+            _health.__name__ = f"wh_health_{connector.name}"
+            return _health
+
+        _add(health_fa, ["GET"], _make_health())

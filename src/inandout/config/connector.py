@@ -199,6 +199,15 @@ class TimestampFieldConfig(BaseModel):
     target_field: str | None = None  # if set, write normalised value here instead of overwriting
 
 
+class SimulatorConfig(BaseModel):
+    """Demo simulator settings: seed data loaded at startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    seed_data: list[dict[str, Any]] = []
+    seed_count: int = 1  # When seed_data has exactly 1 entry, auto-generate this many records
+
+
 class DatatypeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -214,8 +223,7 @@ class DatatypeConfig(BaseModel):
     timestamp_fields: list[TimestampFieldConfig] = []  # A7: timestamp normalisation
     pii_fields: list[str] = []  # B6: fields containing PII
     api_version: str | None = None  # A6: per-datatype API version override
-    seed_data: list[dict[str, Any]] = []  # Demo simulator: example records loaded at startup
-    seed_count: int = 1  # If seed_data has exactly 1 entry, auto-generate this many records
+    simulator: SimulatorConfig | None = None  # Demo simulator seed data and generation config
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":

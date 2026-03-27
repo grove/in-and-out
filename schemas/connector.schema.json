@@ -163,6 +163,9 @@
         },
         "writeback": {
           "$ref": "defs/writeback.schema.json"
+        },
+        "simulator": {
+          "$ref": "defs/simulator.schema.json"
         }
       },
       "anyOf": [

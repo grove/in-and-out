@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inout.dev/schemas/defs/simulator.schema.json",
+  "title": "Simulator Configuration",
+  "description": "Per-datatype demo simulator settings (seed data loaded at startup).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "seed_data": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "Example records pre-loaded into the simulator store at startup."
+    },
+    "seed_count": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "When seed_data contains exactly one template record, auto-expand it to this many records with unique primary-key values."
+    }
+  }
+}

@@ -551,8 +551,9 @@ def _pk_from_cfg(dt_cfg) -> str:
 
 def _columns_from_cfg(dt_cfg) -> list[str] | None:
     """Return column names derived from seed data, or None if no seed data."""
-    if dt_cfg.seed_data:
-        return [k for k in dt_cfg.seed_data[0] if not k.startswith("__")]
+    seed = dt_cfg.simulator.seed_data if dt_cfg.simulator else []
+    if seed:
+        return [k for k in seed[0] if not k.startswith("__")]
     return None
 
 

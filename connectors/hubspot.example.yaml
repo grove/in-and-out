@@ -112,11 +112,12 @@ connector:
             method: DELETE
             path: /crm/v3/objects/contacts/${external_id}
 
-      # Single template record; seed_count tells the simulator to generate 5 records from it.
-      # Set INOUT_HUBSPOT_BASE_URL=http://simulator:6100/hubspot to point
-      # the engine at the local simulator instead of the real HubSpot API.
-      seed_count: 5
-      seed_data:
+      simulator:
+        # Single template record; seed_count tells the simulator to generate 5 records from it.
+        # Set INOUT_HUBSPOT_BASE_URL=http://simulator:6100/hubspot to point
+        # the engine at the local simulator instead of the real HubSpot API.
+        seed_count: 5
+        seed_data:
         - id: "1001"
           createdAt: "2026-03-20T10:00:00.000Z"
           updatedAt: "2026-03-20T10:00:00.000Z"
@@ -177,21 +178,22 @@ connector:
             method: DELETE
             path: /crm/v3/objects/companies/${external_id}
 
-      seed_count: 3
-      seed_data:
-        - id: "2001"
-          createdAt: "2026-03-18T09:00:00.000Z"
-          updatedAt: "2026-03-18T09:00:00.000Z"
-          archived: false
-          properties:
-            hs_object_id: "2001"
-            name: Acme Corp
-            domain: acme.com
-            industry: TECHNOLOGY
-            numberofemployees: 250
-            annualrevenue: "5000000"
-            createdate: "2026-03-18T09:00:00.000Z"
-            lastmodifieddate: "2026-03-18T09:00:00.000Z"
+      simulator:
+        seed_count: 3
+        seed_data:
+          - id: "2001"
+            createdAt: "2026-03-18T09:00:00.000Z"
+            updatedAt: "2026-03-18T09:00:00.000Z"
+            archived: false
+            properties:
+              hs_object_id: "2001"
+              name: Acme Corp
+              domain: acme.com
+              industry: TECHNOLOGY
+              numberofemployees: 250
+              annualrevenue: "5000000"
+              createdate: "2026-03-18T09:00:00.000Z"
+              lastmodifieddate: "2026-03-18T09:00:00.000Z"
 
     associations:
       description: HubSpot CRM contact-to-company associations
@@ -214,11 +216,12 @@ connector:
             termination:
               - empty_page
 
-      seed_count: 3
-      seed_data:
-        - id: "3001"
-          from:
-            id: "1001"
-          to:
-            - id: "2001"
-              type: contact_to_company
+      simulator:
+        seed_count: 3
+        seed_data:
+          - id: "3001"
+            from:
+              id: "1001"
+            to:
+              - id: "2001"
+                type: contact_to_company

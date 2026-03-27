@@ -59,17 +59,18 @@ async def seed_from_connector(
 ) -> None:
     """Load seed_data declared in each datatype's connector manifest."""
     for dt_name, dt_cfg in connector.datatypes.items():
-        if not dt_cfg.seed_data:
+        sim = dt_cfg.simulator
+        if not sim or not sim.seed_data:
             continue
         pk_field = _pk_field(dt_cfg.ingestion.primary_key if dt_cfg.ingestion else "id")
         cursor_field: str | None = None
         if dt_cfg.ingestion and dt_cfg.ingestion.list.incremental:
             cursor_field = dt_cfg.ingestion.list.incremental.cursor_field
 
-        records = dt_cfg.seed_data
+        records = sim.seed_data
         # Auto-expand when there is exactly one template record and seed_count > 1
-        if len(records) == 1 and dt_cfg.seed_count > 1:
-            records = _expand_seed(records[0], pk_field, dt_cfg.seed_count)
+        if len(records) == 1 and sim.seed_count > 1:
+            records = _expand_seed(records[0], pk_field, sim.seed_count)
 
         await store.seed(
             connector.name,
