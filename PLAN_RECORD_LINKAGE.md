@@ -1633,6 +1633,181 @@ If a unique match can be achieved with email alone, is it lawful to also store p
 
 ---
 
+### 4.50 Locale-Sensitive Field Normalisation (DOB Ambiguity and the Turkish İ Problem)
+
+§4.2 covers standard normalisation: `lower()`, `trim()`, phone formatting, unicode NFC. Two locale-sensitive failure modes fall outside that scope and require explicit handling.
+
+**Failure mode 1 — Date-of-birth format ambiguity (MM/DD vs DD/MM)**
+
+Date-of-birth (DOB) is sometimes used as a secondary identity field, particularly in healthcare, finance, and government-adjacent deployments. Different source systems format dates inconsistently:
+
+| System | DOB stored as | Interpreted as |
+|---|---|---|
+| CRM (US) | `01/02/1980` | January 2, 1980 |
+| Support (EU) | `01/02/1980` | February 1, 1980 |
+
+These are **the same string** — they will match in a WHERE clause. But they represent different entity-confirming facts. If identity resolution uses DOB to break a tie between two otherwise-similar records, a US-format date matching an EU-format date produces a false-positive link with no error surfaced anywhere.
+
+Conversely, if System A stores `1980-02-01` (ISO 8601) and System B stores `01/02/1980` (EU format), these represent the same date but produce a string mismatch — false negative.
+
+**Failure mode 2 — Turkish dotted-I / dotless-i case folding**
+
+Standard PostgreSQL `lower()` is locale-agnostic. In a C or en_US locale:
+
+```sql
+lower('I') = 'i'   -- correct for most languages
+lower('İ') = 'i̇'  -- Unicode lowercase of LATIN CAPITAL LETTER I WITH DOT ABOVE
+```
+
+In the Turkish and Azerbaijani languages, the uppercase of `i` (dotless-i) is `I` (dotless), and the uppercase of `İ` (dotted-i) is the same `İ`. Running `lower()` in a PostgreSQL `C` locale on Turkish names:
+
+- `IŞIK` → `ışık` (correct Turkish lowercase)
+- `lower('IŞIK')` in C locale → `iŞIK` (partially lowercased, broken)
+
+This silently destroys identity field matching for Turkish names stored in differently-cased forms across source systems.
+
+**Mitigations:**
+
+- **ISO 8601 at ingest:** All date values in identity fields must be coerced to `YYYY-MM-DD` at the connector forward view layer. The connector is responsible for knowing its source's date format convention.
+  ```sql
+  -- In _fwd_{connector}_contacts, for a US-format source:
+  to_char(to_date(dob, 'MM/DD/YYYY'), 'YYYY-MM-DD') AS dob
+  ```
+  If format is ambiguous (could be MM/DD or DD/MM), the field must not be used as an identity field until the format is confirmed.
+- **DOB as a confirming field, not a primary key:** DOB has low entropy and high format ambiguity. Design identity rules so DOB is only used to disambiguate within a candidate pair already linked by a higher-quality field (e.g. email + DOB agrees → confidently the same person; DOB alone → never link).
+- **Locale-aware `lower()` for Turkish/Azerbaijani data:** Use `lower(x COLLATE "tr_TR")` or normalise at ingest by applying `translate(upper(x), 'İI', 'ii')` before standard lowercasing. Document the locale assumption in the connector YAML.
+- **Character set audit at onboarding:** If source data contains Turkish, Arabic, or any language with locale-variant case rules, the normalisation pipeline must explicitly handle it before bootstrap.
+
+---
+
+### 4.51 Intentional Dual-Relationship Records (The Same Person, Two Hats)
+
+§4.30 covers legitimate one-to-many identity field sharing: the same value (phone number, email) intentionally belongs to multiple distinct entities (a shared corporate mailbox). This section covers a different scenario: **one person who intentionally has two separate records representing two distinct business relationships with the same organisation**.
+
+**Common examples:**
+
+- A consultant who is both a *vendor contact* (in procurement/finance) and a *customer lead* (in the CRM)
+- A doctor who is a *patient* of the clinic they also work at
+- A company founder who is a *personal customer* of their own company's product AND a *B2B contact* for enterprise sales
+
+In each case, the two records have the same email, the same phone, and often the same name. They are, by every identity field criterion, the same person. But they **must not be merged** — the business contexts are intentionally separate, different teams manage them, different data governance rules apply, and merging produces a broken golden record that is neither a vendor contact nor a customer lead.
+
+**Why this is harder than §4.16 (transitivity) or §4.30 (one-to-many sharing):**
+
+The two records do not share a *community* value — they share the person's own direct identity fields. The block-merge curation override is the correct mechanism, but it requires the deploying team to:
+
+1. Know these dual-relationship records exist before the bootstrap
+2. Create the override before the first identity resolution runs
+3. Maintain the override permanently — it must survive YAML redeployments (§4.35), schema migrations, and curation database restores
+
+If the override is created *after* the first writeback has already propagated a merged golden record to all systems, the operator must manually unwind the merged data in every system.
+
+**Mitigations:**
+
+- **Onboarding questionnaire item:** "Does this source system contain records for individuals who also appear in other source systems in a different capacity?" If yes, enumerate the cases and pre-create block-merge overrides before bootstrap.
+- **Relationship-type field as a structural cue:** If the source system carries a `record_type` or `relationship_type` field (Vendor, Customer, Employee), the identity rule can be conditioned: only match records of the same `relationship_type`. Records of different types enter the curation queue for human review before linking.
+- **Explicit entity-type separation in OSI-mapping YAML:** If the two relationship types are sufficiently distinct, model them as separate entity types (e.g. `vendor_contact` vs `customer_contact`) with separate `_id_*` resolution pipelines. They can still be linked via a `cross_type_relationship` table, but they cannot accidentally merge through transitivity.
+
+---
+
+### 4.52 Curation Override Loss and Silent Reversion
+
+The human curation system (§6) stores block-merge and force-merge overrides in a dedicated table. Those overrides are the primary mechanism by which the MDM respects human judgment over algorithmic identity resolution. This section covers what happens when that override table is damaged or emptied.
+
+**Scenarios that cause override loss:**
+
+| Scenario | Mechanism | Detection |
+|---|---|---|
+| Database restore to earlier snapshot | Override table restored to pre-override state | None (silent) |
+| `TRUNCATE identity_overrides` in migration script | All overrides deleted | None (silent) |
+| Override table excluded from backup | Overrides not restored after DB failure | None (silent) |
+| Connector re-bootstrap reassigns `external_id` values | Existing overrides reference stale external_ids | Overrides silently stop matching |
+| YAML redeployment changes entity type names | Override table uses old entity type keys | Same as above |
+
+**Consequence:** Every blocked merge becomes a real merge. Every forced merge dissolves. All human curation effort is silently undone. The identity graph reverts to the unconstrained algorithmic state. Writeback then propagates the reverted state to all systems — potentially distributing data to systems whose records were manually separated for compliance or business reasons.
+
+The silent nature is the critical hazard: there is no error, no warning, no cluster-size alert that specifically signals "override table was emptied."
+
+**Mitigations:**
+
+- **Override count monitoring:** Persist the count of active overrides after each curation action. Alert if the count decreases by more than a threshold outside of an operator-initiated bulk action. A sudden drop from 847 to 0 is automatically suspicious.
+- **Override table inclusion in backup SLA:** Explicitly include `identity_overrides`, `identity_blocklist`, and all curation tables in the DB backup runbook. Mark them as safety-critical: a restore without these tables is not a valid restore.
+- **Override table referential integrity check on deploy:** The CI/CD pipeline for YAML redeployments should run a check: for each override row, verify that its `external_id` and entity type still exist in the current schema. Stale overrides should surface as a deployment warning, not silently stop matching.
+- **Override re-export before any destructive migration:** Before any operation that could affect the override table (migration, restore, schema rename), export the full override table to a versioned backup. The export is also a human-readable audit record of all curation decisions.
+- **Cluster diff on next refresh:** After any database restore or bulk migration, compare the current cluster assignments to the last known-good snapshot (§4.35). A large number of reclassified records after a low-change data period is a strong signal of override loss.
+
+---
+
+### 4.53 Source-Level Pre-Deduplication Asymmetry
+
+Different source systems enforce different uniqueness constraints at the platform level, before data ever reaches the MDM ingestion pipeline:
+
+| Source | Platform-enforced uniqueness | Implication |
+|---|---|---|
+| Salesforce | Unique email constraint optional; standard duplicate rules can block exact-match creates at API level | MDM may see zero or minimal duplicates on the dimensions Salesforce deduplicates |
+| HubSpot | Unique email per portal (contacts) | Contacts with duplicate email are merged or blocked at HubSpot level |
+| Generic CRM / internal system | No uniqueness constraints; any number of records with identical emails can coexist | MDM sees raw, undeduped data |
+| Finance/ERP | Often no CRM-style deduplication; vendor/customer IDs are unique but contact emails are not | Mixed: structural IDs are clean; free-text identity fields are not |
+
+**Why this creates an identity resolution problem:**
+
+The MDM's identity resolution operates on the assumption that records in `inout_src_*` are the raw population of entities. When source A delivers already-deduplicated records (because Salesforce silently merged them) and source B delivers raw duplicates, the cross-source link graph is inconsistent:
+
+- Source A's cluster has one record per entity (already resolved inside Salesforce)
+- Source B's cluster may have 3–5 records per entity (unresolved duplicates)
+- The MDM links them all via transitivity — producing a cluster that is 3–5× larger than it should be
+- When the MDM writes back the golden record to source A, Salesforce may reject it because the golden record now combines data from duplicate contacts that Salesforce's own rules would have blocked
+
+**The reverse problem:** If a source applies strict deduplication and two people share an email address (e.g. a shared family email), the platform may have already merged them into one record. The MDM ingests one record and cannot detect that it represents two distinct people — the pre-deduplication has destroyed the information needed for correct resolution.
+
+**Mitigations:**
+
+- **Document platform deduplication behavior per source at connector onboarding:** Does the source enforce email uniqueness? Phone uniqueness? At what point in the write path? Record this in the connector YAML.
+- **Deduplication-aware confidence scoring:** Records from sources with platform-enforced uniqueness carry higher per-record identity confidence (that email was checked for duplicates at write time). Records from unconstrained sources carry lower confidence. Weight accordingly in §4.3 ambiguity handling.
+- **Pre-bootstrap duplicate audit per source:** Before ingesting any source into the MDM, count duplicate identity field values within that source. High within-source duplicate rates are a signal that the source requires intra-source deduplication first (§4.27) before cross-source matching produces useful results.
+
+---
+
+### 4.54 Partial-Ingest Transient Identity Instability
+
+A full sync of a source system does not always arrive as a single atomic operation. Connectors paginate API responses, respect rate limits, and may be interrupted mid-sync by timeouts, network errors, or API quota exhaustion. When identity resolution runs on a partial ingest, the resulting cluster assignments may differ materially from those produced when the full ingest completes.
+
+**The two-pass problem:**
+
+```
+t=0:  Connector begins full sync of system 3 (200,000 records)
+t=1:  Connector ingests records 1–50,000 (rate limit hit)
+t=2:  pg-trickle DIFFERENTIAL refresh runs on the partial ingest
+      → Identity resolution produces cluster assignments based on 50,000 records
+      → Writeback fires for all cluster changes triggered by this partial set
+t=3:  Connector resumes, ingests records 50,001–200,000
+t=4:  pg-trickle DIFFERENTIAL refresh runs on the full ingest
+      → Identity resolution re-evaluates with all 200,000 records
+      → Cluster assignments differ from t=2; further writeback events fire
+```
+
+The cluster assignment at t=2 is not a valid intermediate state — it is an artifact of ingest ordering. Records in the second half that would have bridged two clusters were absent at t=2, so the clusters were kept separate, writeback fired with "these are distinct entities", then at t=4 they merge and writeback fires the opposite.
+
+**Why this is worse than the bootstrap problem (§4.20):** The bootstrap (§4.20) happens once and from an empty graph. Partial-ingest instability can happen on any regular sync cycle. If a sync is interrupted frequently (flaky API, aggressive rate limiting), writeback oscillates on every cycle for affected records.
+
+**Relationship to §4.5 (stability under incremental updates):** §4.5 covers oscillation caused by conflicting field values. §4.54 covers oscillation caused by incomplete data — the field values are consistent, but the graph is evaluated in two passes due to operational constraints.
+
+**Mitigations:**
+
+- **Sync completion marker before identity refresh:** The connector writes a `sync_completed_at` timestamp to a control table when it finishes a full sync successfully. pg-trickle's identity refresh is gated on this timestamp being newer than the last refresh. An interrupted sync does not trigger identity resolution.
+  ```sql
+  -- Checked before _id_{target} refresh materialises:
+  SELECT 1 FROM inout_sync_status
+  WHERE connector = 'system3'
+    AND sync_completed_at > last_refresh_at
+    AND sync_status = 'complete';
+  ```
+- **Minimum-completeness threshold:** Even without a completion marker, if fewer than 80% of the expected record count has arrived (estimated from the previous full sync), suppress the identity refresh until the next sync cycle.
+- **Writeback hold during active sync:** While a sync is in-progress, mark the delta views as held. The bridge layer (§2) does not propagate changes to `inout_dst_*` while `sync_in_progress = true` for the relevant source.
+- **Connector reliability monitoring:** Track the fraction of syncs that complete successfully vs. are interrupted. Sources with high interruption rates require either more aggressive connector reliability work (retry logic, checkpoint resumption) or gating policy.
+
+---
+
 ## 5. Record Linkage and Onboarding
 
 The three onboarding plans each interact with record linkage differently:
