@@ -289,7 +289,7 @@ Adding a low-quality source to the pipeline introduces noise into identity resol
 Identity fields are, by definition, personally identifiable information (PII). Record linkage creates cross-references between PII across systems. This has compliance implications:
 
 - **GDPR Article 5(1)(c) — Data minimisation:** Identity fields used for matching must be justified. Using more fields than necessary for linkage may violate minimisation.
-- **GDPR Article 17 — Right to erasure:** Deleting a person from system 1 should propagate. But if their cluster spans systems 2 and 3, does deleting from system 1 mean deleting the cluster? Or just the system 1 edge?
+- **GDPR Article 17 — Right to erasure (mechanics):** Deleting a person's source record is not sufficient. If that record was the conflict resolution winner for any field in the golden record (e.g., the `coalesce` winner for `email`), deleting the source record must trigger re-resolution of that field from the remaining contributors. If no other source holds the field, the field becomes NULL in the golden record. If the golden record changes, reverse mapping re-runs, and all other systems receive update deltas removing or replacing that field. The erasure propagates through the entire pipeline, not just the source table. Additionally, the override table and the curation history must be purged of any rows referencing the deleted record's `external_id` — otherwise deleted PII persists in audit tables.
 - **Cross-system PII exposure:** System 1's tax_id is now visible (through the golden record) to code that writes back to system 2. If system 2 never had access to tax_ids, this may create a new data flow that requires a DPIA (Data Protection Impact Assessment).
 - **Audit trail for links:** Who or what created each identity link, and when? This is relevant for both compliance and debugging.
 
@@ -308,6 +308,165 @@ pg-trickle's DIFFERENTIAL refresh mode reduces the cost by only processing chang
 - Block on identity values (partition the identity resolution by value ranges) to reduce cross-join cost
 - Pre-filter before identity resolution: exclude records with NULL or junk identity values
 - Monitor `_id_{target}` refresh time during onboarding
+
+### 4.9 The Merge-Split Data Loss Trap
+
+When two clusters merge, conflict resolution picks field winners. System 1 has `name = "Alice Smith"` and system 3 has `name = "A. Smith"`. If the conflict resolution strategy (`coalesce` with system 1 priority) picks "Alice Smith", the golden record is "Alice Smith" and a writeback delta updates system 3 to "Alice Smith".
+
+If the merge is later discovered to be wrong and the clusters are split, the system cannot reconstruct the state that existed before the merge:
+
+- The `_id_{target}` view re-runs and assigns separate cluster IDs.
+- Conflict resolution re-runs with only each cluster's own records.
+- Delta views compare the new desired state against the current `base` snapshot.
+- The `base` snapshot for system 3 now shows "Alice Smith" — the value that was written by the previous incorrect writeback.
+- The new delta for system 3 is a **noop** (desired = "Alice Smith", base = "Alice Smith").
+- The original value "A. Smith" is gone from the pipeline. The incorrect merge permanently propagated its change into system 3.
+
+**The split does not restore data.** To recover, the operator must manually correct system 3's record back to "A. Smith" via in-and-out or directly in the source system. The pipeline provides no rollback mechanism for writeback already executed.
+
+This asymmetry makes false positive handling much harder than it appears. Catching over-links **before writeback executes** (via gating, blue/green, or extended shadow mode) is far cheaper than correcting them afterward.
+
+**Implication for override table design:** When adding a `no_link` override to correct a false positive, the override record should capture the pre-merge field values (if known) and flag the affected `external_id`s for manual data review in each source system. The override alone does not fix already-executed writebacks.
+
+### 4.10 Writeback-Induced Identity Changes
+
+The pipeline is bidirectional: ingestion reads from source systems, writeback writes back to them. This creates a feedback loop unique to bidirectional MDM pipelines that does not exist in read-only golden record systems.
+
+The sequence:
+1. System 3 is ingested. A record has no email (`email = NULL`).
+2. The golden record has `email = "alice@co.com"` (contributed by system 1).
+3. Writeback pushes the golden record to system 3 — system 3's record now has `email = "alice@co.com"`.
+4. On the next ingestion cycle, system 3's record is re-ingested with `email = "alice@co.com"`.
+5. The `_id_{target}` view now creates a new edge between system 3 and system 2 (which also has `alice@co.com`).
+6. A cluster merge occurs that was not possible before the writeback.
+
+**Writeback creates identity signals that didn't exist in the source.** The pipeline becomes self-modifying: each write changes what future ingestion sees, which changes future identity resolution, which changes future writes.
+
+This is generally desirable — it is how the pipeline converges toward a consistent state. But it has hazards:
+
+- A writeback based on a false positive propagates the false identity signal into other systems, causing cascading merges.
+- The pipeline may enter an oscillation where writeback alternately adds and removes an identity field, causing repeated merge/split cycles.
+- After several writeback cycles, it becomes impossible to determine which identity field values came from the original source and which were written by the pipeline.
+
+**Mitigation:** The `base` column records the state at last ingestion. Before resolution, compare `base` to the current source value. If they differ, the source was modified (either by the pipeline's own writeback or by an independent user edit). Track `writeback_origin` on ingested rows to distinguish pipeline-written values from user-written values. Do not use pipeline-written identity values as independent corroboration — they are echoes, not new evidence.
+
+### 4.11 Same-Source Deduplication as a Side Effect
+
+Identity resolution creates clusters. A cluster can contain multiple records from the same source system if those records match on an identity field. This is usually correct (two CRM records for the same person are duplicates), but has unexpected consequences in writeback.
+
+When `_delta_{mapping}` is computed for system 3, it generates one row per cluster per mapping — the desired state for that cluster in system 3. If two system 3 records are in the same cluster, the delta may emit a `delete` for the "loser" record (the one not chosen by conflict resolution's source row selection).
+
+**The pipeline deletes records within system 3 that it was not explicitly asked to delete.** The operator who configured the pipeline to sync contacts between systems likely did not intend to trigger intra-system deduplication.
+
+**Cases where this occurs:**
+- System 3 has two records with the same email. They end up in the same cluster. One is the "winner" (drives the golden record), one is the "loser" (slated for deletion).
+- System 1 and system 3 each have a record for the same person. They merge into one cluster. The reverse mapping for system 3 points to system 1's external_id. System 3's record is now the "shadow" and receives a delete delta.
+
+**Mitigation:** The writeback daemon should present same-source deletes as a distinct category requiring explicit operator confirmation, not routine writeback. The curation queue (§6) should flag intra-system delete deltas separately from cross-system update deltas. Connector YAML should support a `prevent_same_source_deletes: true` safeguard for pipelines where intra-system deduplication is out of scope.
+
+### 4.12 Temporal Linkage and Entity Lifecycle
+
+OSI-mapping's identity resolution is point-in-time: it evaluates the current state of all records and assigns clusters based on current field values. There is no concept of a link being valid "from date X to date Y."
+
+This creates correctness problems for several real-world scenarios:
+
+| Scenario | What Happens | Problem |
+|---|---|---|
+| **Company acquisition** | Company A acquires Company B. System 3 merges them (same tax_id now). Systems 1 and 2 have separate records. | After acquisition, identity resolution links them. Pre-acquisition records that referenced Company B get updated to reference Company A's external_id. Historical records become inaccurate. |
+| **Person name change** | A person legally changes their name. System 1 updates to the new name; system 3 still has the old name. | Depending on conflict resolution priority, the new or old name wins. The loser system is updated. If the identity field was name-based, the link may break entirely (under-link) until system 3's data is corrected. |
+| **Email reassignment** | A company reassigns `alice@co.com` from Alice to Bob. System 1 updates; system 3 still associates it with Alice. | The email now creates a false positive link between Alice (in system 3) and Bob (in system 1). They merge into one cluster. Data corruption follows. |
+| **Record reuse** | System 3 deletes a contact and reuses the same `external_id` for a completely different person. | System 3's ingested record matches all historical identity fields for the old contact. The new person is linked to the old person's cluster across all systems. |
+
+**Mitigation options:**
+- **Effective date on identity fields:** Allow identity field matches to be scoped to a time range. Two records match only if their `email` overlapped in time. Not currently supported in OSI-mapping.
+- **Tombstone records:** When a source record is deleted, ingest a tombstone row (present but marked deleted) rather than removing it. This preserves the historical cluster membership while flagging the record as inactive.
+- **Audit log of cluster changes:** Record every cluster merge/split with timestamps. When a link breaks (and a loser record receives deletion), the operator can inspect the history to understand what changed and when.
+
+### 4.13 Cross-Entity-Type Linkage Dependencies
+
+MDM pipelines typically manage multiple entity types: contacts, companies, deals, orders. These entity types are linked — contacts belong to companies, deals are associated with contacts and companies. OSI-mapping resolves FK references via the `references:` declaration in the YAML.
+
+Linkage errors in one entity type propagate to related entity types through these FK dependencies:
+
+```
+Company X (system 1) ←→ Company Y (system 3)  [FALSE POSITIVE — different companies]
+
+  ↓ company linkage is wrong
+
+Contact A references Company X
+Contact B references Company Y
+  → FK resolution maps both to the same merged company
+  → Contact A and Contact B are written back with the same company_id
+  → System 3 now shows Contact A under Company Y (wrong)
+  → System 1 now shows Contact B under Company X (wrong)
+```
+
+The company linkage error propagates to every contact in both companies. The blast radius is not N records — it is N records multiplied by the number of contacts per company.
+
+**Implications:**
+- Entity types with more FKs (contacts referencing companies, orders referencing contacts _and_ companies) have higher blast radius from linkage errors in their referenced entities.
+- Identity resolution should be run in **dependency order**: entity types with no incoming FKs (companies) should be resolved first, then entity types that reference them (contacts). Running contact identity resolution before company identity resolution means contact FK mappings are computed against an unresolved company graph.
+- The `clusters_merged` metric (proposed in PLAN_ONBOARDING_PROPOSAL.md) should be tracked per entity type, not just per target. A `clusters_merged = 1` for companies could affect thousands of contacts.
+- Curation priority should weight linkage decisions by downstream FK fan-out: linking two large companies is higher-risk than linking two contacts.
+
+### 4.14 Link Confidence Decay
+
+A link established today may be wrong tomorrow, even if it was correct when created. The most common cause is **the supporting evidence changing in the source data** after the link was established.
+
+```
+2024: System 1 has alice@co.com. System 3 has alice@co.com. Link created.
+2026: System 3 corrects the email to a.smith@co.com (different person who had been using Alice's old email).
+      The email identity edge between system 1 and system 3 is now broken.
+      OSI-mapping re-runs identity resolution. The link disappears. The cluster splits.
+      Writeback fires to undo the 2-year-old merge.
+```
+
+Less obviously, links can decay when the override table becomes stale:
+
+```
+2024: Operator creates a 'link' override for System 1 C-1042 ↔ System 3 ERP-9001.
+      Reason: same person, different emails at the time.
+2026: System 3 ERP-9001 is reassigned to a different person (employee turnover).
+      The override still forces the link. Now C-1042 (Alice) is linked to ERP-9001 (Bob).
+      The override is wrong but has no expiry. It persists indefinitely.
+```
+
+**Mitigation:**
+- Add `expires_at` to `inout_link_overrides`. Expired overrides are automatically re-queued for review.
+- Add `evidence_snapshot` to `inout_link_overrides` — a JSONB record of the identity field values that justified the override at the time it was created. When the supporting evidence changes (because source data was updated), the system can detect that the override's original justification no longer holds and flag it for re-evaluation.
+- Track `last_confirmed_at` on overrides. An override that has not been confirmed in 12+ months should be re-reviewed.
+- Monitor cluster membership changes. If a cluster that was manually linked (via override) splits in identity resolution, the split is a signal that the original linking evidence has weakened.
+
+### 4.15 Writeback Rejection as a Linkage Signal
+
+When the writeback daemon attempts to insert a record into system 3 and the API returns an error indicating the record already exists, this is not merely a writeback error — it is direct evidence of an **under-link in the identity resolution**.
+
+The pipeline computed an `insert` delta because, from the golden record's perspective, system 3 does not have this entity. But the source system itself says otherwise. The entity exists in system 3 under a different `external_id` than the pipeline knows about — a record that was not matched during identity resolution.
+
+**The API rejection is evidence of a missed match.** This feedback should flow back to the linkage layer:
+
+```
+Writeback daemon → POST /contacts to system 3
+System 3 API   → 409 Conflict: "Record with email alice@co.com already exists (id: ERP-9001)"
+
+Expected handling:
+  1. Do not retry as a plain writeback error.
+  2. Extract the conflicting external_id from the error response (ERP-9001).
+  3. Write to the curation queue:
+       suspected_under_link:
+         cluster_id:       <from the insert delta>
+         source_a:         system1  (or whichever has this record)
+         source_b:         system3
+         external_id_b:    ERP-9001  (extracted from rejection response)
+         evidence:         "insert rejected: record already exists"
+  4. Fetch system3/ERP-9001 and add it to the shadow comparison.
+  5. Route to LLM curation (§7.2) or human review.
+  6. If confirmed as under-link: ingest ERP-9001, create link override, re-run identity resolution.
+```
+
+This requires the writeback daemon to parse structured error responses from APIs and distinguish "already exists" rejections from other errors (rate limits, validation failures, server errors). Not all APIs return machine-readable conflict responses, but for those that do, this is a high-value signal that costs nothing to collect.
+
+Similarly, a `404 Not Found` response during an update writeback is evidence of a **wrong external_id** — the pipeline believes a record exists in system 3 but it doesn't. This is either a deletion the pipeline didn't know about, or an external_id mismatch caused by an incorrect link. Both cases should surface as curation candidates rather than plain errors.
 
 ---
 
