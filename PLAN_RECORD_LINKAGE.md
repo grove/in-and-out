@@ -962,6 +962,150 @@ ADD COLUMN min_occurrence_count INT DEFAULT 1;
 -- requiring manual entry
 ```
 
+### 4.31 Record Resurrection (Delete + Re-Create With New ID)
+
+A record deleted from system 3 and later re-created in the same organisation gets a new `external_id`. From the pipeline's perspective, the old and new records are entirely unrelated entities.
+
+**The sequence:**
+```
+2025-01-10: ERP-9001 (Alice Smith, alice@co.com) ingested into pipeline.
+            Cluster formed: {C-1042 (sys1), ERP-9001 (sys3)}.
+
+2025-06-01: ERP-9001 deleted in system 3 (Alice left the company).
+            Ingestion marks ERP-9001 as deleted.
+            Cluster {C-1042, ERP-9001} loses its system 3 member.
+            _delta_system1 emits noop (C-1042 still exists, unchanged by the split).
+
+2026-01-15: Alice returns. System 3 creates ERP-7712 (Alice Smith, alice@co.com).
+            Ingestion creates new row for ERP-7712.
+            Identity resolution: ERP-7712 ↔ C-1042 via email → cluster re-merges. ✓ (correct)
+
+BUT:
+            Between June 2025 and January 2026, did _delta_system1 emit an insert
+            for a "new" Alice (from cluster containing only C-1042)?  Depends on
+            whether the golden record changed or a noop was emitted.
+
+            If a different system (system 2) had an entry for Alice under a third
+            external_id, and that entry was used to push data toward system 1 and
+            system 3 during the gap — on re-create, ERP-7712 may receive a writeback
+            immediately (correct) but with field values from the gap period that
+            may differ from what system 3 stored when Alice originally left.
+```
+
+The deeper problem arises when the resurrection happens with a *different* email or phone — the new record does not re-link to the old cluster:
+
+```
+ERP-9001 (alice@co.com) deleted.
+ERP-7712 (a.smith@co.com) created — new email format after IT policy change.
+
+Identity resolution: ERP-7712 ≠ C-1042 (different email, no other shared fields)
+Result:
+  Cluster 1: {C-1042} — system 1 now has Alice as a singleton
+  Cluster 2: {ERP-7712} — system 3's resurrection is a new singleton
+
+_delta_system1: insert Alice (from cluster 2's golden record) into system 1
+→ system 1 now has TWO Alice records: C-1042 (original) and a new duplicate.
+```
+
+**This is an under-link caused by identity field change at the source, not by a bad identity rule.** It is not detectable by the pipeline without additional context about the source's internal identity continuity.
+
+**Mitigations:**
+- **Resurrection detection via identity field lookup:** When a new record is ingested with identity fields that closely match a recently-deleted record (same name + different email, or same phone + different name), flag it as a possible resurrection and route to curation queue.
+- **Source system resurrection signals:** Some APIs include a `merged_from` or `previous_id` field when a record is recreated. The ingestion daemon should consume this as a forced link override — ERP-7712 is the same entity as ERP-9001.
+- **Re-ingestion window:** When a record is deleted, do not immediately remove it from the identity graph. Keep a ghost row (marked deleted) for a configurable window (e.g., 90 days). If a record with similar identity fields appears within the window, treat it as a resurrection candidate before treating the deletion as final.
+
+### 4.32 N-System Scaling Hazard
+
+The document is framed around a 3-system pipeline. The hazard magnitude grows with each additional system onboarded.
+
+**Why N matters:**
+
+When system 2 was added to a system 1 pipeline, it could only create edges to system 1's clusters. When system 3 was added, it could create edges to clusters in both systems 1 and 2. When system 4 is added, it can create edges to clusters spanning all three existing systems — including clusters that were formed by previous onboardings and whose correctness may have been validated months ago.
+
+| Systems onboarded | Max clusters a new system can touch | Bootstrap re-merge blast radius |
+|---|---|---|
+| Adding system 2 | Clusters from system 1 only | Low |
+| Adding system 3 | Clusters across systems 1–2 | Medium (documented in PLAN_ONBOARDING_*.md) |
+| Adding system 4 | Clusters across systems 1–3, including merged clusters | **Higher** — bridges clusters that were formed by prior onboardings |
+| Adding system N | Clusters across all N-1 systems | **Compounds with each prior onboarding** |
+
+Each prior onboarding produced cluster merges. Those merged clusters are now larger than the original singleton clusters. A single false-positive edge from system N can merge two previously-validated multi-system clusters — creating a cascade that undoes previously reviewed identity resolution decisions.
+
+**Specific risks that grow with N:**
+- **Re-merge blast radius:** A false positive in system N bridges two clusters that each span N-1 systems. The resulting merged cluster spans N systems. Writeback fires to all N systems.
+- **Cluster validation becomes harder:** After 5 onboardings, each cluster may have records from 5 systems. Verifying that a cluster is correct requires checking all 5 systems' records. This does not scale to manual review.
+- **Junk value super-clusters:** A junk value (e.g., a generic phone number) that was present in 3 systems and blocked before onboarding may reappear in system N under a different representation. The blocklist entry for the normalised value may not cover the new variant. The junk value bridges all N systems in one refresh.
+- **Performance degrades:** The connected-components algorithm's worst-case performance worsens as the graph becomes denser with each new system. A junk value in system N that links 1,000 records from each of the N systems creates a clique of N×1,000 records — the recursion depth and join cost explode.
+
+**Recommended scaling practice:**
+- The pre-onboarding precision/recall evaluation (§4.22) becomes *more* important, not less, as N grows. Each onboarding risks more than the previous one.
+- Cluster size limits (§4.4) should be tightened as N grows. A cluster of 20 records is suspicious with 3 systems; it may still be legitimate with 5 systems if each contributes 4 records. Recalibrate limits after each onboarding.
+- The progressive identity field rollout (§4.25) becomes mandatory for high-N pipelines — adding all identity fields at once when joining system 5 creates O(N×fields) new edge evaluation combinations.
+
+### 4.33 Confidence Not Exposed in Golden Record Output
+
+A cluster formed via a validated tax_id match (high confidence) and a cluster formed via a name+city match (low confidence) produce identical `contact` view output. Downstream consumers cannot distinguish them.
+
+This matters for:
+
+- **BI dashboards:** A report built on the `contact` golden record treats all records as equally trustworthy. Low-confidence merges silently distort aggregate metrics (e.g., revenue per customer counts a cluster of 4 loosely-linked records as one customer).
+- **ML models:** A model trained on golden records learns from both high- and low-confidence identity decisions. Low-confidence merges introduce label noise. The model cannot weight records by identity confidence.
+- **Downstream integrations:** A system 4 that reads from the golden record to populate its own database has no way to limit ingestion to high-confidence entities.
+- **Audit and compliance:** An auditor reviewing why system 2 received an update for a given record cannot determine from the golden record how confident the pipeline was that the update was correct.
+
+**Proposed addition to golden record output:**
+
+```sql
+-- Additional columns on the {target} / _resolved_{target} view:
+_link_confidence     TEXT,    -- 'high' / 'medium' / 'low' / 'manual'
+_link_basis          TEXT[],  -- identity fields that formed the cluster
+                              -- e.g., ARRAY['tax_id', 'email']
+_cluster_size        INT,     -- number of source records in this cluster
+_cluster_source_count INT,    -- number of distinct source systems in cluster
+_has_pending_curation BOOL,   -- true if any edge in this cluster is in
+                              -- the curation queue or has an override
+```
+
+`_link_confidence` derivation:
+- `manual`: cluster was formed or modified by a human override in `inout_link_overrides`
+- `high`: all links formed via strong unique identifiers (tax_id, SSN, DUNS)
+- `medium`: links formed via email or composite key (name+DOB)
+- `low`: links formed via weak fields (phone, name alone) or transitively through medium/low edges
+
+These columns are computable from `_id_{target}` metadata without changes to the OSI-mapping engine — they can be added to the bridge layer or as a wrapper view over the generated `{target}` view.
+
+### 4.34 Third-Party Data Enrichment as Identity Field Source
+
+When identity field values are populated by external enrichment services (Clearbit, ZoomInfo, Apollo, etc.) rather than from the authoritative source systems, those values create identity edges not grounded in actual source data.
+
+**The problem:**
+
+```
+System 1 (CRM): contact C-1042 — Alice Smith, email=alice@co.com
+Enrichment (ZoomInfo): adds phone=+1-555-1234 to C-1042 in the CRM
+
+System 3 (ERP): contact ERP-9001 — Bob Jones, phone=+1-555-1234
+                (Bob uses the same number as Alice — office landline)
+
+Identity resolution: C-1042 and ERP-9001 share phone → same cluster
+Golden record: Alice Smith merged with Bob Jones
+
+ZoomInfo was wrong about Alice's phone (or used a shared office number).
+The enrichment error propagated directly into cluster composition.
+```
+
+The enrichment-sourced value is indistinguishable from a system-originated value in the identity resolution input. The pipeline treats them identically — an edge is an edge, regardless of how the matching field value got there.
+
+**Additional risks:**
+- **Enrichment staleness:** ZoomInfo updates its database on its own schedule. A phone enriched in 2022 may be stale by 2026. Stale enrichment values that no longer match reality create edges that should not exist, and make identity oscillation (§4.5) more likely as enrichment values change on enrichment refresh cycles.
+- **Enrichment coverage gaps:** Enrichment services often have better coverage for some geographies, industries, or company sizes than others. Uneven coverage means identity resolution quality is uneven in ways that are invisible from the pipeline's perspective.
+- **Circular enrichment:** The pipeline writes to system 3 via writeback. System 3's enrichment service reads system 3's data. The enrichment service adds enriched values back to the pipeline via ingestion. The pipeline now has enriched values derived from its own writeback outputs as identity evidence. The enrichment is an echo, not independent data.
+
+**Mitigations:**
+- **Track field provenance:** Add a `_field_source` metadata column to forward views (or to `inout_src_*` tables). Record whether each field value came from the authoritative source API or from an enrichment overlay. The `_id_{target}` view can be configured to use only source-originated values for identity matching, even if enriched values are stored for display.
+- **Treat enriched identity fields as lower trust:** Enrichment-sourced identity fields should be limited to supplementary matching — they can break ties or increase confidence in an existing link, but they should not independently create new cluster edges. Implement as a lower-priority identity tier that only fires when the primary (source-originated) identity fields have not already linked the records.
+- **Enrichment field separation:** Store enriched values in separate columns (`email_enriched`, `phone_enriched`) rather than overwriting the source-originated columns. Identity resolution uses only the authoritative columns; downstream consumers choose which to display.
+
 ---
 
 ## 5. Record Linkage and Onboarding
