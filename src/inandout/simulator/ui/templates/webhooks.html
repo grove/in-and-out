@@ -10,7 +10,8 @@
         <div class="ml-auto flex items-center gap-2">
             <input type="text" id="wh-search" placeholder="Filter…" oninput="filterLog('webhook-log-body', 'wh-search')"
                 class="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-500 w-36 focus:outline-none focus:border-slate-500">
-            <button onclick="clearLog()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear display</button>
+            <button onclick="clearLog()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear
+                display</button>
         </div>
     </div>
 
@@ -40,12 +41,8 @@
                     else '' %} {% set detail_id='wh-detail-' ~ loop.index %} {% set short_url='/' ~
                     ev.webhook_url.split('/', 3)[3] if ev.webhook_url else '' %} <tr
                     class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
-                    data-detail="{{ detail_id }}"
-                    data-status="{{ status_text }}"
-                    data-op="{{ ev.operation or '' }}"
-                    data-sys="{{ sys }}"
-                    data-dt="{{ ev.datatype or '' }}"
-                    data-url="{{ short_url }}"
+                    data-detail="{{ detail_id }}" data-status="{{ status_text }}" data-op="{{ ev.operation or '' }}"
+                    data-sys="{{ sys }}" data-dt="{{ ev.datatype or '' }}" data-url="{{ short_url }}"
                     onclick="document.getElementById('{{ detail_id }}').classList.toggle('hidden')">
                     <td class="px-3 py-1.5 {{ status_cls }}">{{ status_text }}</td>
                     <td class="px-3 py-1.5 text-slate-400">{{ op_icons.get(ev.operation, '·') }}</td>

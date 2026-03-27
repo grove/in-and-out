@@ -81,8 +81,8 @@
 <script>
     window._connectorCallbackParams = {
         {% for conn in connectors | selectattr("webhooks") | selectattr("webhooks.registration") %}
-        {{ conn.name | tojson }}: {{ conn.webhooks.registration.callback_url_runtime_param | tojson }}{% if not loop.last %},{% endif %}
-        {% endfor %}
+    { { conn.name | tojson } }: { { conn.webhooks.registration.callback_url_runtime_param | tojson } } {% if not loop.last %}, {% endif %}
+    {% endfor %}
     };
 
     document.addEventListener('simulator:request', function (e) {
@@ -97,7 +97,7 @@
             // Skip if already rendered server-side
             if (document.getElementById('reg-row-' + connector + '-' + subId)) return;
             let sub = {};
-            try { sub = JSON.parse(d.request_body_json || '{}'); } catch (_) {}
+            try { sub = JSON.parse(d.request_body_json || '{}'); } catch (_) { }
             const cbParam = window._connectorCallbackParams[connector] || 'callback_url';
             const tr = document.createElement('tr');
             tr.id = 'reg-row-' + connector + '-' + subId;

@@ -66,6 +66,7 @@ _SWAGGER_ERROR_SCRIPT = """
 
 def _make_swagger_endpoint(connector_name: str, title: str):
     """Return a custom /docs handler that injects the error-highlight script."""
+
     async def swagger_docs(request: Request) -> HTMLResponse:
         root_path = request.scope.get("root_path", "").rstrip("/")
         html = get_swagger_ui_html(
@@ -147,7 +148,7 @@ def create_app(
             title=f"{connector.system} Simulator",
             description=description,
             version="0.1.0",
-            docs_url=None,       # custom /docs endpoint below (error highlighting)
+            docs_url=None,  # custom /docs endpoint below (error highlighting)
             redoc_url="/redoc",
             servers=[
                 {

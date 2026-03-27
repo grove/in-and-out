@@ -85,6 +85,9 @@ connector:
       deregister_path: /event/subscription/${webhook_id}
       renew_path: /event/subscription/${webhook_id}
       health_check_path: /event/subscription/${webhook_id}
+      # NOTE: the engine only checks HTTP 200/404 from this endpoint.
+      # Tripletex can also return 200 with status "DISABLED" in the response
+      # body — that case is not yet handled (would need health_check_active_field).
       id_response_path: value.id
       callback_url_runtime_param: targetUrl
       per_route_registration: true
@@ -93,6 +96,10 @@ connector:
         authHeaderName: X-Simulator-Auth
         authHeaderValue: "${credential:tripletex_webhook_secret}"
     # Restrict inbound deliveries to Tripletex's outbound IP ranges.
+    # NOTE: the simulator never enforces this — it doesn't run the engine's
+    # IpAllowlistMiddleware. The engine has no dev-mode bypass either, so if
+    # you run the engine locally against the simulator you must either empty
+    # this list or arrange for the correct source IP to be visible.
     ip_allowlist:
       - 18.97.193.0/27
       - 18.96.32.192/27
