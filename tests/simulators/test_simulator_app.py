@@ -267,7 +267,7 @@ async def test_insert_endpoint_accepts_post_without_id(hubspot_client: httpx.Asy
     matching the real HubSpot API shape: {id, properties: {...}}.
     """
     resp = await hubspot_client.post(
-        "/hubspot/crm/v3/objects/contacts",
+        "/hubspot/objects/contacts",
         json={"properties": {"firstname": "Zara", "email": "zara@example.com"}},
     )
     assert resp.status_code == 201
@@ -284,8 +284,8 @@ async def test_insert_endpoint_has_no_record_id_query_param(
     resp = await hubspot_client.get("/hubspot/openapi.json")
     assert resp.status_code == 200
     schema = resp.json()
-    # Find the POST /crm/v3/objects/contacts path
-    path_item = schema.get("paths", {}).get("/crm/v3/objects/contacts", {})
+    # Find the POST /objects/contacts path
+    path_item = schema.get("paths", {}).get("/objects/contacts", {})
     assert path_item, "insert path must exist in schema"
     post_op = path_item.get("post", {})
     assert post_op, "POST operation must exist"

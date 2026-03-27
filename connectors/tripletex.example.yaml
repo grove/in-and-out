@@ -12,7 +12,7 @@ connector:
   api_deprecation_deadline: null
 
   connection:
-    base_url: https://tripletex.no
+    base_url: https://tripletex.no/v2
     timeout:
       connect: "10s"
       read: "30s"
@@ -81,10 +81,10 @@ connector:
           datatype: contacts
     # Active registration — engine registers subscriptions with Tripletex at startup.
     registration:
-      register_path: /v2/event/subscription
-      deregister_path: /v2/event/subscription/${webhook_id}
-      renew_path: /v2/event/subscription/${webhook_id}
-      health_check_path: /v2/event/subscription/${webhook_id}
+      register_path: /event/subscription
+      deregister_path: /event/subscription/${webhook_id}
+      renew_path: /event/subscription/${webhook_id}
+      health_check_path: /event/subscription/${webhook_id}
       id_response_path: value.id
       callback_url_runtime_param: targetUrl
       per_route_registration: true
@@ -109,7 +109,7 @@ connector:
           interval: "10m"
         list:
           method: GET
-          path: /v2/customer
+          path: /customer
           record_selector: values
           pagination:
             strategy: offset
@@ -125,7 +125,7 @@ connector:
             cursor_type: timestamp
             request_filter:
               mode: query_param
-              param: changesUntil
+              param: changedSince
               value: "${watermark}"
 
       writeback:
@@ -137,42 +137,42 @@ connector:
         operations:
           lookup:
             method: GET
-            path: /v2/customer/${external_id}
+            path: /customer/${external_id}
           insert:
             method: POST
-            path: /v2/customer
+            path: /customer
           update:
             method: PUT
-            path: /v2/customer/${external_id}
+            path: /customer/${external_id}
           delete:
             method: DELETE
-            path: /v2/customer/${external_id}
+            path: /customer/${external_id}
 
       simulator:
         seed_count: 4
         seed_data:
-        - id: 10001
-          name: Acme AS
-          organizationNumber: "912345678"
-          email: post@acme.no
-          phoneNumber: "+4722334455"
-          isPrivateIndividual: false
-          accountManager:
-            id: 1
-            displayName: Kari Nordmann
-          deliveryAddress:
-            addressLine1: Industriveien 1
-            city: Oslo
-            postalCode: "0250"
-            country:
-              id: 161
-              displayName: Norway
-          currency:
-            id: 1
-            code: NOK
-          isCustomer: true
-          isSupplier: false
-          changesUntil: "2026-03-20T10:00:00.000+02:00"
+          - id: 10001
+            name: Acme AS
+            organizationNumber: "912345678"
+            email: post@acme.no
+            phoneNumber: "+4722334455"
+            isPrivateIndividual: false
+            accountManager:
+              id: 1
+              displayName: Kari Nordmann
+            deliveryAddress:
+              addressLine1: Industriveien 1
+              city: Oslo
+              postalCode: "0250"
+              country:
+                id: 161
+                displayName: Norway
+            currency:
+              id: 1
+              code: NOK
+            isCustomer: true
+            isSupplier: false
+            changesUntil: "2026-03-20T10:00:00.000+02:00"
 
     contacts:
       description: Tripletex contacts linked to customers
@@ -185,7 +185,7 @@ connector:
           interval: "10m"
         list:
           method: GET
-          path: /v2/contact
+          path: /contact
           record_selector: values
           pagination:
             strategy: offset
@@ -195,14 +195,6 @@ connector:
               total_path: "fullResultSize"
             termination:
               - empty_page
-          incremental:
-            enabled: true
-            cursor_field: changesUntil
-            cursor_type: timestamp
-            request_filter:
-              mode: query_param
-              param: changesUntil
-              value: "${watermark}"
 
       writeback:
         protection_level: 2
@@ -213,27 +205,24 @@ connector:
         operations:
           lookup:
             method: GET
-            path: /v2/contact/${external_id}
+            path: /contact/${external_id}
           insert:
             method: POST
-            path: /v2/contact
+            path: /contact
           update:
             method: PUT
-            path: /v2/contact/${external_id}
-          delete:
-            method: DELETE
-            path: /v2/contact/${external_id}
+            path: /contact/${external_id}
 
       simulator:
         seed_count: 5
         seed_data:
-        - id: 20001
-          firstName: Kari
-          lastName: Nordmann
-          email: kari.nordmann@acme.no
-          phoneNumberMobile: "+4795123456"
-          titleName: CEO
-          customer:
-            id: 10001
-            displayName: Acme AS
-          changesUntil: "2026-03-20T10:00:00.000+02:00"
+          - id: 20001
+            firstName: Kari
+            lastName: Nordmann
+            email: kari.nordmann@acme.no
+            phoneNumberMobile: "+4795123456"
+            titleName: CEO
+            customer:
+              id: 10001
+              displayName: Acme AS
+            changesUntil: "2026-03-20T10:00:00.000+02:00"

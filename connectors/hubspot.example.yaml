@@ -12,7 +12,7 @@ connector:
   api_deprecation_deadline: null
 
   connection:
-    base_url: https://api.hubapi.com
+    base_url: https://api.hubapi.com/crm/v3
     timeout:
       connect: "10s"
       read: "30s"
@@ -75,7 +75,7 @@ connector:
           interval: "5m"
         list:
           method: GET
-          path: /crm/v3/objects/contacts
+          path: /objects/contacts
           record_selector: results
           pagination:
             strategy: cursor
@@ -101,16 +101,16 @@ connector:
         operations:
           lookup:
             method: GET
-            path: /crm/v3/objects/contacts/${external_id}
+            path: /objects/contacts/${external_id}
           update:
             method: PATCH
-            path: /crm/v3/objects/contacts/${external_id}
+            path: /objects/contacts/${external_id}
           insert:
             method: POST
-            path: /crm/v3/objects/contacts
+            path: /objects/contacts
           delete:
             method: DELETE
-            path: /crm/v3/objects/contacts/${external_id}
+            path: /objects/contacts/${external_id}
 
       simulator:
         # Single template record; seed_count tells the simulator to generate 5 records from it.
@@ -141,7 +141,7 @@ connector:
           interval: "5m"
         list:
           method: GET
-          path: /crm/v3/objects/companies
+          path: /objects/companies
           record_selector: results
           pagination:
             strategy: cursor
@@ -167,16 +167,16 @@ connector:
         operations:
           lookup:
             method: GET
-            path: /crm/v3/objects/companies/${external_id}
+            path: /objects/companies/${external_id}
           update:
             method: PATCH
-            path: /crm/v3/objects/companies/${external_id}
+            path: /objects/companies/${external_id}
           insert:
             method: POST
-            path: /crm/v3/objects/companies
+            path: /objects/companies
           delete:
             method: DELETE
-            path: /crm/v3/objects/companies/${external_id}
+            path: /objects/companies/${external_id}
 
       simulator:
         seed_count: 3
@@ -206,7 +206,7 @@ connector:
           interval: "10m"
         list:
           method: GET
-          path: /crm/v3/associations/contacts/companies/batch/read
+          path: /associations/contacts/companies/batch/read
           record_selector: results
           pagination:
             strategy: cursor

@@ -97,17 +97,10 @@ def _build_openapi_extra(
     filter_param: str | None = None,
 ) -> dict:
     """Return an ``openapi_extra`` dict enriching Swagger UI with seed-data examples."""
-    if not seed:
-        return {}
-
-    first = seed[0]
-    first_id = str(first.get(pk_field, "1"))
-    # Body sent to the API never includes the pk (server owns it).
-    body_fields = {k: v for k, v in first.items() if k != pk_field}
-
     extra: dict = {}
 
-    # Pagination + incremental filter query params for the list endpoint
+    # Pagination + incremental filter params — always emitted for list endpoints
+    # so Swagger UI shows the correct query parameters even without seed data.
     if action == "list":
         params: list[dict] = []
         if filter_param:
@@ -147,6 +140,15 @@ def _build_openapi_extra(
                 params.append({"name": ks.page_size_param, "in": "query", "required": False, "schema": {"type": "integer", "default": ks.page_size}, "description": "Page size"})
         if params:
             extra["parameters"] = params
+
+    # Seed-specific response / request-body examples
+    if not seed:
+        return extra
+
+    first = seed[0]
+    first_id = str(first.get(pk_field, "1"))
+    # Body sent to the API never includes the pk (server owns it).
+    body_fields = {k: v for k, v in first.items() if k != pk_field}
 
     # Request-body example
     if action in ("insert", "update", "archive", "upsert"):
@@ -636,7 +638,7 @@ def _add_webhook_registration_routes(
             _set_path(resp, id_path, sub_id)
             return JSONResponse(resp, status_code=200)
 
-        _register.__name__ = f"wh_register_{connector.name}"
+        _register.__name__ = f"webhook_register_{connector.name}"
         return _register
 
     _add(register_fa_path, ["POST"], _make_register())
@@ -652,7 +654,7 @@ def _add_webhook_registration_routes(
                 subscriptions.pop(webhook_id, None)
                 return JSONResponse({}, status_code=200)
 
-            _deregister.__name__ = f"wh_deregister_{connector.name}"
+            _deregister.__name__ = f"webhook_deregister_{connector.name}"
             return _deregister
 
         _add(dereg_fa, ["DELETE"], _make_deregister())
@@ -669,7 +671,7 @@ def _add_webhook_registration_routes(
                     subscriptions[webhook_id]["__active"] = True
                 return JSONResponse({}, status_code=200)
 
-            _renew.__name__ = f"wh_renew_{connector.name}"
+            _renew.__name__ = f"webhook_renew_{connector.name}"
             return _renew
 
         _add(renew_fa, ["PUT"], _make_renew())
@@ -688,7 +690,7 @@ def _add_webhook_registration_routes(
                 _set_path(resp, id_path, webhook_id)
                 return JSONResponse(resp, status_code=200)
 
-            _health.__name__ = f"wh_health_{connector.name}"
+            _health.__name__ = f"webhook_health_{connector.name}"
             return _health
 
         _add(health_fa, ["GET"], _make_health())

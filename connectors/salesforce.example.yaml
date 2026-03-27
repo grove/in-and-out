@@ -15,7 +15,7 @@ connector:
 
   auth:
     type: oauth2
-    credential_ref: salesforce_app          # env: INOUT_CREDENTIAL_SALESFORCE_APP = "client_id:client_secret"
+    credential_ref: salesforce_app # env: INOUT_CREDENTIAL_SALESFORCE_APP = "client_id:client_secret"
     oauth2:
       grant_type: client_credentials
       token_url: "https://myorg.my.salesforce.com/services/oauth2/token"
