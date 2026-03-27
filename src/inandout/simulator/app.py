@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Union
-from urllib.parse import urlparse as _urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -101,7 +100,7 @@ def create_app(
             redoc_url="/redoc",
             servers=[
                 {
-                    "url": _urlparse(connector.connection.base_url).path.rstrip("/") or "/",
+                    "url": f"/{connector.name}",
                     "description": "Simulator",
                 },
             ],
