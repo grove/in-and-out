@@ -783,6 +783,185 @@ Alice and Bob share nothing in common, but they are in the same cluster through 
 - **Cluster membership diff auditing:** When a record joins a cluster, record which identity field created the edge. If a cluster has members that entered through 4 or 5 different identity fields with no overlap, that cluster is an accumulator candidate.
 - **Progressive identity field rollout:** Don't declare all 5 identity fields at once during onboarding. Declare the 2 highest-confidence fields first (tax_id, email). Evaluate the resulting clusters. Add a third field (phone) only after confirming the 2-field clusters are correct. Each addition is a controlled experiment, not a simultaneous change to the full identity graph.
 
+### 4.26 Identity Field and Conflict Resolution Contradiction
+
+The same field is often both an identity field (used to create edges for matching) and a resolved field (its final value in the golden record is determined by conflict resolution). These are independent computations, but their outputs can contradict each other.
+
+Consider:
+```
+System 1: email = alice@co.com     (priority 1 — high)
+System 2: email = alice@corp.com   (priority 2 — medium)
+System 3: email = alice@co.com     (priority 3 — low)
+
+Identity resolution: system 1 and system 3 share alice@co.com → same cluster ✓
+Conflict resolution: system 1 wins (highest priority) → golden record email = alice@co.com ✓
+
+Now change system 1's priority:
+System 2 is re-ranked to priority 1 (system 2 has better data quality overall)
+
+Identity resolution: unchanged — system 1 and system 3 still share alice@co.com
+Conflict resolution: system 2 wins → golden record email = alice@corp.com
+
+Result: The cluster was formed because system 1 and system 3 share alice@co.com.
+        But the golden record's email is now alice@corp.com — neither of the values
+        that justified the link.
+        Reverse mapping writes alice@corp.com back to system 1 and system 3.
+        On the next ingestion cycle, system 1 has alice@corp.com; system 3 has alice@corp.com.
+        The original linking edge (alice@co.com) is gone.
+        Whether the cluster holds depends on whether any other identity field still connects them.
+```
+
+**The edge that justified the cluster can be overwritten by conflict resolution in the same pipeline refresh cycle.** If the overwritten value was the only basis for the link, the cluster will split on the next ingestion cycle after writeback executes — a writeback-induced instability (related to §4.10) caused specifically by the interaction between identity matching and conflict resolution winning values.
+
+**Mitigation:** Identity fields used for matching should have either `strategy: identity` (meaning their value is locked — they are never overwritten by conflict resolution) or their conflict resolution winner should be constrained to values that preserve the linking invariant. In OSI-mapping, `strategy: identity` fields already behave this way to some degree, but the interaction between identity matching and conflict resolution on the same field needs explicit documentation and testing.
+
+### 4.27 Intra-Source Deduplication as a Prerequisite
+
+Cross-system identity resolution assumes each source system is internally consistent — no two records within the same source share the same identity field value. If they do, both records participate in matching and both create edges from the same source into the identity graph. The connected-components algorithm treats them as valid, distinct contributors.
+
+**Concrete problem:**
+```
+System 3 has two records with email = alice@co.com:
+  ERP-9001: Alice Smith,  email=alice@co.com,  created 2020
+  ERP-9002: Alice Jones,  email=alice@co.com,  created 2024  ← data entry error
+
+System 1 has one record:
+  C-1042:   Alice Smith,  email=alice@co.com
+
+Identity resolution creates edges:
+  ERP-9001 ↔ C-1042  (email match)
+  ERP-9002 ↔ C-1042  (email match)
+  ERP-9001 ↔ ERP-9002 (email match — both in system 3)
+
+Cluster: {ERP-9001, ERP-9002, C-1042}
+
+Conflict resolution must pick a winner for the golden record.
+Which of ERP-9001 and ERP-9002 is the "real" Alice from system 3?
+Typically: whichever was most recently modified, or whichever has higher priority row selection.
+But: the loser (say ERP-9002, Alice Jones) receives a delete delta — the pipeline
+     is now orchestrating a deletion within system 3 it was not asked to perform.
+```
+
+Both the cluster composition and the conflict resolution outcome are wrong because the cross-system identity resolution silently absorbed an intra-source duplicate that should have been resolved first.
+
+**Intra-source deduplication must run before cross-source identity resolution.** This is not just a data quality recommendation — it is a logical prerequisite for correct pipeline behaviour. Specifically:
+
+1. **Pre-ingestion:** Source system should be clean before onboarding. The data quality audit (§10.1 recommendation 1) should include a scan for intra-source identity field duplicates. Any found should be resolved in the source system before ingestion begins.
+2. **Ingestion-time validation:** The ingestion daemon should alert if identity fields have duplicate values within a single sync run. Not a hard block (the source data cannot be changed by in-and-out), but a loud warning.
+3. **Post-ingestion monitoring:** Query `inout_src_system3_contacts` for duplicate identity field values after each sync run. A rising count signals a data quality regression in the source system.
+
+```sql
+-- Detect intra-source duplicates on identity field
+SELECT email, COUNT(*) AS cnt
+FROM inout_src_system3_contacts
+WHERE email IS NOT NULL
+GROUP BY email
+HAVING COUNT(*) > 1
+ORDER BY cnt DESC;
+```
+
+### 4.28 New Identity Field Mid-Lifecycle (Configuration Bootstrap Hazard)
+
+Adding a new identity field to an existing, stable pipeline is operationally equivalent to the bootstrap problem (§4.20) — but it is far more dangerous because the operator is less likely to be on guard.
+
+Adding a third identity field (e.g., `phone`) to a pipeline that has been running stably with `email` and `tax_id` for two years feels like a small configuration change. In reality, it is a full re-evaluation of the identity graph against a new dimension. Every record is reconsidered for links on the new field. Junk values in `phone` that would have been caught during an onboarding review are now introduced silently into a production pipeline.
+
+**The hazard sequence:**
+```
+Before change: 12,450 clusters, steady state, no issues
+
+YAML change: add phone: identity
+
+After ALTER QUERY + next pg-trickle refresh:
+  phone = "000-000-0000" appears in 340 records across systems 1, 2, and 3
+  → 340 records merge into one cluster
+  → previously stable clusters for 340 records split and re-merge
+  → delta tables emit changes for all 340 records across all systems
+  → writeback begins
+
+Time from config change to writeback: minutes (one pg-trickle refresh cycle)
+Time operator had to review: zero
+```
+
+Unlike onboarding a new source system — where the gating workflow (PLAN_ONBOARDING_PROPOSAL.md) provides a structured review window — adding a new identity field has no equivalent protective workflow today. The `ALTER QUERY` mechanism updates the `_id_{target}` stream table immediately; there is no pending query (§3 Gap 3 in PLAN_ONBOARDING_PROPOSAL.md) to stage the change.
+
+**Required treatment:** Any change to the identity field declarations in the OSI-mapping YAML must be treated as a bootstrap event and follow the same preparation protocol as §4.20:
+
+1. Run the precision/recall evaluation (§4.22) for the new field against a labelled sample before deploying.
+2. Audit the new field for junk values (§3.3, §6.5) and populate the blocklist before the field goes live.
+3. Use Mode B gating (all delta tables gated) during the first refresh with the new field active.
+4. Review cluster change metrics (`clusters_merged`) in `pgt_refresh_history` before ungating.
+5. Only then ungate and allow writeback.
+
+The `pending_query` mechanism proposed in PLAN_ONBOARDING_PROPOSAL.md §3 Gap 3 would directly support this workflow — storing the updated query without activating it until the operator explicitly approves.
+
+### 4.29 Source System Internal Merge Breaking external_id References
+
+Source systems like Salesforce, HubSpot, and most CRMs have their own internal deduplication. When a user merges two contacts inside HubSpot, one `external_id` is declared the winner and the other is permanently deleted — typically with a redirect or a merge record in the source system's own audit log. In-and-out previously ingested both records.
+
+**What the pipeline sees:**
+```
+Before HubSpot internal merge:
+  inout_src_system3_contacts:
+    ERP-9001: Alice Smith  (ingested 2026-01-15)
+    ERP-9002: Alice Jones  (ingested 2026-01-15)
+
+HubSpot user merges ERP-9002 into ERP-9001 on 2026-03-20.
+ERP-9002 is now a deleted/redirected record in HubSpot.
+
+Next ingestion cycle (2026-03-21):
+  in-and-out fetches ERP-9002 → 404 Not Found (or 301 redirect to ERP-9001)
+  Ingestion daemon interprets 404 as: this record was deleted
+  → inout_src_system3_contacts: ERP-9002 marked deleted / removed
+  → identity resolution re-runs without ERP-9002's edges
+  → delta tables may emit delete deltas for any records whose cluster membership
+     depended on ERP-9002's identity fields
+```
+
+If ERP-9002 was the bridging record between a system 3 cluster and systems 1 and 2, its removal causes the entire cluster to split — not because the entity was deleted, but because the source system merged two records and kept one. The surviving record (ERP-9001) contains ERP-9002's data, but in-and-out doesn't know that — it just sees ERP-9001 as unchanged and ERP-9002 as gone.
+
+**Mitigations:**
+- **Detect redirects, not just 404s:** When an API returns a 301/redirect or a merge reference for a previously-ingested `external_id`, treat it as a merge event, not a deletion. Update `inout_src_*` to associate ERP-9002's historical edges with ERP-9001.
+- **Merge event webhook:** Some source systems (Salesforce) emit webhook events for internal merges. The ingestion daemon should subscribe to these and handle them as first-class events — not as deletions discovered indirectly during polling.
+- **Soft-delete tolerance:** Before treating a 404 as a hard delete, check whether the record appears under a different `external_id` via identity field lookup. If a record with the same email now exists under a new ID, it was merged, not deleted.
+
+### 4.30 Legitimate One-to-Many Identity Field Sharing
+
+The blocklist (§6.5) handles **meaningless** identity values — placeholders that should never create edges. But some identity values are **meaningful and correctly shared** by multiple distinct real-world entities:
+
+| Shared value | Reason for sharing | Entities | Should create edges? |
+|---|---|---|---|
+| `+1-212-555-1000` | Goldman Sachs main switchboard | Thousands of employees | **No** — different people |
+| `123 Main St` | Large office building | Dozens of companies | **No** — different organisations |
+| `legal@lawfirm.com` | Legal representative for multiple companies | All client companies | **No** — different legal entities |
+| `alice@family.com` | Family shared email | Alice Smith and Bob Smith | **No** — different people, different entities |
+| `hr@company.com` | Shared HR inbox | Multiple employees who use it | **No** — different people |
+
+These are not junk values. Blocking them globally removes legitimate information from the pipeline — `+1-212-555-1000` is the verified phone number of Goldman Sachs and should be stored as a field value. The problem is specifically using it as an identity **edge-creation trigger**, not as a data value.
+
+**The distinction from junk values:**
+- **Junk values** (§3.3): Meaningless, never correct as identity signals. Block globally from edge creation.
+- **Legitimate shared values:** Meaningful, correct as field values, but not valid as identity signals for the specific records that have them. The block must be per-record, not per-value.
+
+**Current gap:** The blocklist blocks a value across the entire pipeline. There is no mechanism to say "this record's phone number happens to be a shared switchboard — do not use it for identity matching, but do store it as the phone field value."
+
+**Possible approaches:**
+
+1. **Per-record identity field exclusion flag:** Add a metadata column to source tables — `_identity_exclude_fields TEXT[]` — populated by the connector based on API metadata (some CRMs expose a "shared number" flag). The forward view uses this to null out excluded fields before identity resolution sees them.
+
+2. **Identity field value frequency threshold (dynamic, not static blocklist):** Instead of a fixed blocklist, compute the frequency of each identity field value across all sources during the pre-bootstrap data quality audit. Values appearing in more than 0.1% of all records are automatically excluded from edge creation (but not from field storage). This is a dynamic, per-deployment blocklist rather than a global one.
+
+3. **Source-specific value blocking:** Extend the blocklist table with an optional `source` column. `+1-212-555-1000` is only blocked for sources where it appears in more than 10 records — a Goldman Sachs CRM export would trigger this; a healthcare provider's database wouldn't.
+
+```sql
+ALTER TABLE inout_identity_blocklist
+ADD COLUMN source TEXT,  -- NULL = block for all sources
+ADD COLUMN min_occurrence_count INT DEFAULT 1;
+-- When source IS NOT NULL, only block for that source's records
+-- When min_occurrence_count > 1, auto-compute from data rather than
+-- requiring manual entry
+```
+
 ---
 
 ## 5. Record Linkage and Onboarding
