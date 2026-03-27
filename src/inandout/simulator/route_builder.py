@@ -831,6 +831,7 @@ def _add_webhook_registration_routes(
                     duration_ms=elapsed,
                     request_body_json=json.dumps(body),
                     request_headers_json=json.dumps(dict(request.headers)),
+                    record_id=str(sub_id),
                 )
             return JSONResponse(resp, status_code=200)
 
@@ -866,6 +867,7 @@ def _add_webhook_registration_routes(
                         path=reg.deregister_path.replace("{webhook_id}", str(webhook_id)),
                         status=200,
                         duration_ms=elapsed,
+                        record_id=str(webhook_id),
                     )
                 return JSONResponse({}, status_code=200)
 

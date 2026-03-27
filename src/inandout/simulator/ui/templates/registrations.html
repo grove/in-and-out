@@ -54,7 +54,7 @@
                 </thead>
                 <tbody id="reg-body-{{ conn.name }}">
                     {% for sub_id, sub in subs.items() %}
-                    <tr class="border-t border-slate-700/50">
+                    <tr id="reg-row-{{ conn.name }}-{{ sub_id }}" class="border-t border-slate-700/50">
                         <td class="px-4 py-1.5 text-slate-400">{{ sub_id }}</td>
                         <td class="px-4 py-1.5 text-sky-300">{{ sub.get("event", "—") }}</td>
                         <td class="px-4 py-1.5 text-slate-300 break-all">
@@ -79,6 +79,47 @@
 
 {% block extra_scripts %}
 <script>
+    window._connectorCallbackParams = {
+        {% for conn in connectors | selectattr("webhooks") | selectattr("webhooks.registration") %}
+        {{ conn.name | tojson }}: {{ conn.webhooks.registration.callback_url_runtime_param | tojson }}{% if not loop.last %},{% endif %}
+        {% endfor %}
+    };
+
+    document.addEventListener('simulator:request', function (e) {
+        const d = e.detail;
+        if (d.datatype !== 'webhook_subscription' || !d.record_id) return;
+        const connector = d.connector;
+
+        if (d.method === 'POST') {
+            const tbody = document.getElementById('reg-body-' + connector);
+            if (!tbody) return;
+            const subId = d.record_id;
+            // Skip if already rendered server-side
+            if (document.getElementById('reg-row-' + connector + '-' + subId)) return;
+            let sub = {};
+            try { sub = JSON.parse(d.request_body_json || '{}'); } catch (_) {}
+            const cbParam = window._connectorCallbackParams[connector] || 'callback_url';
+            const tr = document.createElement('tr');
+            tr.id = 'reg-row-' + connector + '-' + subId;
+            tr.className = 'border-t border-slate-700/50';
+            tr.innerHTML = `
+                <td class="px-4 py-1.5 text-slate-400">${subId}</td>
+                <td class="px-4 py-1.5 text-sky-300">${sub.event || '—'}</td>
+                <td class="px-4 py-1.5 text-slate-300 break-all">${sub[cbParam] || '—'}</td>
+                <td class="px-4 py-1.5 text-slate-500">${sub.authHeaderName || '—'}</td>
+                <td class="px-4 py-1.5 text-right">
+                    <button onclick="deleteRegistration('${connector}', ${subId}, this)"
+                        class="text-xs text-red-500 hover:text-red-300 transition-colors">Delete</button>
+                </td>`;
+            tbody.appendChild(tr);
+            _syncRegCard(connector);
+
+        } else if (d.method === 'DELETE') {
+            const row = document.getElementById('reg-row-' + connector + '-' + d.record_id);
+            if (row) { row.remove(); _syncRegCard(connector); }
+        }
+    });
+
     async function deleteRegistration(connectorName, subId, btn) {
         if (!confirm('Delete this registration? The engine will need to re-register.')) return;
         const resp = await fetch(`/ui/_registrations/${connectorName}/${subId}`, { method: 'DELETE' });

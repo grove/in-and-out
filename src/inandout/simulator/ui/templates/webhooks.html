@@ -7,9 +7,11 @@
     <div class="flex items-center gap-3 shrink-0">
         <h1 class="text-lg font-bold text-slate-100">Webhook Event Log</h1>
         <span class="text-xs text-slate-500 tabular-nums" id="wh-count">{{ events | length }} events loaded</span>
-        <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">
-            Clear display
-        </button>
+        <div class="ml-auto flex items-center gap-2">
+            <input type="text" id="wh-search" placeholder="Filter…" oninput="filterLog('webhook-log-body', 'wh-search')"
+                class="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-500 w-36 focus:outline-none focus:border-slate-500">
+            <button onclick="clearLog()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear display</button>
+        </div>
     </div>
 
     <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
@@ -27,14 +29,6 @@
                     <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Duration
                     </th>
                     <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Time</th>
-                </tr>
-                <tr class="bg-slate-900/60 border-b border-slate-700">
-                    <td class="px-2 py-1"><input type="text" data-col="status" placeholder="status…" oninput="applyColFilters('webhook-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="op" placeholder="op…" oninput="applyColFilters('webhook-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="sys" placeholder="system…" oninput="applyColFilters('webhook-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="dt" placeholder="datatype…" oninput="applyColFilters('webhook-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="url" placeholder="url…" oninput="applyColFilters('webhook-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td colspan="2"></td>
                 </tr>
             </thead>
             <tbody id="webhook-log-body">
@@ -169,7 +163,7 @@
 
             body.insertBefore(detailRow, body.firstChild);
             body.insertBefore(summaryRow, body.firstChild);
-            _applyFiltersToRow(summaryRow, detailRow);
+            _applyFilterToRow(summaryRow, detailRow);
 
             const total = parseInt(countEl?.textContent) || 0;
             if (countEl) countEl.textContent = (total + 1) + ' events loaded';
@@ -177,53 +171,42 @@
         });
     });
 
+    function filterLog(bodyId, searchId) {
+        const body = document.getElementById(bodyId);
+        const search = document.getElementById(searchId);
+        if (!body || !search) return;
+        const q = search.value.trim().toLowerCase();
+        body.querySelectorAll('tr[data-detail]').forEach(function (row) {
+            const text = Object.entries(row.dataset)
+                .filter(function (e) { return e[0] !== 'detail'; })
+                .map(function (e) { return e[1]; }).join(' ').toLowerCase();
+            const hide = q && !text.includes(q);
+            row.classList.toggle('hidden', hide);
+            const dr = document.getElementById(row.dataset.detail);
+            if (dr && hide) dr.classList.add('hidden');
+        });
+    }
+
+    function _applyFilterToRow(summaryRow, detailRow) {
+        const search = document.getElementById('wh-search');
+        if (!search) return;
+        const q = search.value.trim().toLowerCase();
+        if (!q) return;
+        const text = Object.entries(summaryRow.dataset)
+            .filter(function (e) { return e[0] !== 'detail'; })
+            .map(function (e) { return e[1]; }).join(' ').toLowerCase();
+        const hide = !text.includes(q);
+        summaryRow.classList.toggle('hidden', hide);
+        if (hide && detailRow) detailRow.classList.add('hidden');
+    }
+
     function clearLog() {
         document.getElementById('webhook-log-body').innerHTML =
             '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New webhooks will appear here.</td></tr>';
         const countEl = document.getElementById('wh-count');
         if (countEl) countEl.textContent = '0 events loaded';
-        document.querySelectorAll('thead input[data-col]').forEach(inp => { inp.value = ''; });
-    }
-
-    function applyColFilters(bodyId) {
-        const body = document.getElementById(bodyId);
-        if (!body) return;
-        const table = body.closest('table');
-        const filters = _readFilters(table);
-        let i = 0;
-        for (const row of body.children) {
-            if (!row.dataset.detail) continue;
-            const detailId = row.dataset.detail;
-            const detailRow = document.getElementById(detailId);
-            _applyFiltersToRow(row, detailRow, filters);
-            i++;
-        }
-    }
-
-    function _readFilters(table) {
-        const filters = {};
-        if (!table) return filters;
-        table.querySelectorAll('thead input[data-col]').forEach(inp => {
-            const v = inp.value.trim().toLowerCase();
-            if (v) filters[inp.dataset.col] = v;
-        });
-        return filters;
-    }
-
-    function _rowMatchesFilters(row, filters) {
-        for (const [col, val] of Object.entries(filters)) {
-            const cell = (row.dataset[col] || '').toLowerCase();
-            if (!cell.includes(val)) return false;
-        }
-        return true;
-    }
-
-    function _applyFiltersToRow(summaryRow, detailRow, filters) {
-        const table = summaryRow.closest('table');
-        const f = filters || _readFilters(table);
-        const hide = Object.keys(f).length > 0 && !_rowMatchesFilters(summaryRow, f);
-        summaryRow.classList.toggle('hidden', hide);
-        if (detailRow) detailRow.classList.toggle('hidden', true);
+        const s = document.getElementById('wh-search');
+        if (s) s.value = '';
     }
 </script>
 {% endblock %}

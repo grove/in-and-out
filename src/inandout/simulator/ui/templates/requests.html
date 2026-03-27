@@ -7,9 +7,11 @@
     <div class="flex items-center gap-3 shrink-0">
         <h1 class="text-lg font-bold text-slate-100">API Request Log</h1>
         <span class="text-xs text-slate-500 tabular-nums" id="req-count">{{ events | length }} events loaded</span>
-        <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">
-            Clear display
-        </button>
+        <div class="ml-auto flex items-center gap-2">
+            <input type="text" id="req-search" placeholder="Filter…" oninput="filterLog('request-log-body', 'req-search')"
+                class="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-500 w-36 focus:outline-none focus:border-slate-500">
+            <button onclick="clearLog()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear display</button>
+        </div>
     </div>
 
     <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
@@ -23,14 +25,6 @@
                     <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-28">Datatype</th>
                     <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Duration</th>
                     <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Time</th>
-                </tr>
-                <tr class="bg-slate-900/60 border-b border-slate-700">
-                    <td class="px-2 py-1"><input type="text" data-col="status" placeholder="status…" oninput="applyColFilters('request-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="method" placeholder="method…" oninput="applyColFilters('request-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="path" placeholder="path…" oninput="applyColFilters('request-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="sys" placeholder="system…" oninput="applyColFilters('request-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td class="px-2 py-1"><input type="text" data-col="dt" placeholder="datatype…" oninput="applyColFilters('request-log-body')" class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-400"></td>
-                    <td colspan="2"></td>
                 </tr>
             </thead>
             <tbody id="request-log-body">
@@ -150,8 +144,7 @@
                 </td>`;
             body.insertBefore(detailRow, body.firstChild);
             body.insertBefore(summaryRow, body.firstChild);
-
-            _applyFiltersToRow(summaryRow, detailRow);
+            _applyFilterToRow(summaryRow, detailRow);
 
             count++;
             if (countEl) countEl.textContent = count + ' events loaded';
@@ -159,47 +152,42 @@
         });
     });
 
-    function applyColFilters(bodyId) {
-        const bodyEl = document.getElementById(bodyId);
-        if (!bodyEl) return;
-        const filters = _readFilters(bodyEl.closest('table'));
-        const hasAny = Object.keys(filters).length > 0;
-        bodyEl.querySelectorAll('tr[data-detail]').forEach(function (row) {
-            const visible = !hasAny || _rowMatchesFilters(row, filters);
-            row.classList.toggle('hidden', !visible);
+    function filterLog(bodyId, searchId) {
+        const body = document.getElementById(bodyId);
+        const search = document.getElementById(searchId);
+        if (!body || !search) return;
+        const q = search.value.trim().toLowerCase();
+        body.querySelectorAll('tr[data-detail]').forEach(function (row) {
+            const text = Object.entries(row.dataset)
+                .filter(function (e) { return e[0] !== 'detail'; })
+                .map(function (e) { return e[1]; }).join(' ').toLowerCase();
+            const hide = q && !text.includes(q);
+            row.classList.toggle('hidden', hide);
             const dr = document.getElementById(row.dataset.detail);
-            if (dr && !visible) dr.classList.add('hidden');
+            if (dr && hide) dr.classList.add('hidden');
         });
     }
-    function _readFilters(table) {
-        const f = {};
-        if (!table) return f;
-        table.querySelectorAll('thead input[data-col]').forEach(function (inp) {
-            const v = inp.value.trim().toLowerCase();
-            if (v) f[inp.dataset.col] = v;
-        });
-        return f;
+
+    function _applyFilterToRow(summaryRow, detailRow) {
+        const search = document.getElementById('req-search');
+        if (!search) return;
+        const q = search.value.trim().toLowerCase();
+        if (!q) return;
+        const text = Object.entries(summaryRow.dataset)
+            .filter(function (e) { return e[0] !== 'detail'; })
+            .map(function (e) { return e[1]; }).join(' ').toLowerCase();
+        const hide = !text.includes(q);
+        summaryRow.classList.toggle('hidden', hide);
+        if (hide && detailRow) detailRow.classList.add('hidden');
     }
-    function _rowMatchesFilters(row, filters) {
-        for (const [col, q] of Object.entries(filters)) {
-            if (!(row.dataset[col] || '').toLowerCase().includes(q)) return false;
-        }
-        return true;
-    }
-    function _applyFiltersToRow(summaryRow, detailRow) {
-        const table = document.getElementById('request-log-body').closest('table');
-        const filters = _readFilters(table);
-        if (!Object.keys(filters).length) return;
-        const visible = _rowMatchesFilters(summaryRow, filters);
-        summaryRow.classList.toggle('hidden', !visible);
-        if (!visible && detailRow) detailRow.classList.add('hidden');
-    }
+
     function clearLog() {
         document.getElementById('request-log-body').innerHTML =
             '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New requests will appear here.</td></tr>';
         const countEl = document.getElementById('req-count');
         if (countEl) countEl.textContent = '0 events loaded';
-        document.querySelectorAll('thead input[data-col]').forEach(function (inp) { inp.value = ''; });
+        const s = document.getElementById('req-search');
+        if (s) s.value = '';
     }
 </script>
 {% endblock %}

@@ -87,6 +87,7 @@ class EventBus:
         duration_ms: int = 0,
         request_body_json: str = "",
         request_headers_json: str = "",
+        record_id: str = "",
     ) -> None:
         self.publish(
             SimulatorEvent(
@@ -99,6 +100,7 @@ class EventBus:
                 duration_ms=duration_ms,
                 request_body_json=request_body_json,
                 request_headers_json=request_headers_json,
+                record_id=record_id,
             )
         )
 
