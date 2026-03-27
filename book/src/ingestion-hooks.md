@@ -1,6 +1,6 @@
-# Plugin Hooks
+# Ingestion Hooks
 
-Plugin hooks let you inject custom Python logic into the ingestion pipeline **without modifying the core engine**. They are the right tool when:
+Ingestion hooks let you inject custom Python logic into the ingestion pipeline **without modifying the core engine**. They are the right tool when:
 
 - You need to reshape or normalise a record before it lands in PostgreSQL
 - You want to drop records that don't meet a business rule
@@ -24,7 +24,7 @@ All hooks are **async**. You may register any combination — handlers you omit 
 
 ---
 
-## Creating a plugin package
+## Creating a hooks package
 
 Hooks are distributed as ordinary Python packages and discovered automatically at daemon startup via the `inandout.hooks` [entry-point group](https://packaging.python.org/en/latest/specifications/entry-points/).
 

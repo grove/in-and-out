@@ -2,7 +2,7 @@
 
 Writeback hooks let you inject custom Python logic into the outbound sync pipeline — the path from the delta table to the external system — **without modifying the core engine**.
 
-They are the writeback-side counterpart of the [ingestion Plugin Hooks](./plugin-hooks.md) and follow the same pattern.
+They are the writeback-side counterpart of the [Ingestion Hooks](./ingestion-hooks.md) and follow the same pattern.
 
 ---
 

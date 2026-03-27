@@ -12,7 +12,7 @@
 
 - [Configuration Reference](./configuration.md)
 - [Connector Authoring Guide](./connector-authoring.md)
-- [Plugin Hooks](./plugin-hooks.md)
+- [Ingestion Hooks](./ingestion-hooks.md)
 - [Writeback Hooks](./writeback-hooks.md)
 - [Credential Providers](./credential-providers.md)
 - [Dead-Letter Policy](./dead-letter-policy.md)
