@@ -609,7 +609,12 @@ def build_connector_router(
                                 event_bus.publish_mutation(evs[0])
                             ms = int((time.monotonic() - t0) * 1000)
                             event_bus.publish_request(
-                                connector_name, _dt_name, "POST", str(request.url.path), 201, ms,
+                                connector_name,
+                                _dt_name,
+                                "POST",
+                                str(request.url.path),
+                                201,
+                                ms,
                                 request_body_json=json.dumps(body),
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
@@ -632,7 +637,12 @@ def build_connector_router(
                         if updated is None:
                             ms = int((time.monotonic() - t0) * 1000)
                             event_bus.publish_request(
-                                connector_name, _dt_name, _method, str(request.url.path), 404, ms,
+                                connector_name,
+                                _dt_name,
+                                _method,
+                                str(request.url.path),
+                                404,
+                                ms,
                                 request_body_json=json.dumps(body),
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
@@ -643,7 +653,12 @@ def build_connector_router(
                             event_bus.publish_mutation(evs[0])
                         ms = int((time.monotonic() - t0) * 1000)
                         event_bus.publish_request(
-                            connector_name, _dt_name, _method, str(request.url.path), 200, ms,
+                            connector_name,
+                            _dt_name,
+                            _method,
+                            str(request.url.path),
+                            200,
+                            ms,
                             request_body_json=json.dumps(body),
                             request_headers_json=json.dumps(dict(request.headers)),
                         )
@@ -798,6 +813,7 @@ def _add_webhook_registration_routes(
     def _make_register():
         async def _register(request: Request) -> JSONResponse:
             import time
+
             t0 = time.monotonic()
             body = await request.json()
             sub_id = next(counter)
@@ -838,6 +854,7 @@ def _add_webhook_registration_routes(
         def _make_deregister():
             async def _deregister(request: Request, webhook_id: int) -> JSONResponse:
                 import time
+
                 t0 = time.monotonic()
                 subscriptions.pop(webhook_id, None)
                 elapsed = int((time.monotonic() - t0) * 1000)
@@ -866,6 +883,7 @@ def _add_webhook_registration_routes(
         def _make_renew():
             async def _renew(request: Request, webhook_id: int) -> JSONResponse:
                 import time
+
                 t0 = time.monotonic()
                 if webhook_id in subscriptions:
                     subscriptions[webhook_id]["__active"] = True
@@ -895,6 +913,7 @@ def _add_webhook_registration_routes(
         def _make_health():
             async def _health(request: Request, webhook_id: int) -> JSONResponse:
                 import time
+
                 t0 = time.monotonic()
                 if webhook_id not in subscriptions:
                     if event_bus is not None:

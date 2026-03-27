@@ -55,6 +55,7 @@ def build_ui_router() -> APIRouter:
                 counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
         recent = request.app.state.event_bus.recent(limit=40)
         connector_systems = {conn.name: conn.system for conn in connectors}
+        webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -63,6 +64,7 @@ def build_ui_router() -> APIRouter:
                 "counts": counts,
                 "recent_events": recent,
                 "connector_systems": connector_systems,
+                "webhook_subscriptions": webhook_subscriptions,
             },
         )
 
@@ -448,9 +450,7 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        await disp.dispatch(
-            connector, datatype, "create", str(record.get(pk_field, "")), record
-        )
+        await disp.dispatch(connector, datatype, "create", str(record.get(pk_field, "")), record)
         columns = _columns_from_cfg(dt_cfg)
         return HTMLResponse(
             _row_html(connector_name, datatype, pk_field, record, columns), status_code=201

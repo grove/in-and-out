@@ -15,7 +15,6 @@
     <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
         <table class="w-full text-xs font-mono">
             <thead class="sticky top-0 z-10 bg-slate-800 border-b border-slate-700">
-                <!-- Column labels -->
                 <tr>
                     <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-14">Status
                     </th>
@@ -30,44 +29,13 @@
                     </th>
                     <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Time</th>
                 </tr>
-                <!-- Per-column filter row -->
-                <tr class="bg-slate-900/60 border-b border-slate-700">
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="status" placeholder="status…"
-                            oninput="applyColFilters('request-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="method" placeholder="method…"
-                            oninput="applyColFilters('request-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="path" placeholder="path…"
-                            oninput="applyColFilters('request-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="sys" placeholder="system…"
-                            oninput="applyColFilters('request-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="dt" placeholder="datatype…"
-                            oninput="applyColFilters('request-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td colspan="2"></td>
-                </tr>
             </thead>
             <tbody id="request-log-body">
                 {% for ev in events %}
                 {% set ok = ev.status < 400 %} {% set sys=connector_systems.get(ev.connector, ev.connector) if
                     ev.connector else '' %} {% set req_detail_id='req-detail-' ~ loop.index %} <tr
                     class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
-                    onclick="document.getElementById('{{ req_detail_id }}').classList.toggle('hidden')"
-                    data-detail="{{ req_detail_id }}" data-status="{{ ev.status }}" data-method="{{ ev.method }}"
-                    data-path="{{ ev.path }}" data-sys="{{ sys }}" data-dt="{{ ev.datatype }}">
+                    onclick="document.getElementById('{{ req_detail_id }}').classList.toggle('hidden')">
                     <td class="px-3 py-1.5 {{ 'text-green-400' if ok else 'text-red-400' }}">{{ ev.status }}</td>
                     <td class="px-3 py-1.5 text-sky-300">{{ ev.method }}</td>
                     <td class="px-3 py-1.5 text-slate-300 max-w-0 truncate">{{ ev.path }}</td>
@@ -88,12 +56,14 @@
                             {% if ev.request_headers_json %}
                             <details>
                                 <summary class="text-slate-500 cursor-pointer select-none">request headers</summary>
-                                <pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">{{ ev.request_headers_json | pretty_json }}</pre>
+                                <pre
+                                    class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">{{ ev.request_headers_json | pretty_json }}</pre>
                             </details>
                             {% endif %}
                             {% if ev.request_body_json %}
                             <div><span class="text-slate-500 mr-1">body</span>
-                                <pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">{{ ev.request_body_json | pretty_json }}</pre>
+                                <pre
+                                    class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">{{ ev.request_body_json | pretty_json }}</pre>
                             </div>
                             {% endif %}
                             <div class="text-slate-600">{{ ev.timestamp }}</div>
@@ -137,12 +107,6 @@
         const summaryRow = document.createElement('tr');
         summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
         summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
-        summaryRow.setAttribute('data-detail', detailId);
-        summaryRow.setAttribute('data-status', String(d.status));
-        summaryRow.setAttribute('data-method', d.method || '');
-        summaryRow.setAttribute('data-path', d.path || '');
-        summaryRow.setAttribute('data-sys', sys);
-        summaryRow.setAttribute('data-dt', d.datatype || '');
         summaryRow.innerHTML = `
                 <td class="px-3 py-1.5 ${ok ? 'text-green-400' : 'text-red-400'}">${d.status}</td>
                 <td class="px-3 py-1.5 text-sky-300">${d.method}</td>
@@ -151,6 +115,7 @@
                 <td class="px-3 py-1.5 text-slate-500">${d.datatype || ''}</td>
                 <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">${d.duration_ms}ms</td>
                 <td class="px-3 py-1.5 text-slate-600 text-right">${ts}</td>`;
+
         let prettyReqHeaders = '';
         if (d.request_headers_json) {
             try { prettyReqHeaders = JSON.stringify(JSON.parse(d.request_headers_json), null, 2); }
@@ -175,61 +140,17 @@
         body.insertBefore(detailRow, body.firstChild);
         body.insertBefore(summaryRow, body.firstChild);
 
-        // Apply active column filters to the new rows immediately
-        _applyFiltersToRow(summaryRow, detailRow);
-
         count++;
         if (countEl) countEl.textContent = count + ' events loaded';
         while (body.children.length > 400) body.removeChild(body.lastChild);
     });
     });
 
-    function applyColFilters(bodyId) {
-        const bodyEl = document.getElementById(bodyId);
-        if (!bodyEl) return;
-        const filters = _readFilters(bodyEl.closest('table'));
-        const hasAny = Object.keys(filters).length > 0;
-
-        bodyEl.querySelectorAll('tr[data-detail]').forEach(function (row) {
-            const visible = !hasAny || _rowMatchesFilters(row, filters);
-            row.classList.toggle('hidden', !visible);
-            const detailRow = document.getElementById(row.dataset.detail);
-            if (detailRow && !visible) detailRow.classList.add('hidden');
-        });
-    }
-
-    function _readFilters(table) {
-        const filters = {};
-        if (!table) return filters;
-        table.querySelectorAll('thead input[data-col]').forEach(function (inp) {
-            const v = inp.value.trim().toLowerCase();
-            if (v) filters[inp.dataset.col] = v;
-        });
-        return filters;
-    }
-
-    function _rowMatchesFilters(row, filters) {
-        for (const [col, query] of Object.entries(filters)) {
-            if (!(row.dataset[col] || '').toLowerCase().includes(query)) return false;
-        }
-        return true;
-    }
-
-    function _applyFiltersToRow(summaryRow, detailRow) {
-        const table = document.getElementById('request-log-body').closest('table');
-        const filters = _readFilters(table);
-        if (Object.keys(filters).length === 0) return;
-        const visible = _rowMatchesFilters(summaryRow, filters);
-        summaryRow.classList.toggle('hidden', !visible);
-        if (!visible && detailRow) detailRow.classList.add('hidden');
-    }
-
     function clearLog() {
         document.getElementById('request-log-body').innerHTML =
             '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New requests will appear here.</td></tr>';
         const countEl = document.getElementById('req-count');
         if (countEl) countEl.textContent = '0 events loaded';
-        document.querySelectorAll('thead input[data-col]').forEach(function (inp) { inp.value = ''; });
     }
 </script>
 {% endblock %}

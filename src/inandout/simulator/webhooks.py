@@ -135,7 +135,11 @@ class WebhookDispatcher:
         # only if no matching subscription is found.
         if per_route and self._webhook_subscriptions is not None:
             active_subs = self._webhook_subscriptions.get(connector.name, {})
-            cb_param = getattr(registration, "callback_url_runtime_param", "callback_url") if registration else "callback_url"
+            cb_param = (
+                getattr(registration, "callback_url_runtime_param", "callback_url")
+                if registration
+                else "callback_url"
+            )
             url: str | None = None
             for sub in active_subs.values():
                 if sub.get("event") == event_type:

@@ -15,7 +15,6 @@
     <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
         <table class="w-full text-xs font-mono">
             <thead class="sticky top-0 z-10 bg-slate-800 border-b border-slate-700">
-                <!-- Column labels -->
                 <tr>
                     <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-14">Status
                     </th>
@@ -29,34 +28,6 @@
                     </th>
                     <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Time</th>
                 </tr>
-                <!-- Per-column filter row -->
-                <tr class="bg-slate-900/60 border-b border-slate-700">
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="status" placeholder="status…"
-                            oninput="applyColFilters('webhook-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="op" placeholder="op…" oninput="applyColFilters('webhook-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="sys" placeholder="system…"
-                            oninput="applyColFilters('webhook-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="dt" placeholder="datatype…"
-                            oninput="applyColFilters('webhook-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td class="px-2 py-1">
-                        <input type="text" data-col="url" placeholder="url…"
-                            oninput="applyColFilters('webhook-log-body')"
-                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
-                    </td>
-                    <td colspan="2"></td>
-                </tr>
             </thead>
             <tbody id="webhook-log-body">
                 {% for ev in events %}
@@ -67,9 +38,7 @@
                     else '' %} {% set detail_id='wh-detail-' ~ loop.index %} {% set short_url='/' ~
                     ev.webhook_url.split('/', 3)[3] if ev.webhook_url else '' %} <tr
                     class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
-                    onclick="document.getElementById('{{ detail_id }}').classList.toggle('hidden')"
-                    data-detail="{{ detail_id }}" data-status="{{ status_text }}" data-op="{{ ev.operation }}"
-                    data-sys="{{ sys }}" data-dt="{{ ev.datatype }}" data-url="{{ short_url }}">
+                    onclick="document.getElementById('{{ detail_id }}').classList.toggle('hidden')">
                     <td class="px-3 py-1.5 {{ status_cls }}">{{ status_text }}</td>
                     <td class="px-3 py-1.5 text-slate-400">{{ op_icons.get(ev.operation, '·') }}</td>
                     <td class="px-3 py-1.5 text-sky-300">{{ sys }}</td>
@@ -98,7 +67,8 @@
                             {% if ev.sent_headers_json %}
                             <details>
                                 <summary class="text-slate-500 cursor-pointer select-none">sent headers</summary>
-                                <pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">{{ ev.sent_headers_json | pretty_json }}</pre>
+                                <pre
+                                    class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">{{ ev.sent_headers_json | pretty_json }}</pre>
                             </details>
                             {% endif %}
                             <div class="text-slate-600">{{ ev.timestamp }}</div>
@@ -156,12 +126,6 @@
             const summaryRow = document.createElement('tr');
             summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
             summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
-            summaryRow.setAttribute('data-detail', detailId);
-            summaryRow.setAttribute('data-status', statusText);
-            summaryRow.setAttribute('data-op', d.operation || '');
-            summaryRow.setAttribute('data-sys', sys);
-            summaryRow.setAttribute('data-dt', d.datatype || '');
-            summaryRow.setAttribute('data-url', shortPath);
             summaryRow.innerHTML = `
                 <td class="px-3 py-1.5 ${statusCls}">${statusText}</td>
                 <td class="px-3 py-1.5 text-slate-400">${opIcons[d.operation] || '·'}</td>
@@ -186,62 +150,17 @@
             body.insertBefore(detailRow, body.firstChild);
             body.insertBefore(summaryRow, body.firstChild);
 
-            // Apply active column filters to the new rows immediately
-            _applyFiltersToRow(summaryRow, detailRow);
-
             const total = parseInt(countEl?.textContent) || 0;
             if (countEl) countEl.textContent = (total + 1) + ' events loaded';
-
             while (body.children.length > 400) body.removeChild(body.lastChild);
         });
     });
-
-    function applyColFilters(bodyId) {
-        const bodyEl = document.getElementById(bodyId);
-        if (!bodyEl) return;
-        const filters = _readFilters(bodyEl.closest('table'));
-        const hasAny = Object.keys(filters).length > 0;
-
-        bodyEl.querySelectorAll('tr[data-detail]').forEach(function (row) {
-            const visible = !hasAny || _rowMatchesFilters(row, filters);
-            row.classList.toggle('hidden', !visible);
-            const detailRow = document.getElementById(row.dataset.detail);
-            if (detailRow && !visible) detailRow.classList.add('hidden');
-        });
-    }
-
-    function _readFilters(table) {
-        const filters = {};
-        if (!table) return filters;
-        table.querySelectorAll('thead input[data-col]').forEach(function (inp) {
-            const v = inp.value.trim().toLowerCase();
-            if (v) filters[inp.dataset.col] = v;
-        });
-        return filters;
-    }
-
-    function _rowMatchesFilters(row, filters) {
-        for (const [col, query] of Object.entries(filters)) {
-            if (!(row.dataset[col] || '').toLowerCase().includes(query)) return false;
-        }
-        return true;
-    }
-
-    function _applyFiltersToRow(summaryRow, detailRow) {
-        const table = document.getElementById('webhook-log-body').closest('table');
-        const filters = _readFilters(table);
-        if (Object.keys(filters).length === 0) return;
-        const visible = _rowMatchesFilters(summaryRow, filters);
-        summaryRow.classList.toggle('hidden', !visible);
-        if (!visible && detailRow) detailRow.classList.add('hidden');
-    }
 
     function clearLog() {
         document.getElementById('webhook-log-body').innerHTML =
             '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New webhooks will appear here.</td></tr>';
         const countEl = document.getElementById('wh-count');
         if (countEl) countEl.textContent = '0 events loaded';
-        document.querySelectorAll('thead input[data-col]').forEach(function (inp) { inp.value = ''; });
     }
 </script>
 {% endblock %}
