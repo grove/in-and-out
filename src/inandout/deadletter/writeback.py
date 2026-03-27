@@ -66,6 +66,24 @@ async def move_to_dead_letter(
 
     dl_table = dead_letter_table_name("writeback", connector, datatype, namespace)
 
+    # Check dead-letter policy before accepting the row
+    try:
+        from inandout.deadletter.policy import get_policy
+        _attempt = await failure_count_for_row(pool, connector, datatype, delta_table, external_id)
+        if not get_policy(connector).should_dead_letter(
+            connector, datatype, external_id, action, _attempt
+        ):
+            logger.info(
+                "writeback_dead_letter_skipped_by_policy",
+                connector=connector,
+                datatype=datatype,
+                external_id=external_id,
+                action=action,
+            )
+            return
+    except Exception:
+        pass  # Policy check failure must not block the default DL path
+
     try:
         async with pool.connection() as conn:
             await ensure_dead_letter_table(conn, "writeback", connector, datatype, namespace)
@@ -182,7 +200,7 @@ async def replay_writeback_dead_letter_rows(
         async with pool.connection() as conn:
             rows = await (await conn.execute(
                 f"""
-                SELECT id, external_id, raw, error_class
+                SELECT id, external_id, raw, error_class, requeue_count, failed_at
                 FROM {dl_table}
                 WHERE requeue_count < %s AND requeued_at IS NULL
                 ORDER BY failed_at
@@ -200,7 +218,23 @@ async def replay_writeback_dead_letter_rows(
     errors = 0
 
     for row in rows:
-        dl_id, external_id, raw_json, action = row
+        dl_id, external_id, raw_json, action, requeue_count, failed_at = row
+        # Check replay policy
+        try:
+            from inandout.deadletter.policy import get_policy
+            import datetime as _dt_rp
+            _now = _dt_rp.datetime.now(_dt_rp.timezone.utc)
+            _fa = failed_at
+            if _fa is not None and hasattr(_fa, "tzinfo") and _fa.tzinfo is None:
+                _fa = _fa.replace(tzinfo=_dt_rp.timezone.utc)
+            age_secs = (_now - _fa).total_seconds() if _fa else 0.0
+            if not get_policy(connector).should_replay(
+                connector, datatype, external_id or "",
+                requeue_count or 0, age_secs,
+            ):
+                continue
+        except Exception:
+            pass  # Policy check failure falls back to default behaviour
         try:
             payload: dict = {}
             if isinstance(raw_json, dict):

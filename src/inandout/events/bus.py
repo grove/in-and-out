@@ -48,6 +48,26 @@ class EventType(str, Enum):
     # Payload: connector, datatype, external_id, resolution_strategy
     WRITEBACK_CONFLICT = "writeback_conflict"
 
+    # An ingestion sync cycle has started.
+    # Payload: connector, datatype, mode ("full"|"incremental")
+    SYNC_STARTED = "sync_started"
+
+    # An ingestion sync cycle has failed with an unhandled exception.
+    # Payload: connector, datatype, error (str)
+    SYNC_FAILED = "sync_failed"
+
+    # Schema drift was detected during a full sync.
+    # Payload: connector, datatype, new_fields (list[str]), orphan_columns (list[str])
+    SCHEMA_DRIFT_DETECTED = "schema_drift_detected"
+
+    # A record was written to the ingestion dead-letter table.
+    # Payload: connector, datatype, external_id, error_class, error_message
+    ROW_DEAD_LETTERED = "row_dead_lettered"
+
+    # A writeback cycle has completed (success or partial failure).
+    # Payload: connector, datatype, processed, skipped, failed, conflicts
+    WRITEBACK_CYCLE_COMPLETED = "writeback_cycle_completed"
+
 
 class EventBus:
     """Async in-process pub/sub bus.

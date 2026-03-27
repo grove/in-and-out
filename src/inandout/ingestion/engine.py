@@ -130,6 +130,16 @@ class IngestionEngine:
             span.set_attribute("mode", mode)
 
             log.info("sync_started", mode=mode, watermark=existing_wm)
+            try:
+                from inandout.events import EventType, get_event_bus
+                await get_event_bus().publish(
+                    EventType.SYNC_STARTED,
+                    connector=connector.name,
+                    datatype=datatype,
+                    mode=mode,
+                )
+            except Exception:
+                pass
 
             # T1 #44: skip sync if connector is currently marked unavailable
             # and the cooldown period (default 300 s) has not yet elapsed.
@@ -340,6 +350,16 @@ class IngestionEngine:
                             result.status = "failed"
                             result.error_message = str(exc)
                             log.error("sync_failed", error=str(exc))
+                            try:
+                                from inandout.events import EventType, get_event_bus
+                                await get_event_bus().publish(
+                                    EventType.SYNC_FAILED,
+                                    connector=connector.name,
+                                    datatype=datatype,
+                                    error=str(exc),
+                                )
+                            except Exception:
+                                pass
                             # T1 #44: record failure in circuit breaker; if the
                             # breaker opens, mark this connector/datatype as
                             # source-unavailable in the health table.
@@ -905,6 +925,7 @@ class IngestionEngine:
                                         conn, dl_table, external_id_for_dl, record,
                                         str([str(v) for v in violations]),
                                         "quality_violation", result.run_id,
+                                        connector.name, datatype,
                                     )
                                     continue
 
@@ -914,7 +935,8 @@ class IngestionEngine:
                                 log.warning("missing_external_id", record_keys=list(record.keys()))
                                 await _write_dead_letter(
                                     conn, dl_table, None, record, "could not extract primary key",
-                                    "data_error", result.run_id
+                                    "data_error", result.run_id,
+                                    connector.name, datatype,
                                 )
                                 continue
 
@@ -1140,6 +1162,19 @@ class IngestionEngine:
                         await drift_conn.commit()
                     except Exception as _bsv_exc:
                         log.warning("schema_version_bump_failed", error=str(_bsv_exc))
+
+                if orphans or new_fields:
+                    try:
+                        from inandout.events import EventType, get_event_bus
+                        await get_event_bus().publish(
+                            EventType.SCHEMA_DRIFT_DETECTED,
+                            connector=connector.name,
+                            datatype=datatype,
+                            new_fields=list(new_fields) if new_fields else [],
+                            orphan_columns=list(orphans) if orphans else [],
+                        )
+                    except Exception:
+                        pass
 
         result.status = "completed"
         
@@ -1876,6 +1911,8 @@ async def _write_dead_letter(
     error_message: str,
     error_class: str,
     run_id: uuid.UUID,
+    connector: str = "",
+    datatype: str = "",
 ) -> None:
     """Write a failed record to the dead-letter table."""
     try:
@@ -1886,5 +1923,18 @@ async def _write_dead_letter(
             """,
             [external_id, orjson.dumps(raw).decode(), error_message, error_class, run_id],
         )
+        if connector:
+            try:
+                from inandout.events import EventType, get_event_bus
+                await get_event_bus().publish(
+                    EventType.ROW_DEAD_LETTERED,
+                    connector=connector,
+                    datatype=datatype,
+                    external_id=external_id,
+                    error_class=error_class,
+                    error_message=error_message,
+                )
+            except Exception:
+                pass
     except Exception:
         pass  # DL write failure must never mask the original error

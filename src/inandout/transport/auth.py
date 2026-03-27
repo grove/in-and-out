@@ -15,12 +15,23 @@ logger = structlog.get_logger(__name__)
 
 
 def resolve_credential(credential_ref: str) -> str:
+    # Try custom credential providers first
+    try:
+        from inandout.secrets.provider import resolve_via_providers
+        provider_value = resolve_via_providers(credential_ref)
+        if provider_value is not None:
+            return provider_value
+    except Exception:
+        pass
+
+    # Fall back to environment variable
     env_var = f"INOUT_CREDENTIAL_{credential_ref.upper().replace('-', '_')}"
     value = os.environ.get(env_var)
     if value is None:
         raise EnvironmentError(
             f"Credential not resolved: {credential_ref!r}. "
-            f"Set env var {env_var} or use a credential store."
+            f"Set env var {env_var} or register a CredentialProvider via "
+            f"inandout.secrets.provider.register_provider()."
         )
     return value
 

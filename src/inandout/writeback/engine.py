@@ -382,6 +382,21 @@ class WritebackEngine:
                 await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
                 await conn.commit()
 
+        # Emit WRITEBACK_CYCLE_COMPLETED lifecycle event
+        try:
+            from inandout.events import EventType, get_event_bus
+            await get_event_bus().publish(
+                EventType.WRITEBACK_CYCLE_COMPLETED,
+                connector=connector.name,
+                datatype=datatype,
+                processed=result.processed,
+                skipped=result.skipped,
+                failed=result.failed,
+                conflicts=result.conflicts,
+            )
+        except Exception:
+            pass
+
         return result
 
     async def _deduplicate_with_audit(
@@ -693,6 +708,16 @@ class WritebackEngine:
                     row, use_desired_state_table=writeback_cfg.use_desired_state_table
                 )
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
+                # Apply writeback hooks (transform → filter)
+                try:
+                    from inandout.writeback.hooks import apply_writeback_hooks
+                    _hooked = await apply_writeback_hooks(payload, action, connector.name)
+                    if _hooked is None:
+                        result.skipped += 1
+                        return
+                    payload = _hooked
+                except Exception:
+                    pass
                 # T2 #23: pre-write payload validation
                 _pw_schema = getattr(writeback_cfg, "payload_schema", None)
                 if _pw_schema:
@@ -784,6 +809,16 @@ class WritebackEngine:
                     row, use_desired_state_table=writeback_cfg.use_desired_state_table
                 )
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
+                # Apply writeback hooks (transform → filter)
+                try:
+                    from inandout.writeback.hooks import apply_writeback_hooks
+                    _hooked_upd = await apply_writeback_hooks(payload, action, connector.name)
+                    if _hooked_upd is None:
+                        result.skipped += 1
+                        return
+                    payload = _hooked_upd
+                except Exception:
+                    pass
                 # T2 #23: pre-write payload validation
                 _pw_schema_upd = getattr(writeback_cfg, "payload_schema", None)
                 if _pw_schema_upd:
@@ -1320,6 +1355,16 @@ class WritebackEngine:
                     row, use_desired_state_table=writeback_cfg.use_desired_state_table
                 )
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
+                # Apply writeback hooks (transform → filter)
+                try:
+                    from inandout.writeback.hooks import apply_writeback_hooks
+                    _hooked_ups = await apply_writeback_hooks(payload, action, connector.name)
+                    if _hooked_ups is None:
+                        result.skipped += 1
+                        return
+                    payload = _hooked_ups
+                except Exception:
+                    pass
                 _pw_schema_ups = getattr(writeback_cfg, "payload_schema", None)
                 if _pw_schema_ups:
                     _pw_errors_ups = _validate_payload_schema(payload, _pw_schema_ups)
