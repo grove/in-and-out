@@ -119,6 +119,7 @@ def create_app(
             servers=[
                 {"url": connector.connection.base_url, "description": f"Live {connector.system} API"},
             ],
+            root_path_in_servers=False,
         )
         api_router = build_connector_router(
             connector,
