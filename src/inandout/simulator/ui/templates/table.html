@@ -1,100 +1,247 @@
 {% extends "base.html" %}
-{% block title %}{{ datatype }} — {{ connector.name }} — Simulator{% endblock %}
+{% block title %}{{ datatype }} &mdash; {{ connector.name }} &mdash; Simulator{% endblock %}
 
 {% block content %}
-<!-- Breadcrumb -->
-<nav class="text-sm text-slate-400 mb-4 flex items-center gap-1">
-    <a href="/ui" class="hover:text-sky-400">Dashboard</a>
-    <span>/</span>
-    <span class="text-slate-300">{{ connector.name }}</span>
-    <span>/</span>
-    <span class="text-sky-300 font-medium">{{ datatype }}</span>
-</nav>
+<div id="split-root" class="flex h-full" style="user-select:none">
 
-<div class="flex items-center justify-between mb-4">
-    <h1 class="text-xl font-bold text-slate-100">
-        {{ datatype }}
-        <span id="count-{{ connector.name }}-{{ datatype }}"
-            class="text-sm font-normal bg-sky-900 text-sky-300 px-2 py-0.5 rounded ml-2 transition-all">
-            {{ live_count }}
-        </span>
-    </h1>
-    <button onclick="document.getElementById('new-record-form').classList.toggle('hidden')"
-        class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-        + New Record
-    </button>
-</div>
+    <!-- Top pane: list -->
+    <div id="table-pane" class="flex flex-col gap-3 min-w-0 overflow-hidden flex-1" style="min-width:280px">
 
-<!-- New record inline form -->
-<div id="new-record-form" class="hidden bg-slate-800 border border-slate-600 rounded-xl p-4 mb-4">
-    <h2 class="text-base font-semibold text-slate-100 mb-3">Create New Record</h2>
-    <div class="flex flex-col gap-3">
-        <textarea id="new-record-json" class="w-full bg-slate-900 text-slate-100 font-mono text-sm rounded-lg p-3
-                     border border-slate-600 focus:border-sky-500 focus:outline-none h-32"
-            placeholder='{"id": "1234", "name": "Alice"}'></textarea>
-        <div class="flex gap-2">
-            <button onclick="submitNewRecord('{{ connector.name }}', '{{ datatype }}')"
-                class="bg-green-600 hover:bg-green-500 text-white text-sm px-4 py-2 rounded-lg">
-                Create
+        <!-- Header row -->
+        <div class="flex items-center gap-2 flex-wrap shrink-0">
+            <h1 class="text-lg font-bold text-slate-100 flex items-center gap-2 shrink-0">
+                {{ datatype }}
+                <span id="count-{{ connector.name }}-{{ datatype }}"
+                    class="text-sm font-normal bg-sky-900 text-sky-300 px-2 py-0.5 rounded transition-all">
+                    {{ live_count }}
+                </span>
+            </h1>
+            <input id="table-search" type="search" placeholder="Search..." class="flex-1 min-w-0 bg-slate-800 border border-slate-600 text-slate-200 text-sm rounded-lg px-3 py-1.5
+                       placeholder-slate-500 focus:border-sky-500 focus:outline-none" oninput="filterRows(this.value)">
+            <button id="batch-delete-btn"
+                class="hidden bg-red-700 hover:bg-red-600 text-white text-sm px-3 py-1.5 rounded-lg"
+                onclick="batchDelete()">
+                Delete (<span id="batch-count">0</span>)
             </button>
-            <button onclick="document.getElementById('new-record-form').classList.add('hidden')"
-                class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm px-4 py-2 rounded-lg">
-                Cancel
+            <button onclick="document.getElementById('new-record-form').classList.toggle('hidden')"
+                class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors shrink-0">
+                + New
             </button>
         </div>
-    </div>
-</div>
 
-<!-- Records table -->
-<div class="bg-slate-800 rounded-xl border border-slate-700 overflow-x-auto">
-    {% set live_records = records | selectattr('__deleted_at__', 'undefined') | list %}
-    {% set all_keys = (live_records[0] if live_records else records[0]).keys() | list if records else [] %}
-    {% if records %}
-    <table class="w-full text-left">
-        <thead>
-            <tr class="border-b border-slate-700 bg-slate-750">
-                {% for key in all_keys %}
-                {% if not key.startswith('__') %}
-                <th class="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide">{{ key }}</th>
-                {% endif %}
-                {% endfor %}
-                <th class="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide">Actions</th>
-            </tr>
-        </thead>
-        <tbody id="records-tbody" hx-get="/ui/{{ connector.name }}/{{ datatype }}/_rows" hx-trigger="load"
-            hx-swap="innerHTML">
-        </tbody>
-    </table>
-    {% else %}
-    <div class="p-8 text-center text-slate-400">
-        <p class="text-lg">No records yet.</p>
-        <p class="text-sm mt-1">Create one above or start the engine to ingest data.</p>
+        <!-- New record form -->
+        <div id="new-record-form"
+            class="hidden bg-slate-800 border border-slate-600 rounded-xl p-4 shrink-0 overflow-y-auto">
+            <h2 class="text-sm font-semibold text-slate-100 mb-2">Create New Record</h2>
+            <div class="flex flex-col gap-2">
+                <textarea id="new-record-json" class="w-full bg-slate-900 text-slate-100 font-mono text-sm rounded-lg p-3
+                             border border-slate-600 focus:border-sky-500 focus:outline-none h-28"
+                    placeholder='{"id": "1234", "name": "Alice"}'></textarea>
+                <div class="flex gap-2">
+                    <button onclick="submitNewRecord('{{ connector.name }}', '{{ datatype }}')"
+                        class="bg-green-600 hover:bg-green-500 text-white text-sm px-3 py-1.5 rounded-lg">Create</button>
+                    <button onclick="document.getElementById('new-record-form').classList.add('hidden')"
+                        class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm px-3 py-1.5 rounded-lg">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Records table -->
+        <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-x-auto overflow-y-auto flex-1 min-h-0">
+            {% set live_records = records | selectattr('__deleted_at__', 'undefined') | list %}
+            {% set sample = (live_records[0] if live_records else records[0]) if records else none %}
+            {% if records %}
+            <table class="w-full text-left">
+                <thead class="sticky top-0 z-10">
+                    <tr class="border-b border-slate-700 bg-slate-800">
+                        <th class="px-2 py-2 w-7">
+                            <input type="checkbox" id="select-all" class="accent-sky-500 cursor-pointer"
+                                onchange="toggleSelectAll(this.checked)">
+                        </th>
+                        {% if sample %}{% for key in sample.keys() %}{% if not key.startswith('__') %}
+                        <th class="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide cursor-pointer select-none hover:text-slate-200 whitespace-nowrap"
+                            data-col="{{ loop.index0 + 1 }}" onclick="sortTable(this)">
+                            {{ key }}{% if key == pk_field %} <span class="text-sky-500 text-xs">&#x1F511;</span>{%
+                            endif %}
+                            <span class="sort-arrow ml-0.5 opacity-40">&#x2195;</span>
+                        </th>
+                        {% endif %}{% endfor %}{% endif %}
+                        <th class="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide whitespace-nowrap cursor-pointer select-none hover:text-slate-200"
+                            data-col="modified" onclick="sortTable(this)">
+                            Modified <span class="sort-arrow ml-0.5 opacity-40">&#x2195;</span></th>
+                        <th class="w-4"></th>
+                    </tr>
+                </thead>
+                <tbody id="records-tbody" hx-get="/ui/{{ connector.name }}/{{ datatype }}/_rows" hx-trigger="load"
+                    hx-swap="innerHTML">
+                </tbody>
+            </table>
+            {% else %}
+            <div class="p-8 text-center text-slate-400">
+                <p class="text-lg">No records yet.</p>
+                <p class="text-sm mt-1">Create one above or start the engine to ingest data.</p>
+            </div>
+            {% endif %}
+        </div>
+
+    </div><!-- /table-pane -->
+
+    <!-- Vertical drag handle -->
+    <div id="drag-handle" class="hidden w-1.5 shrink-0 cursor-col-resize hover:bg-sky-500 transition-colors mx-1"
+        style="background:#334155"></div>
+
+    <!-- Right pane: record detail panel -->
+    <div id="record-panel"
+        class="hidden flex-col bg-slate-800 border border-slate-700 rounded-xl overflow-hidden shrink-0"
+        style="width:500px; min-width:320px; max-width:65%">
+        <div class="flex items-center justify-between px-4 py-2 border-b border-slate-700 bg-slate-800 shrink-0">
+            <span id="record-panel-title" class="text-sm font-semibold text-slate-300">Record</span>
+            <button onclick="closeRecordPanel()"
+                class="text-slate-500 hover:text-slate-200 text-lg leading-none px-1">&#x2715;</button>
+        </div>
+        <div id="record-panel-body" class="flex flex-col flex-1 overflow-hidden p-4 min-h-0"></div>
     </div>
-    {% endif %}
+
 </div>
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
+    const _connector = '{{ connector.name }}';
+    const _datatype = '{{ datatype }}';
+
+    function relTime(iso) {
+        if (!iso) return '';
+        const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+        if (s < 5) return 'just now';
+        if (s < 60) return s + 's ago';
+        if (s < 3600) return Math.floor(s / 60) + 'm ago';
+        if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+        return Math.floor(s / 86400) + 'd ago';
+    }
+    function stampModifiedCells() {
+        document.querySelectorAll('td[data-modified-at]').forEach(function (td) {
+            td.textContent = relTime(td.dataset.modifiedAt);
+        });
+        highlightRecentRows();
+    }
+    function highlightRecentRows() {
+        var now = Date.now();
+        document.querySelectorAll('#records-tbody tr[data-record-id]').forEach(function (tr) {
+            var td = tr.querySelector('td[data-modified-at]');
+            if (!td || !td.dataset.modifiedAt) return;
+            var age = (now - new Date(td.dataset.modifiedAt).getTime()) / 1000;
+            td.classList.toggle('cell-recent', age < 60);
+        });
+    }
+    setInterval(stampModifiedCells, 15000);
+    document.addEventListener('htmx:afterSwap', function (e) {
+        if (e.detail.target && e.detail.target.id === 'records-tbody') {
+            stampModifiedCells();
+            filterRows(document.getElementById('table-search').value);
+        }
+    });
+
+    // Panel open/close
+    function openRecordPanel(connector, datatype, recordId) {
+        const panel = document.getElementById('record-panel');
+        const body = document.getElementById('record-panel-body');
+        document.getElementById('record-panel-title').textContent = datatype + ':' + recordId;
+        body.innerHTML = '<p class="text-slate-400 text-sm animate-pulse">Loading...</p>';
+        panel.classList.remove('hidden'); panel.classList.add('flex');
+        document.getElementById('drag-handle').classList.remove('hidden');
+        document.querySelectorAll('#records-tbody tr.row-selected').forEach(function (r) {
+            r.classList.remove('row-selected');
+        });
+        var row = document.getElementById('row-' + recordId);
+        if (row) row.classList.add('row-selected');
+        fetch('/ui/' + connector + '/' + datatype + '/' + recordId + '/_panel')
+            .then(function (r) { return r.ok ? r.text() : '<p class="text-red-400 text-sm">Failed to load.</p>'; })
+            .then(function (html) {
+                body.innerHTML = html;
+                body.querySelectorAll('script').forEach(function (s) {
+                    var ns = document.createElement('script');
+                    ns.textContent = s.textContent;
+                    document.head.appendChild(ns).parentNode.removeChild(ns);
+                });
+                htmx.process(body);
+            });
+    }
+    function closeRecordPanel() {
+        var panel = document.getElementById('record-panel');
+        panel.classList.add('hidden'); panel.classList.remove('flex');
+        document.getElementById('drag-handle').classList.add('hidden');
+        document.querySelectorAll('#records-tbody tr.row-selected').forEach(function (r) {
+            r.classList.remove('row-selected');
+        });
+    }
+
+    // Row click
+    document.addEventListener('click', function (e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' ||
+            e.target.closest('button') || e.target.closest('input')) return;
+        var tr = e.target.closest('tr[data-record-id]');
+        if (!tr) return;
+        e.preventDefault();
+        openRecordPanel(tr.dataset.connector, tr.dataset.datatype, tr.dataset.recordId);
+    });
+
+    // Search
+    function filterRows(query) {
+        var q = query.trim().toLowerCase();
+        document.querySelectorAll('#records-tbody tr').forEach(function (tr) {
+            tr.style.display = (!q || tr.textContent.toLowerCase().includes(q)) ? '' : 'none';
+        });
+    }
+
+    // Multi-select
+    function toggleSelectAll(checked) {
+        document.querySelectorAll('.row-checkbox').forEach(function (cb) { cb.checked = checked; });
+        updateBatchBtn();
+    }
+    document.addEventListener('change', function (e) {
+        if (e.target.classList.contains('row-checkbox')) updateBatchBtn();
+    });
+    function updateBatchBtn() {
+        var n = document.querySelectorAll('.row-checkbox:checked').length;
+        document.getElementById('batch-count').textContent = n;
+        document.getElementById('batch-delete-btn').classList.toggle('hidden', n === 0);
+    }
+    async function batchDelete() {
+        var cbs = Array.from(document.querySelectorAll('.row-checkbox:checked'));
+        if (!cbs.length) return;
+        if (!confirm('Delete ' + cbs.length + ' record(s)?')) return;
+        for (var i = 0; i < cbs.length; i++) {
+            await fetch('/admin/' + _connector + '/' + _datatype + '/' + cbs[i].dataset.recordId,
+                { method: 'DELETE' });
+        }
+        var tbody = document.getElementById('records-tbody');
+        if (tbody) htmx.ajax('GET', tbody.getAttribute('hx-get'), { target: tbody, swap: 'innerHTML' });
+        document.getElementById('select-all').checked = false;
+        updateBatchBtn();
+        closeRecordPanel();
+    }
+
+    // Create new record
     async function submitNewRecord(connector, datatype) {
-        const raw = document.getElementById('new-record-json').value;
-        let body;
-        try { body = JSON.parse(raw); }
-        catch (e) { alert('Invalid JSON: ' + e.message); return; }
-        const resp = await fetch(`/admin/${connector}/${datatype}`, {
+        var raw = document.getElementById('new-record-json').value;
+        var body;
+        try { body = JSON.parse(raw); } catch (e) { alert('Invalid JSON: ' + e.message); return; }
+        var resp = await fetch('/admin/' + connector + '/' + datatype, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         if (resp.ok) {
-            const html = await resp.text();
-            const tbody = document.getElementById('records-tbody');
+            var html = await resp.text();
+            var tbody = document.getElementById('records-tbody');
             if (tbody) {
-                const tmp = document.createElement('tbody');
+                var tmp = document.createElement('tbody');
                 tmp.innerHTML = html;
-                const row = tmp.firstElementChild;
+                var row = tmp.firstElementChild;
                 tbody.prepend(row);
                 row.classList.add('flash-create');
+                stampModifiedCells();
             }
             document.getElementById('new-record-form').classList.add('hidden');
             document.getElementById('new-record-json').value = '';
@@ -102,5 +249,62 @@
             alert('Failed to create record: ' + resp.status);
         }
     }
+
+    // Column sorting
+    var _sortCol = null, _sortDir = 1;
+    function sortTable(th) {
+        var col = th.dataset.col;
+        if (_sortCol === col) { _sortDir *= -1; } else { _sortCol = col; _sortDir = 1; }
+        // Update arrow indicators
+        document.querySelectorAll('th[data-col] .sort-arrow').forEach(function (a) {
+            a.textContent = '\u2195'; a.style.opacity = '0.4';
+        });
+        var arrow = th.querySelector('.sort-arrow');
+        if (arrow) { arrow.textContent = _sortDir === 1 ? '\u2191' : '\u2193'; arrow.style.opacity = '1'; }
+        // Sort rows
+        var tbody = document.getElementById('records-tbody');
+        if (!tbody) return;
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort(function (a, b) {
+            var va, vb;
+            if (col === 'modified') {
+                var ta = a.querySelector('td[data-modified-at]');
+                var tb = b.querySelector('td[data-modified-at]');
+                va = ta ? (ta.dataset.modifiedAt || '') : '';
+                vb = tb ? (tb.dataset.modifiedAt || '') : '';
+            } else {
+                var colIdx = parseInt(col, 10); // 1-based index within the row (after checkbox)
+                var cellA = a.querySelectorAll('td')[colIdx];
+                var cellB = b.querySelectorAll('td')[colIdx];
+                va = cellA ? cellA.textContent.trim() : '';
+                vb = cellB ? cellB.textContent.trim() : '';
+            }
+            if (va < vb) return -1 * _sortDir;
+            if (va > vb) return 1 * _sortDir;
+            return 0;
+        });
+        rows.forEach(function (r) { tbody.appendChild(r); });
+    }
+
+    // Resizable drag handle (col-resize)
+    (function () {
+        var handle = document.getElementById('drag-handle');
+        var root = document.getElementById('split-root');
+        var rightPane = document.getElementById('record-panel');
+        var dragging = false, startX = 0, startW = 0;
+        handle.addEventListener('mousedown', function (e) {
+            dragging = true; startX = e.clientX; startW = rightPane.offsetWidth;
+            document.body.style.cursor = 'col-resize'; e.preventDefault();
+        });
+        document.addEventListener('mousemove', function (e) {
+            if (!dragging) return;
+            // Dragging left grows the panel
+            var newW = Math.max(320, Math.min(startW + (startX - e.clientX), root.offsetWidth - 280 - 10));
+            rightPane.style.width = newW + 'px';
+        });
+        document.addEventListener('mouseup', function () {
+            if (dragging) { dragging = false; document.body.style.cursor = ''; }
+        });
+    })();
 </script>
 {% endblock %}

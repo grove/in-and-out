@@ -93,6 +93,8 @@ def _build_openapi_extra(
     seed: list[dict],
     pk_field: str,
     selector: str = "results",
+    pagination=None,
+    filter_param: str | None = None,
 ) -> dict:
     """Return an ``openapi_extra`` dict enriching Swagger UI with seed-data examples."""
     if not seed:
@@ -104,6 +106,47 @@ def _build_openapi_extra(
     body_fields = {k: v for k, v in first.items() if k != pk_field}
 
     extra: dict = {}
+
+    # Pagination + incremental filter query params for the list endpoint
+    if action == "list":
+        params: list[dict] = []
+        if filter_param:
+            params.append({
+                "name": filter_param,
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Incremental filter: return records modified after this watermark",
+                "example": "2026-01-01T00:00:00Z",
+            })
+        if pagination is not None:
+            strategy = pagination.strategy
+            if strategy == PaginationStrategy.cursor and pagination.cursor:
+                params.append({
+                    "name": pagination.cursor.request_param,
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": "Cursor token for the next page (from previous response)",
+                })
+            elif strategy == PaginationStrategy.offset:
+                off_cfg = pagination.offset or {}
+                off_p = off_cfg.get("param", "offset") if isinstance(off_cfg, dict) else "offset"
+                lim_p = off_cfg.get("limit_param", "limit") if isinstance(off_cfg, dict) else "limit"
+                params.append({"name": off_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 0}, "description": "Offset (number of records to skip)"})
+                params.append({"name": lim_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 20}, "description": "Maximum records per page"})
+            elif strategy == PaginationStrategy.page_number:
+                pn_cfg = pagination.page_number or {}
+                page_p = pn_cfg.get("page_param", "page") if isinstance(pn_cfg, dict) else "page"
+                pp_p = pn_cfg.get("per_page_param", "per_page") if isinstance(pn_cfg, dict) else "per_page"
+                params.append({"name": page_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 1}, "description": "Page number (1-based)"})
+                params.append({"name": pp_p, "in": "query", "required": False, "schema": {"type": "integer", "default": 20}, "description": "Records per page"})
+            elif strategy == PaginationStrategy.keyset and pagination.keyset:
+                ks = pagination.keyset
+                params.append({"name": ks.request_param, "in": "query", "required": False, "schema": {"type": "string"}, "description": f"Keyset cursor: return records with {ks.keyset_field} > this value"})
+                params.append({"name": ks.page_size_param, "in": "query", "required": False, "schema": {"type": "integer", "default": ks.page_size}, "description": "Page size"})
+        if params:
+            extra["parameters"] = params
 
     # Request-body example
     if action in ("insert", "update", "archive", "upsert"):
@@ -122,15 +165,13 @@ def _build_openapi_extra(
 
     # Response example
     if action == "list":
-        extra["responses"] = {
-            "200": {
-                "content": {
-                    "application/json": {
-                        "examples": {
-                            "seed-example": {
-                                "summary": "First page from seed data",
-                                "value": {selector: seed[:3]},
-                            }
+        extra.setdefault("responses", {})["200"] = {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "seed-example": {
+                            "summary": "First page from seed data",
+                            "value": {selector: seed[:3]},
                         }
                     }
                 }
@@ -343,6 +384,9 @@ def build_connector_router(
                     next_offset = offset + effective_page_size
                     has_more = next_offset < total
 
+                    # Strip internal meta-keys before returning to the caller.
+                    page = [{k: v for k, v in r.items() if not k.startswith("__")} for r in page]
+
                     # --- Build response body ---
                     body: dict = {_selector: page}
                     headers_out: dict[str, str] = {}
@@ -391,7 +435,12 @@ def build_connector_router(
                 ["GET"],
                 _make_list_handler(),
                 openapi_extra=_build_openapi_extra(
-                    "list", dt_cfg.seed_data, pk_field, selector=record_selector
+                    "list",
+                    dt_cfg.seed_data,
+                    pk_field,
+                    selector=record_selector,
+                    pagination=pagination,
+                    filter_param=filter_param,
                 ),
             )
 

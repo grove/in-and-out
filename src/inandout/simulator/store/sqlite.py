@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from inandout.simulator.store import MutationEvent, StoredRecord, _new_id, _now_iso
+from inandout.simulator.store import MutationEvent, StoredRecord, _new_id, _next_id, _now_iso
 
 
 def _ts() -> str:
@@ -167,7 +167,14 @@ class SQLiteStore:
         source: str = "engine",
     ) -> dict[str, Any]:
         def _do(conn, connector, datatype, data, pk_field, source):
-            rid = str(data.get(pk_field) or _new_id())
+            existing = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT record_id FROM sim_records WHERE connector=? AND datatype=?",
+                    (connector, datatype),
+                ).fetchall()
+            ]
+            rid = str(data.get(pk_field) or _next_id(existing))
             data = dict(data)
             data[pk_field] = rid
             ts = _ts()

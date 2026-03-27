@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from html import escape as html_escape
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -40,6 +41,7 @@ def build_ui_router() -> APIRouter:
             for dt_name in conn.datatypes:
                 counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
         recent = request.app.state.event_bus.recent(limit=40)
+        connector_systems = {conn.name: conn.system for conn in connectors}
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -47,6 +49,53 @@ def build_ui_router() -> APIRouter:
                 "connectors": connectors,
                 "counts": counts,
                 "recent_events": recent,
+                "connector_systems": connector_systems,
+            },
+        )
+
+    @router.get("/ui/_requests", response_class=HTMLResponse)
+    async def request_log_view(request: Request):
+        connectors = request.app.state.connectors
+        counts: dict[str, dict[str, int]] = {}
+        store: RecordStore = request.app.state.store
+        for conn in connectors:
+            counts[conn.name] = {}
+            for dt_name in conn.datatypes:
+                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+        connector_systems = {conn.name: conn.system for conn in connectors}
+        all_events = request.app.state.event_bus.recent(limit=200)
+        request_events = [e for e in all_events if e.event_type == "request"]
+        return templates.TemplateResponse(
+            request,
+            "requests.html",
+            {
+                "connectors": connectors,
+                "counts": counts,
+                "connector_systems": connector_systems,
+                "events": request_events,
+            },
+        )
+
+    @router.get("/ui/_webhooks", response_class=HTMLResponse)
+    async def webhook_log_view(request: Request):
+        connectors = request.app.state.connectors
+        counts: dict[str, dict[str, int]] = {}
+        store: RecordStore = request.app.state.store
+        for conn in connectors:
+            counts[conn.name] = {}
+            for dt_name in conn.datatypes:
+                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+        connector_systems = {conn.name: conn.system for conn in connectors}
+        all_events = request.app.state.event_bus.recent(limit=200)
+        webhook_events = [e for e in all_events if e.event_type == "webhook"]
+        return templates.TemplateResponse(
+            request,
+            "webhooks.html",
+            {
+                "connectors": connectors,
+                "counts": counts,
+                "connector_systems": connector_systems,
+                "events": webhook_events,
             },
         )
 
@@ -61,16 +110,23 @@ def build_ui_router() -> APIRouter:
         pk_field = _pk_from_cfg(dt_cfg)
         records = await store.list_all(connector_name, datatype, include_deleted=True)
         live_count = await store.count(connector_name, datatype)
+        counts: dict[str, dict[str, int]] = {}
+        for conn in connectors:
+            counts[conn.name] = {}
+            for dt_name in conn.datatypes:
+                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
         return templates.TemplateResponse(
             request,
             "table.html",
             {
                 "connector": connector,
+                "connectors": connectors,
                 "datatype": datatype,
                 "dt_cfg": dt_cfg,
                 "pk_field": pk_field,
                 "records": records,
                 "live_count": live_count,
+                "counts": counts,
             },
         )
 
@@ -123,6 +179,148 @@ def build_ui_router() -> APIRouter:
         mutations = [m for m in mutations if m.record_id == record_id]
         return HTMLResponse(_mutations_html(mutations))
 
+    @router.get("/ui/{connector_name}/{datatype}/{record_id}/_panel", response_class=HTMLResponse)
+    async def record_panel_fragment(
+        request: Request, connector_name: str, datatype: str, record_id: str
+    ):
+        """Compact record view for the side panel on the table page."""
+        connectors = request.app.state.connectors
+        connector = next((c for c in connectors if c.name == connector_name), None)
+        if connector is None or datatype not in connector.datatypes:
+            return HTMLResponse('<p class="text-red-400 text-sm">Not found.</p>', status_code=404)
+        store: RecordStore = request.app.state.store
+        record = await store.get_by_id(connector_name, datatype, record_id)
+        if record is None:
+            return HTMLResponse(
+                '<p class="text-red-400 text-sm">Record not found.</p>', status_code=404
+            )
+        display = {k: v for k, v in record.items() if not k.startswith("__")}
+        record_json = json.dumps(display, indent=2)
+        etag = record.get("__modified_at__", "")
+        mutations = await store.recent_mutations(connector_name, datatype, limit=20)
+        mutations = [m for m in mutations if m.record_id == record_id]
+        mut_html = _mutations_html(mutations)
+        is_deleted = "__deleted_at__" in record
+        deleted_html = ""
+        if is_deleted:
+            deleted_html = (
+                '<div class="mb-3 bg-red-900/40 border border-red-700 rounded-lg p-3 flex items-center justify-between gap-3">'
+                '<p class="text-red-300 text-xs font-semibold">Soft-deleted</p>'
+                f'<button hx-post="/admin/{connector_name}/{datatype}/{record_id}/restore"'
+                f" hx-on::after-request=\"document.getElementById('record-panel').classList.add('hidden')\""
+                ' class="bg-green-700 hover:bg-green-600 text-white text-xs px-3 py-1 rounded">Restore</button>'
+                "</div>"
+            )
+        full_link = f'<a href="/ui/{connector_name}/{datatype}/{record_id}" class="text-xs text-sky-400 hover:underline">Open full page ↗</a>'
+        edit_disabled = 'style="opacity:.4;pointer-events:none"' if is_deleted else ""
+        html = f"""
+{deleted_html}
+<div class="flex flex-col gap-3 h-full" style="min-height:0">
+
+  <!-- Stale-data warning banner (shown when an external mutation arrives) -->
+  <div id="panel-conflict-banner-{record_id}"
+       class="hidden shrink-0 bg-amber-900/50 border border-amber-600 rounded-lg px-3 py-2
+              flex items-center justify-between gap-3">
+    <span class="text-amber-300 text-xs">&#x26A0; This record was changed externally. Your edits may conflict.</span>
+    <button class="text-amber-400 hover:text-amber-200 text-xs underline shrink-0"
+            onclick="reloadPanelFragment('{connector_name}','{datatype}','{record_id}')">Reload</button>
+  </div>
+
+  <!-- JSON editor -->
+  <div class="flex flex-col gap-1 flex-1 min-h-0" {edit_disabled}>
+    <div class="flex items-center justify-between shrink-0">
+      <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Edit</span>
+      {full_link}
+    </div>
+    <textarea id="panel-edit-json-{record_id}"
+      class="flex-1 w-full bg-slate-900 text-slate-100 font-mono text-xs rounded-lg p-3
+             border border-slate-600 focus:border-sky-500 focus:outline-none resize-none min-h-0"
+      >{html_escape(record_json)}</textarea>
+    <div class="flex items-center gap-2 shrink-0">
+      <button onclick="submitPanelEdit('{connector_name}','{datatype}','{record_id}')"
+        class="bg-sky-600 hover:bg-sky-500 text-white text-xs px-3 py-1.5 rounded">Save</button>
+      <button hx-delete="/admin/{connector_name}/{datatype}/{record_id}"
+        hx-on::after-request="document.getElementById('record-panel').classList.add('hidden')"
+        onclick="event.stopPropagation()"
+        class="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1.5 rounded">Delete</button>
+      <p id="panel-edit-status-{record_id}" class="text-xs hidden"></p>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="shrink-0">
+    <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">History</p>
+    <div id="panel-mutations-{record_id}" class="max-h-56 overflow-y-auto">{mut_html}</div>
+  </div>
+
+</div>
+<script>
+(function(){{
+  let _panelEtag = '{etag}';
+  const _c='{connector_name}', _d='{datatype}', _id='{record_id}';
+  async function submitPanelEdit(c,d,id){{
+    const ta=document.getElementById('panel-edit-json-'+id);
+    let body; try{{body=JSON.parse(ta.value);}}catch(e){{alert('Invalid JSON: '+e.message);return;}}
+    const headers={{'Content-Type':'application/json','If-Match':_panelEtag}};
+    const r=await fetch('/admin/'+c+'/'+d+'/'+id,{{method:'PUT',headers,body:JSON.stringify(body)}});
+    const st=document.getElementById('panel-edit-status-'+id);
+    if(r.status===412){{st.textContent='Conflict — reload panel.';st.className='text-xs text-amber-400';st.classList.remove('hidden');return;}}
+    if(r.ok){{
+      const newEtag=r.headers.get('etag')||'';
+      if(newEtag)_panelEtag=newEtag;
+      const jsonHeader=r.headers.get('x-record-json');
+      if(jsonHeader)ta.value=JSON.stringify(JSON.parse(jsonHeader),null,2);
+      // Replace the table row with the fresh HTML returned by the PUT response body.
+      const rowHtml=await r.text();
+      const rowEl=document.getElementById('row-'+id);
+      if(rowEl&&rowHtml.trim().startsWith('<tr')){{
+        const tmp=document.createElement('tbody');
+        tmp.innerHTML=rowHtml;
+        const newRow=tmp.firstElementChild;
+        if(newRow){{
+          if(rowEl.classList.contains('row-selected'))newRow.classList.add('row-selected');
+          rowEl.replaceWith(newRow);
+          if(typeof stampModifiedCells==='function')stampModifiedCells();
+        }}
+      }}
+      const banner=document.getElementById('panel-conflict-banner-'+id);
+      if(banner)banner.classList.add('hidden');
+      st.textContent='Saved.';st.className='text-xs text-green-400';st.classList.remove('hidden');
+      setTimeout(()=>st.classList.add('hidden'),2000);
+    }}
+  }}
+  window.submitPanelEdit=submitPanelEdit;
+  function reloadPanelFragment(c,d,id){{
+    const body=document.getElementById('record-panel-body');
+    if(!body)return;
+    body.innerHTML='<p class="text-slate-400 text-sm animate-pulse">Loading...</p>';
+    fetch('/ui/'+c+'/'+d+'/'+id+'/_panel')
+      .then(function(r){{return r.ok?r.text():'<p class="text-red-400 text-sm">Failed.</p>';  }})
+      .then(function(html){{
+        body.innerHTML=html;
+        body.querySelectorAll('script').forEach(function(s){{
+          var ns=document.createElement('script');ns.textContent=s.textContent;
+          document.head.appendChild(ns).parentNode.removeChild(ns);
+        }});
+        htmx.process(body);
+      }});
+  }}
+  window.reloadPanelFragment=reloadPanelFragment;
+  document.addEventListener('simulator:mutation',function(e){{
+    if(!e.detail||e.detail.record_id!==_id)return;
+    // Refresh history list
+    fetch('/ui/'+_c+'/'+_d+'/'+_id+'/_mutations').then(r=>r.text()).then(h=>{{
+      const el=document.getElementById('panel-mutations-'+_id);
+      if(el)el.innerHTML=h;
+    }});
+    // Show conflict banner — the record changed while the editor is open
+    const banner=document.getElementById('panel-conflict-banner-'+_id);
+    if(banner)banner.classList.remove('hidden');
+  }});
+}})();
+</script>"""
+        return HTMLResponse(html)
+
     @router.get("/ui/{connector_name}/{datatype}/{record_id}", response_class=HTMLResponse)
     async def record_view(request: Request, connector_name: str, datatype: str, record_id: str):
         connectors = request.app.state.connectors
@@ -134,14 +332,21 @@ def build_ui_router() -> APIRouter:
         if record is None:
             return HTMLResponse("<h1>Record Not Found</h1>", status_code=404)
         display = {k: v for k, v in record.items() if k != "__deleted_at__"}
+        counts: dict[str, dict[str, int]] = {}
+        for conn in connectors:
+            counts[conn.name] = {}
+            for dt_name in conn.datatypes:
+                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
         return templates.TemplateResponse(
             request,
             "record.html",
             {
                 "connector": connector,
+                "connectors": connectors,
                 "datatype": datatype,
                 "record_id": record_id,
                 "record": record,
+                "counts": counts,
                 "record_json": json.dumps(display, indent=2),
                 "etag": record.get("__modified_at__", ""),
             },
@@ -184,9 +389,24 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        await disp.dispatch(connector, datatype, "create", str(record.get(pk_field, "")), record)
+        wh = await disp.dispatch(
+            connector, datatype, "create", str(record.get(pk_field, "")), record
+        )
+        if wh:
+            request.app.state.event_bus.publish_webhook(
+                wh["connector"],
+                wh["datatype"],
+                wh["operation"],
+                wh["record_id"],
+                wh["url"],
+                wh["status"],
+                wh["duration_ms"],
+                wh.get("payload_json", ""),
+            )
         columns = _columns_from_cfg(dt_cfg)
-        return HTMLResponse(_row_html(connector_name, datatype, pk_field, record, columns), status_code=201)
+        return HTMLResponse(
+            _row_html(connector_name, datatype, pk_field, record, columns), status_code=201
+        )
 
     @router.put("/admin/{connector_name}/{datatype}/{record_id}", response_class=HTMLResponse)
     async def admin_update(request: Request, connector_name: str, datatype: str, record_id: str):
@@ -223,7 +443,18 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        await disp.dispatch(connector, datatype, "update", record_id, updated)
+        wh = await disp.dispatch(connector, datatype, "update", record_id, updated)
+        if wh:
+            request.app.state.event_bus.publish_webhook(
+                wh["connector"],
+                wh["datatype"],
+                wh["operation"],
+                wh["record_id"],
+                wh["url"],
+                wh["status"],
+                wh["duration_ms"],
+                wh.get("payload_json", ""),
+            )
         pk_field = _pk_from_cfg(dt_cfg)
         # Refetch so the record dict contains __modified_at__ / __created_at__ meta-keys
         # (store.update returns the raw merged data without them).
@@ -251,7 +482,18 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        await disp.dispatch(connector, datatype, "delete", record_id, None)
+        wh = await disp.dispatch(connector, datatype, "delete", record_id, None)
+        if wh:
+            request.app.state.event_bus.publish_webhook(
+                wh["connector"],
+                wh["datatype"],
+                wh["operation"],
+                wh["record_id"],
+                wh["url"],
+                wh["status"],
+                wh["duration_ms"],
+                wh.get("payload_json", ""),
+            )
         # Return a struck-through row with a Restore button instead of removing.
         dt_cfg = connector.datatypes[datatype]
         pk_field = _pk_from_cfg(dt_cfg)
@@ -274,7 +516,18 @@ def build_ui_router() -> APIRouter:
         if evs:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
-        await disp.dispatch(connector, datatype, "create", record_id, restored)
+        wh = await disp.dispatch(connector, datatype, "create", record_id, restored)
+        if wh:
+            request.app.state.event_bus.publish_webhook(
+                wh["connector"],
+                wh["datatype"],
+                wh["operation"],
+                wh["record_id"],
+                wh["url"],
+                wh["status"],
+                wh["duration_ms"],
+                wh.get("payload_json", ""),
+            )
         dt_cfg = connector.datatypes[datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         return HTMLResponse(_row_html(connector_name, datatype, pk_field, restored))
@@ -317,11 +570,11 @@ def _mutations_html(mutations: list) -> str:
     for m in mutations:
         cls = colours.get(m.operation, "border-slate-500 text-slate-400")
         if m.source == "ui":
-            src = "&#x1F9D1; You"
+            src = "&#x1F9D1; User"
         elif m.source == "seed":
             src = "&#x1F331; seed"
         else:
-            src = "&#x2699; Engine"
+            src = "&#x2699; API"
 
         diff_html = ""
         if m.operation == "update" and m.before and m.record:
@@ -379,8 +632,6 @@ def _row_html(
     rid = str(record.get(pk_field, ""))
     is_deleted = "__deleted_at__" in record
     modified_at = record.get("__modified_at__", "")
-    created_at = record.get("__created_at__", "")
-    was_updated = modified_at and created_at and modified_at != created_at
     display = {k: v for k, v in record.items() if not k.startswith("__")}
     col_list = columns if columns is not None else list(display.keys())
     row_cls = (
@@ -388,6 +639,15 @@ def _row_html(
         if is_deleted
         else "border-b border-slate-700 hover:bg-slate-750 transition-colors"
     )
+    # Checkbox cell (only for live records)
+    if is_deleted:
+        checkbox_cell = '<td class="px-2 py-2 w-7"></td>'
+    else:
+        checkbox_cell = (
+            f'<td class="px-2 py-2 w-7" onclick="event.stopPropagation()">'
+            f'<input type="checkbox" class="row-checkbox accent-sky-500 cursor-pointer" data-record-id="{rid}">'
+            f"</td>"
+        )
     cells = ""
     for k in col_list:
         v = display.get(k, "")
@@ -398,31 +658,34 @@ def _row_html(
             " line-through" if is_deleted else ""
         )
         cells += f'<td class="{td_cls}">{val}</td>'
+    # Last modified column — always visible, shows relative time
+    modified_cell = (
+        f'<td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap" data-modified-at="{modified_at}">'
+        f"{modified_at[:10] if modified_at else ''}"
+        f"</td>"
+    )
+    # Restore button for deleted rows (no delete in list — moved to panel)
     if is_deleted:
-        action = (
-            f"<button "
-            f'  hx-post="/admin/{connector_name}/{datatype}/{rid}/restore" '
-            f'  hx-target="closest tr" hx-swap="outerHTML" '
-            f'  class="text-green-400 hover:text-green-300">Restore</button>'
+        action_cell = (
+            '<td class="px-3 py-2 text-sm whitespace-nowrap">'
+            f'<button hx-post="/admin/{connector_name}/{datatype}/{rid}/restore"'
+            f' hx-target="closest tr" hx-swap="outerHTML"'
+            f' class="text-green-400 hover:text-green-300 text-xs">Restore</button>'
+            "</td>"
         )
     else:
-        action = (
-            f'<a href="/ui/{connector_name}/{datatype}/{rid}" '
-            f'   class="text-sky-400 hover:text-sky-300 mr-3">View</a>'
-            f"<button "
-            f'  hx-delete="/admin/{connector_name}/{datatype}/{rid}" '
-            f'  hx-target="closest tr" hx-swap="outerHTML" '
-            f'  class="text-red-400 hover:text-red-300">Delete</button>'
-            + (
-                f'<span id="recent-row-{rid}" data-ts="{modified_at}"'
-                f' class="ml-2 text-xs font-medium"></span>'
-                if was_updated
-                else ""
-            )
-        )
+        action_cell = '<td class="px-3 py-2 w-4"></td>'
+    row_cls_full = row_cls + (" cursor-pointer" if not is_deleted else "")
+    data_attrs = (
+        f'data-record-id="{rid}" data-connector="{connector_name}" data-datatype="{datatype}"'
+        if not is_deleted
+        else ""
+    )
     return (
-        f'<tr id="row-{rid}" class="{row_cls}">'
+        f'<tr id="row-{rid}" class="{row_cls_full}" {data_attrs}>'
+        f"{checkbox_cell}"
         f"{cells}"
-        f'<td class="px-3 py-2 text-sm whitespace-nowrap">{action}</td>'
+        f"{modified_cell}"
+        f"{action_cell}"
         f"</tr>"
     )

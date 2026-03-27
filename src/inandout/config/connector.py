@@ -211,6 +211,7 @@ class DatatypeConfig(BaseModel):
     pii_fields: list[str] = []  # B6: fields containing PII
     api_version: str | None = None  # A6: per-datatype API version override
     seed_data: list[dict[str, Any]] = []  # Demo simulator: example records loaded at startup
+    seed_count: int = 1  # If seed_data has exactly 1 entry, auto-generate this many records
 
     @model_validator(mode="after")
     def ingestion_or_writeback_required(self) -> "DatatypeConfig":

@@ -136,7 +136,7 @@ down-clean:
 simulator:
     uv run inandout simulator run \
       --connector connectors/hubspot.example.yaml \
-      --connector connectors/salesforce.example.yaml \
+      --connector connectors/tripletex.example.yaml \
       --listen 0.0.0.0:6100 \
       --reload
 

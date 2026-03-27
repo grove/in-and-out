@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any
 
-from inandout.simulator.store import MutationEvent, StoredRecord, _new_id, _now_iso
+from inandout.simulator.store import MutationEvent, StoredRecord, _new_id, _next_id, _now_iso
 
 
 def _ts() -> str:
@@ -128,7 +128,8 @@ class MemoryStore:
         source: str = "engine",
     ) -> dict[str, Any]:
         key = self._key(connector, datatype)
-        rid = str(data.get(pk_field) or _new_id())
+        existing_ids = [r.record_id for r in self._records[key]]
+        rid = str(data.get(pk_field) or _next_id(existing_ids))
         # Ensure the pk field is in the data
         data = dict(data)
         data[pk_field] = rid

@@ -15,7 +15,7 @@ from inandout.simulator.store import MutationEvent, _new_id, _now_iso
 class SimulatorEvent:
     """A single event pushed to all connected SSE clients."""
 
-    event_type: str = "mutation"  # "mutation" | "request"
+    event_type: str = "mutation"  # "mutation" | "request" | "webhook"
     connector: str = ""
     datatype: str = ""
     operation: str = ""  # create | update | delete  (mutation events)
@@ -23,8 +23,10 @@ class SimulatorEvent:
     source: str = "engine"  # engine | ui               (mutation events)
     method: str = ""  # GET | POST | PATCH …      (request events)
     path: str = ""  # URL path                  (request events)
-    status: int = 0  # HTTP status               (request events)
-    duration_ms: int = 0  # round-trip ms             (request events)
+    status: int = 0  # HTTP status               (request/webhook events)
+    duration_ms: int = 0  # round-trip ms             (request/webhook events)
+    webhook_url: str = ""  # full URL                  (webhook events)
+    payload_json: str = ""  # serialised payload        (webhook events)
     timestamp: str = field(default_factory=_now_iso)
     event_id: str = field(default_factory=_new_id)
 
@@ -90,6 +92,31 @@ class EventBus:
                 path=path,
                 status=status,
                 duration_ms=duration_ms,
+            )
+        )
+
+    def publish_webhook(
+        self,
+        connector: str,
+        datatype: str,
+        operation: str,
+        record_id: str,
+        url: str,
+        status: int,
+        duration_ms: int = 0,
+        payload_json: str = "",
+    ) -> None:
+        self.publish(
+            SimulatorEvent(
+                event_type="webhook",
+                connector=connector,
+                datatype=datatype,
+                operation=operation,
+                record_id=record_id,
+                webhook_url=url,
+                status=status,
+                duration_ms=duration_ms,
+                payload_json=payload_json,
             )
         )
 

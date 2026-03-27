@@ -58,6 +58,10 @@ connector:
           datatype: contacts
         - match: contact.propertyChange
           datatype: contacts
+        - match: company.creation
+          datatype: companies
+        - match: company.propertyChange
+          datatype: companies
 
   datatypes:
     contacts:
@@ -108,9 +112,10 @@ connector:
             method: DELETE
             path: /crm/v3/objects/contacts/${external_id}
 
-      # Demo simulator: example records loaded at startup.
+      # Single template record; seed_count tells the simulator to generate 5 records from it.
       # Set INOUT_HUBSPOT_BASE_URL=http://simulator:6100/hubspot to point
       # the engine at the local simulator instead of the real HubSpot API.
+      seed_count: 5
       seed_data:
         - id: "1001"
           createdAt: "2026-03-20T10:00:00.000Z"
@@ -123,47 +128,97 @@ connector:
             email: alice.smith@example.com
             createdate: "2026-03-20T10:00:00.000Z"
             lastmodifieddate: "2026-03-20T10:00:00.000Z"
-        - id: "1002"
-          createdAt: "2026-03-21T14:30:00.000Z"
-          updatedAt: "2026-03-21T14:30:00.000Z"
+
+    companies:
+      description: HubSpot CRM companies
+      kind: entity
+
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: "5m"
+        list:
+          method: GET
+          path: /crm/v3/objects/companies
+          record_selector: results
+          pagination:
+            strategy: cursor
+            cursor:
+              request_param: after
+              response_path: "paging.next.after"
+            termination:
+              - empty_page
+          incremental:
+            enabled: true
+            cursor_field: updatedAt
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: lastmodifieddate__gt
+              value: "${watermark}"
+
+      writeback:
+        protection_level: 2
+        conflict_resolution: last_writer_wins
+        supported_actions:
+          - update
+        operations:
+          lookup:
+            method: GET
+            path: /crm/v3/objects/companies/${external_id}
+          update:
+            method: PATCH
+            path: /crm/v3/objects/companies/${external_id}
+          insert:
+            method: POST
+            path: /crm/v3/objects/companies
+          delete:
+            method: DELETE
+            path: /crm/v3/objects/companies/${external_id}
+
+      seed_count: 3
+      seed_data:
+        - id: "2001"
+          createdAt: "2026-03-18T09:00:00.000Z"
+          updatedAt: "2026-03-18T09:00:00.000Z"
           archived: false
           properties:
-            hs_object_id: "1002"
-            firstname: Bob
-            lastname: Jones
-            email: bob.jones@example.com
-            createdate: "2026-03-21T14:30:00.000Z"
-            lastmodifieddate: "2026-03-21T14:30:00.000Z"
-        - id: "1003"
-          createdAt: "2026-03-22T09:15:00.000Z"
-          updatedAt: "2026-03-22T09:15:00.000Z"
-          archived: false
-          properties:
-            hs_object_id: "1003"
-            firstname: Carol
-            lastname: Lee
-            email: carol.lee@example.com
-            createdate: "2026-03-22T09:15:00.000Z"
-            lastmodifieddate: "2026-03-22T09:15:00.000Z"
-        - id: "1004"
-          createdAt: "2026-03-23T11:45:00.000Z"
-          updatedAt: "2026-03-23T11:45:00.000Z"
-          archived: false
-          properties:
-            hs_object_id: "1004"
-            firstname: David
-            lastname: Kim
-            email: david.kim@example.com
-            createdate: "2026-03-23T11:45:00.000Z"
-            lastmodifieddate: "2026-03-23T11:45:00.000Z"
-        - id: "1005"
-          createdAt: "2026-03-24T08:00:00.000Z"
-          updatedAt: "2026-03-24T08:00:00.000Z"
-          archived: false
-          properties:
-            hs_object_id: "1005"
-            firstname: Eve
-            lastname: Chen
-            email: eve.chen@example.com
-            createdate: "2026-03-24T08:00:00.000Z"
-            lastmodifieddate: "2026-03-24T08:00:00.000Z"
+            hs_object_id: "2001"
+            name: Acme Corp
+            domain: acme.com
+            industry: TECHNOLOGY
+            numberofemployees: 250
+            annualrevenue: "5000000"
+            createdate: "2026-03-18T09:00:00.000Z"
+            lastmodifieddate: "2026-03-18T09:00:00.000Z"
+
+    associations:
+      description: HubSpot CRM contact-to-company associations
+      kind: relationship
+
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: "10m"
+        list:
+          method: GET
+          path: /crm/v3/associations/contacts/companies/batch/read
+          record_selector: results
+          pagination:
+            strategy: cursor
+            cursor:
+              request_param: after
+              response_path: "paging.next.after"
+            termination:
+              - empty_page
+
+      seed_count: 3
+      seed_data:
+        - id: "3001"
+          from:
+            id: "1001"
+          to:
+            - id: "2001"
+              type: contact_to_company

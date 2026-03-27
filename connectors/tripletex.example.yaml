@@ -1,0 +1,239 @@
+schema_version: 1
+
+connector:
+  name: tripletex
+  system: Tripletex ERP
+  generation_profile: full_duplex
+  description: >
+    Tripletex Norwegian ERP connector. Supports full-duplex sync:
+    polling ingestion with offset pagination over the Tripletex v2 REST API,
+    and writeback for customers and contacts.
+  api_version: "2"
+  api_deprecation_deadline: null
+
+  connection:
+    base_url: https://tripletex.no
+    timeout:
+      connect: "10s"
+      read: "30s"
+      write: "30s"
+
+  # Tripletex uses a session-token issued per company. The token is scoped to
+  # a company and embedded as the password in HTTP Basic auth (username = "0").
+  # Supply: INOUT_CREDENTIAL_TRIPLETEX_SESSION = "<session_token>"
+  auth:
+    type: api_key
+    credential_ref: tripletex_session
+    api_key:
+      location: header
+      name: Authorization
+
+  rate_limit:
+    requests_per_second: 5.0
+    burst: 10
+
+  retry:
+    max_retries: 4
+    backoff:
+      initial: "2s"
+      max: "60s"
+      multiplier: 2.0
+      jitter: true
+
+  circuit_breaker:
+    error_threshold: 8
+    pause_duration: "60s"
+
+  # ---------------------------------------------------------------------------
+  # Tripletex webhooks — registration-based model
+  # ---------------------------------------------------------------------------
+  # Tripletex does NOT use passive fan-out. The engine registers one
+  # subscription per event type via POST /v2/event/subscription, and
+  # Tripletex delivers to the registered callback URL on each mutation.
+  # Auth is via a custom header forwarded verbatim (no HMAC signing).
+  # See BACKLOG.md (FEAT-WH-01 through FEAT-WH-04) for outstanding engine work
+  # required before this connector can go live.
+  #
+  # Supply: INOUT_CREDENTIAL_TRIPLETEX_WEBHOOK_SECRET = "<shared_auth_value>"
+  # Outbound delivery IPs (post-Nov 2025): 18.97.193.0/27  18.96.32.192/27
+  webhooks:
+    path: /webhooks/tripletex
+    # No HMAC — Tripletex forwards the auth header set at subscription time.
+    auth_header_name: X-Simulator-Auth
+    auth_header_credential_ref: tripletex_webhook_secret
+    # fan_out drives both the simulator payload discriminator and (when
+    # per_route_registration=true) the list of events to register.
+    fan_out:
+      discriminator: event
+      unmatched: log_and_discard
+      routes:
+        - match: customer.create
+          datatype: customers
+        - match: customer.update
+          datatype: customers
+        - match: customer.delete
+          datatype: customers
+        - match: contact.create
+          datatype: contacts
+        - match: contact.update
+          datatype: contacts
+        - match: contact.delete
+          datatype: contacts
+    # Active registration — engine registers subscriptions with Tripletex at startup.
+    registration:
+      register_path: /v2/event/subscription
+      deregister_path: /v2/event/subscription/${webhook_id}
+      renew_path: /v2/event/subscription/${webhook_id}
+      health_check_path: /v2/event/subscription/${webhook_id}
+      id_response_path: value.id
+      callback_url_runtime_param: targetUrl
+      per_route_registration: true
+      register_body_extra:
+        event: "${route_event}"
+        authHeaderName: X-Simulator-Auth
+        authHeaderValue: "${credential:tripletex_webhook_secret}"
+    # Restrict inbound deliveries to Tripletex's outbound IP ranges.
+    ip_allowlist:
+      - 18.97.193.0/27
+      - 18.96.32.192/27
+
+  datatypes:
+    customers:
+      description: Tripletex customers (companies / organisations)
+      kind: entity
+
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: "10m"
+        list:
+          method: GET
+          path: /v2/customer
+          record_selector: values
+          pagination:
+            strategy: offset
+            offset:
+              param: "from"
+              limit_param: "count"
+              total_path: "fullResultSize"
+            termination:
+              - empty_page
+          incremental:
+            enabled: true
+            cursor_field: changesUntil
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: changesUntil
+              value: "${watermark}"
+
+      writeback:
+        protection_level: 2
+        conflict_resolution: last_writer_wins
+        supported_actions:
+          - update
+          - insert
+        operations:
+          lookup:
+            method: GET
+            path: /v2/customer/${external_id}
+          insert:
+            method: POST
+            path: /v2/customer
+          update:
+            method: PUT
+            path: /v2/customer/${external_id}
+          delete:
+            method: DELETE
+            path: /v2/customer/${external_id}
+
+      # Single template; seed_count generates 4 records from it.
+      seed_count: 4
+      seed_data:
+        - id: 10001
+          name: Acme AS
+          organizationNumber: "912345678"
+          email: post@acme.no
+          phoneNumber: "+4722334455"
+          isPrivateIndividual: false
+          accountManager:
+            id: 1
+            displayName: Kari Nordmann
+          deliveryAddress:
+            addressLine1: Industriveien 1
+            city: Oslo
+            postalCode: "0250"
+            country:
+              id: 161
+              displayName: Norway
+          currency:
+            id: 1
+            code: NOK
+          isCustomer: true
+          isSupplier: false
+          changesUntil: "2026-03-20T10:00:00.000+02:00"
+
+    contacts:
+      description: Tripletex contacts linked to customers
+      kind: entity
+
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: "10m"
+        list:
+          method: GET
+          path: /v2/contact
+          record_selector: values
+          pagination:
+            strategy: offset
+            offset:
+              param: "from"
+              limit_param: "count"
+              total_path: "fullResultSize"
+            termination:
+              - empty_page
+          incremental:
+            enabled: true
+            cursor_field: changesUntil
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: changesUntil
+              value: "${watermark}"
+
+      writeback:
+        protection_level: 2
+        conflict_resolution: last_writer_wins
+        supported_actions:
+          - update
+          - insert
+        operations:
+          lookup:
+            method: GET
+            path: /v2/contact/${external_id}
+          insert:
+            method: POST
+            path: /v2/contact
+          update:
+            method: PUT
+            path: /v2/contact/${external_id}
+          delete:
+            method: DELETE
+            path: /v2/contact/${external_id}
+
+      # Single template; seed_count generates 5 contacts from it.
+      seed_count: 5
+      seed_data:
+        - id: 20001
+          firstName: Kari
+          lastName: Nordmann
+          email: kari.nordmann@acme.no
+          phoneNumberMobile: "+4795123456"
+          titleName: CEO
+          customer:
+            id: 10001
+            displayName: Acme AS
+          changesUntil: "2026-03-20T10:00:00.000+02:00"

@@ -16,6 +16,17 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _next_id(existing_ids: list[str]) -> str:
+    """Return the next sequential ID if all *existing_ids* are numeric, else a new UUID."""
+    if existing_ids:
+        try:
+            nums = [int(x) for x in existing_ids]
+            return str(max(nums) + 1)
+        except (ValueError, TypeError):
+            pass
+    return _new_id()
+
+
 # ---------------------------------------------------------------------------
 # Domain types
 # ---------------------------------------------------------------------------

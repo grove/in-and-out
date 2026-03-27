@@ -62,15 +62,15 @@ class WebhookDispatcher:
         operation: str,  # "create" | "update" | "delete"
         record_id: str,
         record: dict | None,
-    ) -> None:
-        """Fire-and-forget webhook POST.  Failures are silently logged."""
+    ) -> dict | None:
+        """POST a webhook event; returns a result dict or None if no webhook configured."""
         if not connector.webhooks:
-            return
+            return None
 
         webhook_cfg = connector.webhooks
         fan_out = getattr(webhook_cfg, "fan_out", None)
         if not fan_out:
-            return
+            return None
 
         # Find the event_type string for this (datatype, operation) pair.
         discriminator_field = getattr(fan_out, "discriminator", "eventType")
@@ -78,11 +78,12 @@ class WebhookDispatcher:
         for route in getattr(fan_out, "routes", []):
             if getattr(route, "datatype", None) == datatype:
                 event_type = getattr(route, "match", None)
-                if operation == "create" and "creation" in (event_type or "").lower():
+                et = (event_type or "").lower()
+                if operation == "create" and ("creation" in et or et.endswith(".create")):
                     break
-                if operation in ("update", "create") and "change" in (event_type or "").lower():
+                if operation == "update" and ("change" in et or et.endswith(".update")):
                     break
-                if operation == "delete" and "delet" in (event_type or "").lower():
+                if operation == "delete" and ("delet" in et or et.endswith(".delete")):
                     break
 
         if event_type is None:
@@ -93,11 +94,11 @@ class WebhookDispatcher:
                     break
 
         if event_type is None:
-            return
+            return None
 
         path = getattr(webhook_cfg, "path", None)
         if not path:
-            return
+            return None
 
         url = f"{self._engine_url}{path}"
         payload: dict = {discriminator_field: event_type}
@@ -105,7 +106,8 @@ class WebhookDispatcher:
             payload.update(record)
         payload["_simulator_ts"] = datetime.now(timezone.utc).isoformat()
 
-        payload_bytes = json.dumps(payload).encode()
+        payload_json = json.dumps(payload)
+        payload_bytes = payload_json.encode()
         headers: dict[str, str] = {"Content-Type": "application/json"}
 
         sig_cfg = getattr(webhook_cfg, "signature", None)
@@ -117,9 +119,31 @@ class WebhookDispatcher:
                 headers[sig_header] = _sign(payload_bytes, secret, algorithm)
 
         try:
-            await self._client.post(url, content=payload_bytes, headers=headers)
-        except Exception:
-            pass  # best-effort; demo tool only
+            t0 = time.monotonic()
+            resp = await self._client.post(url, content=payload_bytes, headers=headers)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            return {
+                "url": url,
+                "status": resp.status_code,
+                "duration_ms": duration_ms,
+                "payload_json": payload_json,
+                "connector": connector.name,
+                "datatype": datatype,
+                "operation": operation,
+                "record_id": record_id,
+            }
+        except Exception as exc:
+            return {
+                "url": url,
+                "status": 0,
+                "duration_ms": 0,
+                "payload_json": payload_json,
+                "error": str(exc),
+                "connector": connector.name,
+                "datatype": datatype,
+                "operation": operation,
+                "record_id": record_id,
+            }
 
     def dispatch_nowait(
         self,

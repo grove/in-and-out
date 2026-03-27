@@ -6,14 +6,12 @@
 
     <!-- Main: connector cards -->
     <div class="flex-1 min-w-0">
-        <h1 class="text-2xl font-bold text-slate-100 mb-6">Demo Dashboard</h1>
+        <h1 class="text-2xl font-bold text-slate-100 mb-6">Simulator Dashboard</h1>
 
         {% for connector in connectors %}
         <section class="mb-8">
             <div class="flex items-center gap-3 mb-3">
                 <h2 class="text-lg font-semibold text-sky-300">{{ connector.system }}</h2>
-                <span class="text-xs bg-slate-700 text-slate-300 px-2 py-0.5 rounded font-mono">{{ connector.name
-                    }}</span>
                 <span class="text-xs bg-slate-700 text-slate-300 px-2 py-0.5 rounded">{{ connector.generation_profile
                     }}</span>
             </div>
@@ -62,13 +60,30 @@
         </section>
         {% endfor %}
 
-        <!-- Request log -->
+        <!-- Request log preview -->
         <section class="mt-4">
-            <h2 class="text-base font-semibold text-slate-300 mb-2">Engine Request Log</h2>
-            <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 max-h-48 overflow-y-auto">
+            <div class="flex items-center justify-between mb-2">
+                <h2 class="text-base font-semibold text-slate-300">API Request Log</h2>
+                <a href="/ui/_requests" class="text-xs text-sky-400 hover:text-sky-300">View all →</a>
+            </div>
+            <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 max-h-36 overflow-hidden">
                 <ul id="request-feed" class="flex flex-col gap-0"></ul>
                 <p class="text-xs text-slate-500 italic" id="req-placeholder">
                     Waiting for engine requests…
+                </p>
+            </div>
+        </section>
+
+        <!-- Webhook log preview -->
+        <section class="mt-4">
+            <div class="flex items-center justify-between mb-2">
+                <h2 class="text-base font-semibold text-slate-300">Outbound Webhooks</h2>
+                <a href="/ui/_webhooks" class="text-xs text-sky-400 hover:text-sky-300">View all →</a>
+            </div>
+            <div class="bg-slate-800 rounded-xl border border-slate-700 p-3 max-h-36 overflow-hidden">
+                <ul id="webhook-feed" class="flex flex-col gap-0"></ul>
+                <p class="text-xs text-slate-500 italic" id="webhook-placeholder">
+                    No webhooks fired yet…
                 </p>
             </div>
         </section>
@@ -83,6 +98,7 @@
                 {% if ev.event_type == 'mutation' %}
                 {% set colour = {'create': 'text-green-400', 'update': 'text-blue-400', 'delete': 'text-red-400'} %}
                 {% set icon = {'create': '＋', 'update': '✎', 'delete': '✕'} %}
+                {% set sys = connector_systems.get(ev.connector, ev.connector) %}
                 <li class="activity-item flex items-start gap-2 py-1 border-b border-slate-700 text-sm">
                     <span class="mt-0.5 font-mono font-bold {{ colour.get(ev.operation, 'text-slate-400') }}">
                         {{ icon.get(ev.operation, '·') }}
@@ -91,7 +107,8 @@
                         <span class="font-medium">{{ '🧑 You' if ev.source == 'ui' else '⚙ Engine' }}</span>
                         <span class="text-slate-400"> {{ ev.operation }}d </span>
                         <a href="/ui/{{ ev.connector }}/{{ ev.datatype }}/{{ ev.record_id }}"
-                            class="text-sky-400 hover:underline">{{ ev.datatype }}:{{ ev.record_id }}</a>
+                            class="text-sky-400 hover:underline"><span class="text-slate-500">{{ sys }}/</span>{{
+                            ev.datatype }}:{{ ev.record_id }}</a>
                     </span>
                 </li>
                 {% endif %}

@@ -62,14 +62,30 @@ class WebhookRegistrationConfig(BaseModel):
     health_check_path: str | None = None           # GET to verify still active
     id_response_path: str = "id"                   # dot-notation path to extract webhook ID
     callback_url_runtime_param: str = "callback_url"  # runtime param name for our URL
+    # When True, register one subscription per fan_out route (e.g. Tripletex
+    # requires a separate POST per event type like "customer.create").
+    per_route_registration: bool = False
+    # Extra static fields to include in every registration POST body (e.g.
+    # Tripletex needs {"event": "<event_name>"} alongside the targetUrl).
+    register_body_extra: dict[str, str] = {}
 
 
 class WebhookConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     path: str
-    signature: SignatureConfig
-    fan_out: FanOutConfig
+    # HMAC signature verification.  Optional: some providers use custom header
+    # forwarding (e.g. Tripletex) instead of HMAC.  When None, set
+    # auth_header_name + auth_header_credential_ref for header-equality auth.
+    signature: SignatureConfig | None = None
+    # For connectors that forward a static auth header to the callback URL
+    # instead of signing with HMAC (e.g. Tripletex's authHeaderName/Value).
+    auth_header_name: str | None = None
+    auth_header_credential_ref: str | None = None
+    # fan_out describes the event-type discriminator and per-datatype routing.
+    # Optional for fire-and-forget notification connectors that don't multiplex
+    # multiple event types on a single endpoint.
+    fan_out: FanOutConfig | None = None
     registration: WebhookRegistrationConfig | None = None  # A1: lifecycle management
     event_id_field: str | None = None              # A5: dedup — field holding event ID
     dedup_ttl: str = "24h"                         # A5: how long to remember seen event IDs
