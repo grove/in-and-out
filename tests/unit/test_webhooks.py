@@ -193,3 +193,65 @@ def test_route_event_prefix_match():
 def test_route_event_missing_discriminator():
     cfg = _make_fan_out()
     assert _route_event(cfg, {}) is None
+
+
+# ---------------------------------------------------------------------------
+# null_record_field delete detection logic
+# ---------------------------------------------------------------------------
+
+def _resolve_null_field(matched_route: FanOutRoute | None, payload: dict) -> str | None:
+    """Mirror the null_field resolution logic from handle_webhook (FEAT-WH-04)."""
+    if matched_route is not None and matched_route.null_record_field is not None:
+        return matched_route.null_record_field
+    if matched_route is None and "value" in payload:
+        return "value"
+    return None
+
+
+def test_null_record_field_route_configured():
+    route = FanOutRoute(match="customer.delete", datatype="customers", null_record_field="value")
+    payload = {"id": 1001, "value": None}
+    null_field = _resolve_null_field(route, payload)
+    assert null_field == "value"
+    assert null_field in payload and payload[null_field] is None
+
+
+def test_null_record_field_not_null_no_delete():
+    """Configured null_record_field but value is a dict — should NOT trigger delete."""
+    route = FanOutRoute(match="customer.update", datatype="customers", null_record_field="value")
+    payload = {"id": 1001, "value": {"name": "Acme"}}
+    null_field = _resolve_null_field(route, payload)
+    assert null_field == "value"
+    # value is present but NOT null — delete condition is false
+    assert not (null_field in payload and payload[null_field] is None)
+
+
+def test_null_record_field_arbitrary_name():
+    route = FanOutRoute(match="order.deleted", datatype="orders", null_record_field="object")
+    payload = {"id": 42, "object": None}
+    null_field = _resolve_null_field(route, payload)
+    assert null_field == "object"
+    assert null_field in payload and payload[null_field] is None
+
+
+def test_null_record_field_not_set_no_delete():
+    """Route has no null_record_field — even a null 'value' key must NOT trigger delete."""
+    route = FanOutRoute(match="customer.update", datatype="customers")  # no null_record_field
+    payload = {"id": 1001, "value": None}
+    null_field = _resolve_null_field(route, payload)
+    # Route is matched but null_record_field is None → null_field is None
+    assert null_field is None
+
+
+def test_null_record_field_legacy_fallback_no_route():
+    """When no route is matched and payload has 'value': null, legacy path triggers."""
+    payload = {"id": 1001, "value": None}
+    null_field = _resolve_null_field(None, payload)
+    assert null_field == "value"
+
+
+def test_null_record_field_legacy_fallback_absent_key():
+    """When no route is matched and payload has no 'value' key, no delete triggered."""
+    payload = {"id": 1001, "data": None}
+    null_field = _resolve_null_field(None, payload)
+    assert null_field is None

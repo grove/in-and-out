@@ -562,14 +562,24 @@ async def handle_webhook(
 
     # Full-payload webhook: upsert the record directly.
 
-    # FEAT-WH-04: Tripletex-style delete payload — "value" field is null.
-    # The record identity is in the top-level ID field; synthesise a minimal
-    # record dict so the upsert path can proceed with just the primary key.
-    if "value" in payload and payload["value"] is None:
+    # FEAT-WH-04: null-record-field delete detection.
+    # When the matched route declares null_record_field, check that specific
+    # field for null. Falls back to the legacy hardcoded "value" check only
+    # when no route is matched (belt-and-suspenders for unrouted payloads).
+    null_field: str | None = None
+    if matched_route is not None and matched_route.null_record_field is not None:
+        null_field = matched_route.null_record_field
+    elif matched_route is None and "value" in payload:
+        # Legacy fallback: no route matched but payload has a top-level "value"
+        # key that is null — treat as Tripletex-style delete.
+        null_field = "value"
+    if null_field is not None and null_field in payload and payload[null_field] is None:
         ext_id_field = matched_route.notification_external_id_field if matched_route else "id"
         top_level_id = payload.get(ext_id_field)
         if top_level_id is None:
-            log.warning("webhook_null_value_missing_id", keys=list(payload.keys()))
+            log.warning(
+                "webhook_null_record_missing_id", field=null_field, keys=list(payload.keys())
+            )
             return JSONResponse(
                 {"error": "delete payload has null value and no id field"}, status_code=422
             )

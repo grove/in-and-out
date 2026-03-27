@@ -120,3 +120,36 @@ def test_custom_dedup_ttl():
         dedup_ttl="48h",
     )
     assert cfg.dedup_ttl == "48h"
+
+
+# --- FanOutRoute.null_record_field ---
+
+
+def test_fan_out_route_null_record_field_defaults_none():
+    route = FanOutRoute(match="customer.delete", datatype="customers")
+    assert route.null_record_field is None
+
+
+def test_fan_out_route_null_record_field_set():
+    route = FanOutRoute(match="customer.delete", datatype="customers", null_record_field="value")
+    assert route.null_record_field == "value"
+
+
+def test_fan_out_route_null_record_field_arbitrary_name():
+    route = FanOutRoute(match="order.deleted", datatype="orders", null_record_field="object")
+    assert route.null_record_field == "object"
+
+
+def test_fan_out_route_null_record_field_in_fan_out_config():
+    fan_out = FanOutConfig(
+        discriminator="event",
+        routes=[
+            FanOutRoute(match="customer.delete", datatype="customers", null_record_field="value"),
+            FanOutRoute(match="customer.created", datatype="customers"),
+        ],
+        unmatched="log_and_discard",
+    )
+    delete_route = fan_out.routes[0]
+    create_route = fan_out.routes[1]
+    assert delete_route.null_record_field == "value"
+    assert create_route.null_record_field is None

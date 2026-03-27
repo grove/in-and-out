@@ -114,6 +114,10 @@
                 "type": "string",
                 "default": "id",
                 "description": "Top-level payload field holding the external record ID for notification-only payloads."
+              },
+              "null_record_field": {
+                "type": "string",
+                "description": "Payload field name that, when present and null (JSON null), signals a hard delete. The record ID is taken from notification_external_id_field. E.g. 'value' for Tripletex (which sends {value: null} on delete). When absent, null-field delete detection is disabled for this route."
               }
             }
           }

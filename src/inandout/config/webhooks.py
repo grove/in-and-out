@@ -41,6 +41,11 @@ class FanOutRoute(BaseModel):
     datatype: str
     notification_only: bool = False  # payload is a notification, not full state
     notification_external_id_field: str = "id"  # field to extract external_id from payload
+    # When set, this payload field being null (JSON null) signals a delete.
+    # The record ID is read from notification_external_id_field.
+    # Example: "value" (Tripletex), "object" (some other providers).
+    # When None, the null-field delete detection is disabled for this route.
+    null_record_field: str | None = None
 
 
 class UnmatchedAction(StrEnum):

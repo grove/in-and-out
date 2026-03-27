@@ -73,12 +73,14 @@ connector:
           datatype: customers
         - match: customer.delete
           datatype: customers
+          null_record_field: value
         - match: contact.create
           datatype: contacts
         - match: contact.update
           datatype: contacts
         - match: contact.delete
           datatype: contacts
+          null_record_field: value
     # Active registration — engine registers subscriptions with Tripletex at startup.
     registration:
       register_path: /event/subscription
