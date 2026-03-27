@@ -138,6 +138,15 @@
           "type": "string",
           "description": "Path to GET to verify a subscription is still active."
         },
+        "health_check_active_field": {
+          "type": "string",
+          "description": "Dot-notation path into the health-check response JSON whose value must equal health_check_active_value for the subscription to be considered active. When absent, only the HTTP status code is checked. Example: 'value.status' (Tripletex)."
+        },
+        "health_check_active_value": {
+          "type": "string",
+          "default": "ACTIVE",
+          "description": "Expected value at health_check_active_field. Defaults to 'ACTIVE'."
+        },
         "id_response_path": {
           "type": "string",
           "default": "id",

@@ -266,12 +266,28 @@ class WebhookLifecycleManager:
             async with HttpTransportAdapter(self._connector) as transport:
                 resp = await transport._raw_request("GET", path)
             is_active = resp.status_code == 200
-            # GAP: we only check the HTTP status code, not the response body.
-            # Some providers (e.g. Tripletex) return 200 even for a subscription
-            # that has been disabled/expired, with a non-ACTIVE status field in
-            # the body (e.g. {"value": {"status": "DISABLED", ...}}).
-            # A config option such as health_check_active_field / health_check_active_value
-            # would be needed to handle this correctly.
+            if is_active and reg.health_check_active_field:
+                try:
+                    body_json = orjson.loads(resp.content)
+                    actual = _resolve_dot_path(body_json, reg.health_check_active_field)
+                    if str(actual) != reg.health_check_active_value:
+                        logger.info(
+                            "webhook_health_check_inactive_status",
+                            connector=self._connector.name,
+                            webhook_id=webhook_id,
+                            field=reg.health_check_active_field,
+                            actual=actual,
+                            expected=reg.health_check_active_value,
+                        )
+                        is_active = False
+                except Exception as body_exc:
+                    logger.warning(
+                        "webhook_health_check_body_parse_failed",
+                        connector=self._connector.name,
+                        webhook_id=webhook_id,
+                        error=str(body_exc),
+                    )
+                    is_active = False
             async with self._pool.connection() as conn:
                 await conn.execute(
                     """

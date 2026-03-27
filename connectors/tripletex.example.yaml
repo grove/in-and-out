@@ -85,9 +85,9 @@ connector:
       deregister_path: /event/subscription/${webhook_id}
       renew_path: /event/subscription/${webhook_id}
       health_check_path: /event/subscription/${webhook_id}
-      # NOTE: the engine only checks HTTP 200/404 from this endpoint.
-      # Tripletex can also return 200 with status "DISABLED" in the response
-      # body — that case is not yet handled (would need health_check_active_field).
+      # Tripletex returns 200 even for disabled subscriptions; check the body.
+      health_check_active_field: value.status
+      health_check_active_value: ACTIVE
       id_response_path: value.id
       callback_url_runtime_param: targetUrl
       per_route_registration: true

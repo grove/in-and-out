@@ -217,3 +217,137 @@ async def test_health_check_returns_false_on_404() -> None:
         result = await mgr.health_check("wh-123")
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_active_field_active() -> None:
+    """health_check() returns True when body field matches active value."""
+    from inandout.ingestion.webhook_lifecycle import WebhookLifecycleManager
+
+    pool = _make_pool()
+    connector_cfg = _make_connector_cfg()
+    reg = WebhookRegistrationConfig(
+        register_path="/webhooks",
+        health_check_path="/webhooks/${webhook_id}",
+        health_check_active_field="value.status",
+        health_check_active_value="ACTIVE",
+    )
+    webhook_cfg = _make_webhook_cfg()
+    webhook_cfg = WebhookConfig(
+        path="/incoming",
+        registration=reg,
+    )
+    engine = MagicMock()
+
+    resp = httpx.Response(200, json={"value": {"id": 42, "status": "ACTIVE"}})
+    transport_mock = AsyncMock()
+    transport_mock._raw_request = AsyncMock(return_value=resp)
+    transport_mock.__aenter__ = AsyncMock(return_value=transport_mock)
+    transport_mock.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "inandout.ingestion.webhook_lifecycle.HttpTransportAdapter",
+        return_value=transport_mock,
+    ):
+        mgr = WebhookLifecycleManager(pool, connector_cfg, webhook_cfg, engine)
+        result = await mgr.health_check("42")
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_health_check_active_field_disabled() -> None:
+    """health_check() returns False when body field does not match active value (e.g. DISABLED)."""
+    from inandout.ingestion.webhook_lifecycle import WebhookLifecycleManager
+
+    pool = _make_pool()
+    connector_cfg = _make_connector_cfg()
+    reg = WebhookRegistrationConfig(
+        register_path="/webhooks",
+        health_check_path="/webhooks/${webhook_id}",
+        health_check_active_field="value.status",
+        health_check_active_value="ACTIVE",
+    )
+    webhook_cfg = WebhookConfig(
+        path="/incoming",
+        registration=reg,
+    )
+    engine = MagicMock()
+
+    resp = httpx.Response(200, json={"value": {"id": 42, "status": "DISABLED"}})
+    transport_mock = AsyncMock()
+    transport_mock._raw_request = AsyncMock(return_value=resp)
+    transport_mock.__aenter__ = AsyncMock(return_value=transport_mock)
+    transport_mock.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "inandout.ingestion.webhook_lifecycle.HttpTransportAdapter",
+        return_value=transport_mock,
+    ):
+        mgr = WebhookLifecycleManager(pool, connector_cfg, webhook_cfg, engine)
+        result = await mgr.health_check("42")
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_active_field_missing_in_body() -> None:
+    """health_check() returns False when health_check_active_field path resolves to None."""
+    from inandout.ingestion.webhook_lifecycle import WebhookLifecycleManager
+
+    pool = _make_pool()
+    connector_cfg = _make_connector_cfg()
+    reg = WebhookRegistrationConfig(
+        register_path="/webhooks",
+        health_check_path="/webhooks/${webhook_id}",
+        health_check_active_field="value.status",
+        health_check_active_value="ACTIVE",
+    )
+    webhook_cfg = WebhookConfig(
+        path="/incoming",
+        registration=reg,
+    )
+    engine = MagicMock()
+
+    # Body does not contain "value" at all
+    resp = httpx.Response(200, json={"id": 42})
+    transport_mock = AsyncMock()
+    transport_mock._raw_request = AsyncMock(return_value=resp)
+    transport_mock.__aenter__ = AsyncMock(return_value=transport_mock)
+    transport_mock.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "inandout.ingestion.webhook_lifecycle.HttpTransportAdapter",
+        return_value=transport_mock,
+    ):
+        mgr = WebhookLifecycleManager(pool, connector_cfg, webhook_cfg, engine)
+        result = await mgr.health_check("42")
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_no_active_field_uses_status_code_only() -> None:
+    """health_check() without active_field config still returns True on HTTP 200."""
+    from inandout.ingestion.webhook_lifecycle import WebhookLifecycleManager
+
+    pool = _make_pool()
+    connector_cfg = _make_connector_cfg()
+    webhook_cfg = _make_webhook_cfg()  # no health_check_active_field
+    engine = MagicMock()
+
+    resp = httpx.Response(200, json={"value": {"status": "DISABLED"}})
+    transport_mock = AsyncMock()
+    transport_mock._raw_request = AsyncMock(return_value=resp)
+    transport_mock.__aenter__ = AsyncMock(return_value=transport_mock)
+    transport_mock.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "inandout.ingestion.webhook_lifecycle.HttpTransportAdapter",
+        return_value=transport_mock,
+    ):
+        mgr = WebhookLifecycleManager(pool, connector_cfg, webhook_cfg, engine)
+        result = await mgr.health_check("wh-123")
+
+    # Without active_field configured, 200 → True regardless of body content
+    assert result is True
