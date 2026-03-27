@@ -122,38 +122,6 @@ def test_custom_dedup_ttl():
     assert cfg.dedup_ttl == "48h"
 
 
-# --- FanOutRoute.null_record_field ---
-
-
-def test_fan_out_route_null_record_field_defaults_none():
-    route = FanOutRoute(match="customer.delete", datatype="customers")
-    assert route.null_record_field is None
-
-
-def test_fan_out_route_null_record_field_set():
-    route = FanOutRoute(match="customer.delete", datatype="customers", null_record_field="value")
-    assert route.null_record_field == "value"
-
-
-def test_fan_out_route_null_record_field_arbitrary_name():
-    route = FanOutRoute(match="order.deleted", datatype="orders", null_record_field="object")
-    assert route.null_record_field == "object"
-
-
-def test_fan_out_route_null_record_field_in_fan_out_config():
-    fan_out = FanOutConfig(
-        discriminator="event",
-        routes=[
-            FanOutRoute(match="customer.delete", datatype="customers", null_record_field="value"),
-            FanOutRoute(match="customer.created", datatype="customers"),
-        ],
-        unmatched="log_and_discard",
-    )
-    delete_route = fan_out.routes[0]
-    create_route = fan_out.routes[1]
-    assert delete_route.null_record_field == "value"
-    assert create_route.null_record_field is None
-
 
 # --- FanOutRoute.is_delete ---
 
@@ -169,7 +137,7 @@ def test_fan_out_route_is_delete_set():
 
 
 def test_fan_out_route_is_delete_with_custom_id_field():
-    # HubSpot-style: id is in "objectId", not the default "id"
+    # HubSpot notification-only contact deletion -- id in objectId
     route = FanOutRoute(
         match="contact.deletion",
         datatype="contacts",
@@ -180,13 +148,25 @@ def test_fan_out_route_is_delete_with_custom_id_field():
     assert route.notification_external_id_field == "objectId"
 
 
-def test_fan_out_route_is_delete_and_null_record_field_coexist():
-    # is_delete takes precedence — both can be set without validation error
-    route = FanOutRoute(
-        match="customer.delete",
-        datatype="customers",
-        is_delete=True,
-        null_record_field="value",
-    )
+def test_fan_out_route_is_delete_compound_pk_no_extra_config():
+    # Association deletion -- primary_key=[fromObjectId,toObjectId]; no extra route config needed
+    route = FanOutRoute(match="association.deletion", datatype="contacts_companies_associations", is_delete=True)
     assert route.is_delete is True
-    assert route.null_record_field == "value"
+
+
+# --- FanOutConfig.array_unwrap ---
+
+
+def test_fan_out_config_array_unwrap_defaults_false():
+    fan_out = FanOutConfig(discriminator="type", routes=[], unmatched="log_and_discard")
+    assert fan_out.array_unwrap is False
+
+
+def test_fan_out_config_array_unwrap_set():
+    fan_out = FanOutConfig(
+        discriminator="subscriptionType",
+        routes=[],
+        unmatched="log_and_discard",
+        array_unwrap=True,
+    )
+    assert fan_out.array_unwrap is True

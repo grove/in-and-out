@@ -41,15 +41,11 @@ class FanOutRoute(BaseModel):
     datatype: str
     notification_only: bool = False  # payload is a notification, not full state
     notification_external_id_field: str = "id"  # field to extract external_id from payload
-    # When True, the route match itself is the deletion signal — no payload inspection.
-    # The record ID is taken from notification_external_id_field.
-    # Example: "contact.deletion" (HubSpot), "customer.delete" (Tripletex).
+    # When True, the route match IS the deletion signal — the engine annotates the
+    # full payload with _deleted:True and upserts it.  Works with both simple PKs
+    # (primary_key: id) and compound PKs (primary_key: [fromObjectId, toObjectId]).
+    # Mutually exclusive with notification_only; is_delete takes precedence.
     is_delete: bool = False
-    # When set, this payload field being null (JSON null) signals a delete.
-    # Only consulted when is_delete is False (is_delete takes precedence).
-    # Useful for providers that use a single event type for both upsert and delete,
-    # expressing "delete" by setting a field to null.
-    null_record_field: str | None = None
 
 
 class UnmatchedAction(StrEnum):
@@ -68,6 +64,10 @@ class FanOutConfig(BaseModel):
     discriminator_header: str | None = None
     routes: list[FanOutRoute] = []
     unmatched: UnmatchedAction
+    # When True, the POST body is expected to be a JSON array of event objects;
+    # the engine unwraps it and dispatches each element independently.
+    # Required for HubSpot which batches multiple events in one POST.
+    array_unwrap: bool = False
 
 
 class WebhookRegistrationConfig(BaseModel):

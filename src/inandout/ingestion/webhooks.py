@@ -215,33 +215,20 @@ def _route_event(
     return None
 
 
-async def handle_webhook(
-    request: Request,
+async def _handle_single_event(
+    payload: dict,
+    payload_hash: str,
     connector: ConnectorConfig,
     webhook_cfg: WebhookConfig,
     engine: IngestionEngine,
-) -> Response:
-    """Process a single incoming webhook request."""
-    log = logger.bind(connector=connector.name, path=webhook_cfg.path)
+    headers: dict,
+    log,
+) -> JSONResponse:
+    """Process one webhook event dict (post-signature, post-parse).
 
-    body = await request.body()
-    headers = {k.lower(): v for k, v in request.headers.items()}
-
-    # Signature / auth verification (FEAT-WH-03: also handles custom header auth)
-    if not _verify_signature(webhook_cfg, body, headers):
-        log.warning("webhook_signature_invalid")
-        return JSONResponse({"error": "invalid signature"}, status_code=401)
-
-    try:
-        payload = orjson.loads(body)
-    except Exception:
-        log.warning("webhook_invalid_json")
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-
-    if not isinstance(payload, dict):
-        log.warning("webhook_payload_not_object")
-        return JSONResponse({"error": "payload must be a JSON object"}, status_code=400)
-
+    Called from handle_webhook for both direct single-object payloads and for
+    each item when fan_out.array_unwrap is True.
+    """
     # Idempotency / deduplication (A5)
     if webhook_cfg.event_id_field:
         raw_event_id = payload.get(webhook_cfg.event_id_field)
@@ -308,13 +295,17 @@ async def handle_webhook(
 
     # If the payload is a notification (no data fields, just an event reference), do a
     # targeted single-record fetch (or fall back to full sync if no external_id).
+    # is_delete takes precedence over notification_only; skip the fetch path if set.
     webhook_events_cfg = (
         ingestion_cfg.webhook_events if hasattr(ingestion_cfg, "webhook_events") else None
     )
-    is_notification_only = (
-        webhook_events_cfg is not None
-        and getattr(webhook_events_cfg, "payload_type", "full") == "notification"
-    ) or (matched_route is not None and matched_route.notification_only)
+    is_notification_only = (matched_route is None or not matched_route.is_delete) and (
+        (
+            webhook_events_cfg is not None
+            and getattr(webhook_events_cfg, "payload_type", "full") == "notification"
+        )
+        or (matched_route is not None and matched_route.notification_only)
+    )
 
     # Out-of-order check for full-payload webhooks
     if not is_notification_only and webhook_events_cfg is not None:
@@ -484,8 +475,6 @@ async def handle_webhook(
                             except Exception:
                                 pass  # On error, accept and process (fail-open)
 
-    payload_hash = hashlib.sha256(body).hexdigest()
-
     if is_notification_only:
         # Attempt targeted single-record fetch first
         ext_id_field = "id"
@@ -562,59 +551,12 @@ async def handle_webhook(
 
     # Full-payload webhook: upsert the record directly.
 
-    # FEAT-WH-04: delete detection — two mechanisms, is_delete takes precedence.
-    #
-    # Case 1 (is_delete): the route match IS the deletion signal; inspect nothing.
-    #   e.g. "customer.delete" (Tripletex), "contact.deletion" (HubSpot).
-    # Case 2 (null_record_field): a named payload field being null signals delete.
-    #   e.g. providers that reuse one event type for upsert+delete via null payload.
-    # Case 3 (legacy): no route matched, payload has top-level "value": null.
-
-    def _extract_delete_id(ext_field: str) -> tuple[int | str | None, bool]:
-        """Return (top_level_id, failed). failed=True if the field was absent."""
-        val = payload.get(ext_field)
-        return val, val is None
-
+    # FEAT-WH-04: is_delete — the route match IS the deletion signal.
+    # Annotate the full payload with _deleted:True and let _extract_external_id
+    # handle both simple PKs (str) and compound PKs (list) transparently.
     if matched_route is not None and matched_route.is_delete:
-        ext_id_field = matched_route.notification_external_id_field
-        top_level_id, missing = _extract_delete_id(ext_id_field)
-        if missing:
-            log.warning("webhook_is_delete_missing_id", field=ext_id_field, keys=list(payload.keys()))
-            return JSONResponse(
-                {"error": f"delete event missing '{ext_id_field}' id field"}, status_code=422
-            )
-        pk_field_name = (
-            ingestion_cfg.primary_key
-            if isinstance(ingestion_cfg.primary_key, str)
-            else (ingestion_cfg.primary_key[0] if ingestion_cfg.primary_key else "id")
-        )
-        payload = {pk_field_name: top_level_id, "_deleted": True}
-        log.info("webhook_delete_event_synthesised", external_id=str(top_level_id), route=matched_route.match)
-    else:
-        null_field: str | None = None
-        if matched_route is not None and matched_route.null_record_field is not None:
-            null_field = matched_route.null_record_field
-        elif matched_route is None and "value" in payload:
-            # Legacy fallback: no route matched but payload has a top-level "value"
-            # key that is null — treat as Tripletex-style delete.
-            null_field = "value"
-        if null_field is not None and null_field in payload and payload[null_field] is None:
-            ext_id_field = matched_route.notification_external_id_field if matched_route else "id"
-            top_level_id = payload.get(ext_id_field)
-            if top_level_id is None:
-                log.warning(
-                    "webhook_null_record_missing_id", field=null_field, keys=list(payload.keys())
-                )
-                return JSONResponse(
-                    {"error": "delete payload has null value and no id field"}, status_code=422
-                )
-            pk_field_name = (
-                ingestion_cfg.primary_key
-                if isinstance(ingestion_cfg.primary_key, str)
-                else (ingestion_cfg.primary_key[0] if ingestion_cfg.primary_key else "id")
-            )
-            payload = {pk_field_name: top_level_id, "_deleted": True}
-            log.info("webhook_null_value_delete_synthesised", external_id=str(top_level_id))
+        payload = {**payload, "_deleted": True}
+        log.info("webhook_delete_event_synthesised", route=matched_route.match)
 
     external_id = _extract_external_id(payload, ingestion_cfg.primary_key)
     if external_id is None:
@@ -658,3 +600,63 @@ async def handle_webhook(
             engine._pool, connector.name, datatype, None, payload_hash, "direct_upsert", "failed"
         )
         return JSONResponse({"error": "upsert failed"}, status_code=500)
+
+
+async def handle_webhook(
+    request: Request,
+    connector: ConnectorConfig,
+    webhook_cfg: WebhookConfig,
+    engine: IngestionEngine,
+) -> Response:
+    """Process an incoming webhook request.
+
+    Verifies the signature, parses the body, then dispatches to
+    _handle_single_event.  When fan_out.array_unwrap is True the body may be
+    a JSON array; each element is dispatched independently (HubSpot batch style).
+    """
+    log = logger.bind(connector=connector.name, path=webhook_cfg.path)
+
+    body = await request.body()
+    headers = {k.lower(): v for k, v in request.headers.items()}
+
+    # Signature / auth verification (FEAT-WH-03: also handles custom header auth)
+    if not _verify_signature(webhook_cfg, body, headers):
+        log.warning("webhook_signature_invalid")
+        return JSONResponse({"error": "invalid signature"}, status_code=401)
+
+    try:
+        parsed = orjson.loads(body)
+    except Exception:
+        log.warning("webhook_invalid_json")
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    fan_out = webhook_cfg.fan_out
+
+    # Array-unwrap: HubSpot delivers a JSON array where each element is one event.
+    if isinstance(parsed, list):
+        if not (fan_out and fan_out.array_unwrap):
+            log.warning("webhook_payload_not_object")
+            return JSONResponse({"error": "payload must be a JSON object"}, status_code=400)
+        processed = 0
+        total = 0
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            total += 1
+            item_hash = hashlib.sha256(orjson.dumps(item)).hexdigest()
+            resp = await _handle_single_event(
+                item, item_hash, connector, webhook_cfg, engine, headers, log
+            )
+            if resp.status_code < 300:
+                processed += 1
+        log.info("webhook_array_processed", processed=processed, total=total)
+        return JSONResponse({"status": "ok", "processed": processed, "total": total})
+
+    if not isinstance(parsed, dict):
+        log.warning("webhook_payload_not_object")
+        return JSONResponse({"error": "payload must be a JSON object"}, status_code=400)
+
+    payload_hash = hashlib.sha256(body).hexdigest()
+    return await _handle_single_event(
+        parsed, payload_hash, connector, webhook_cfg, engine, headers, log
+    )

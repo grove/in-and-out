@@ -50,15 +50,14 @@ connector:
       algorithm: hmac-sha256
       header: X-HubSpot-Signature-V3
       credential_ref: hubspot_webhook_secret
-    # HubSpot delivers an ARRAY of event objects per POST.
-    # The engine needs fan_out.array_unwrap: true to handle this (FEAT-WH-XX).
-    # Until then the simulator exercises each event individually via single-record dispatch.
     fan_out:
       discriminator: subscriptionType
+      # HubSpot POSTs an array of event objects in a single request.
+      array_unwrap: true
       unmatched: log_and_discard
       routes:
         # HubSpot sends notification-only payloads — objectId is the only record
-        # reference; the engine must fetch the full record via a lookup call.
+        # reference; the engine fetches the full record via a single-record lookup.
         - match: contact.creation
           datatype: contacts
           notification_only: true
@@ -83,15 +82,13 @@ connector:
           datatype: companies
           is_delete: true
           notification_external_id_field: objectId
-        # Association webhooks carry fromObjectId + toObjectId — compound key.
-        # These require engine support for multi-field notification_external_id_field
-        # (FEAT-WH-XX: compound key support) before they can be wired up.
-        # - match: association.creation
-        #   datatype: contacts_companies_associations
-        #   notification_only: true
-        # - match: association.deletion
-        #   datatype: contacts_companies_associations
-        #   is_delete: true
+        # Association webhooks carry the full association in the payload.
+        # primary_key: [fromObjectId, toObjectId] produces a compound key "100:200".
+        - match: association.creation
+          datatype: contacts_companies_associations
+        - match: association.deletion
+          datatype: contacts_companies_associations
+          is_delete: true
 
   datatypes:
     contacts:
@@ -230,7 +227,7 @@ connector:
       kind: relationship
 
       ingestion:
-        primary_key: id
+        primary_key: [fromObjectId, toObjectId]
         history_mode: overwrite
         schedule:
           interval: "10m"

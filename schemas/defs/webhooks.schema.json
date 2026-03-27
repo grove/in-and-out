@@ -108,21 +108,17 @@
               "notification_only": {
                 "type": "boolean",
                 "default": false,
-                "description": "When true, the payload is a notification reference only; trigger a single-record fetch instead of a direct upsert."
+                "description": "When true, the payload is a notification reference only; trigger a single-record fetch instead of a direct upsert. Mutually exclusive with is_delete; is_delete takes precedence."
               },
               "notification_external_id_field": {
                 "type": "string",
                 "default": "id",
-                "description": "Top-level payload field holding the external record ID for notification-only payloads and is_delete routes."
+                "description": "Top-level payload field holding the external record ID for notification-only payloads."
               },
               "is_delete": {
                 "type": "boolean",
                 "default": false,
-                "description": "When true, this route IS a deletion signal — the event type alone implies the record was deleted. The engine extracts the ID from notification_external_id_field and synthesizes a delete record without inspecting the rest of the payload. Takes precedence over null_record_field. E.g. 'contact.deletion' (HubSpot), 'customer.delete' (Tripletex)."
-              },
-              "null_record_field": {
-                "type": "string",
-                "description": "Payload field name that, when present and null (JSON null), signals a hard delete. Only consulted when is_delete is false. Useful for providers that reuse a single event type for upsert and delete (delete expressed as null payload). E.g. 'value' when a provider sends {value: null} on delete."
+                "description": "When true, the route match IS a deletion signal. The engine annotates the full payload with _deleted:true and upserts it. _extract_external_id handles both simple PKs (primary_key: id) and compound PKs (primary_key: [fromObjectId, toObjectId]) transparently. Takes precedence over notification_only. E.g. 'contact.deletion' (HubSpot), 'customer.delete' (Tripletex), 'association.deletion' (HubSpot)."
               }
             }
           }
@@ -134,6 +130,11 @@
             "reject_400"
           ],
           "description": "What to do when no route matches the discriminator value."
+        },
+        "array_unwrap": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the POST body is expected to be a JSON array of event objects; the engine unwraps it and dispatches each element independently. Required for HubSpot which batches multiple events in one POST."
         }
       }
     },
