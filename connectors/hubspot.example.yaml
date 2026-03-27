@@ -195,7 +195,7 @@ connector:
               createdate: "2026-03-18T09:00:00.000Z"
               lastmodifieddate: "2026-03-18T09:00:00.000Z"
 
-    associations:
+    contacts_companies_associations:
       description: HubSpot CRM contact-to-company associations
       kind: relationship
 

@@ -93,6 +93,26 @@ def build_ui_router() -> APIRouter:
     # Registration management API (called by the UI via fetch)
     # ------------------------------------------------------------------
 
+    @router.get("/ui/_registrations", response_class=HTMLResponse)
+    async def registrations_view(request: Request):
+        connectors = request.app.state.connectors
+        counts: dict[str, dict[str, int]] = {}
+        store: RecordStore = request.app.state.store
+        for conn in connectors:
+            counts[conn.name] = {}
+            for dt_name in conn.datatypes:
+                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+        webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
+        return templates.TemplateResponse(
+            request,
+            "registrations.html",
+            {
+                "connectors": connectors,
+                "counts": counts,
+                "webhook_subscriptions": webhook_subscriptions,
+            },
+        )
+
     @router.delete("/ui/_registrations/{connector_name}/{sub_id}")
     async def delete_registration(request: Request, connector_name: str, sub_id: int):
         """Delete a single webhook subscription from the shared store."""

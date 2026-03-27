@@ -7,67 +7,93 @@
     <div class="flex items-center gap-3 shrink-0">
         <h1 class="text-lg font-bold text-slate-100">API Request Log</h1>
         <span class="text-xs text-slate-500 tabular-nums" id="req-count">{{ events | length }} events loaded</span>
-        <input type="text" id="req-filter" placeholder="Filter by method, path, status…"
-            oninput="filterLog('request-log-body', this.value)"
-            class="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500 w-56">
-        <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear
-            display</button>
+        <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">
+            Clear display
+        </button>
     </div>
 
     <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
         <table class="w-full text-xs font-mono">
             <thead class="sticky top-0 z-10 bg-slate-800 border-b border-slate-700">
+                <!-- Column labels -->
                 <tr>
-                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-14">Status
-                    </th>
-                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-16">Method
-                    </th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-14">Status</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-16">Method</th>
                     <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide">Path</th>
-                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-32">System /
-                        Datatype</th>
-                    <th
-                        class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">
-                        Duration</th>
-                    <th
-                        class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-24 text-right">
-                        Time</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-28">System</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-28">Datatype</th>
+                    <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Duration</th>
+                    <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Time</th>
+                </tr>
+                <!-- Per-column filter row -->
+                <tr class="bg-slate-900/60 border-b border-slate-700">
+                    <td class="px-2 py-1">
+                        <input type="text" data-col="status" placeholder="status…"
+                            oninput="applyColFilters('request-log-body')"
+                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
+                    </td>
+                    <td class="px-2 py-1">
+                        <input type="text" data-col="method" placeholder="method…"
+                            oninput="applyColFilters('request-log-body')"
+                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
+                    </td>
+                    <td class="px-2 py-1">
+                        <input type="text" data-col="path" placeholder="path…"
+                            oninput="applyColFilters('request-log-body')"
+                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
+                    </td>
+                    <td class="px-2 py-1">
+                        <input type="text" data-col="sys" placeholder="system…"
+                            oninput="applyColFilters('request-log-body')"
+                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
+                    </td>
+                    <td class="px-2 py-1">
+                        <input type="text" data-col="dt" placeholder="datatype…"
+                            oninput="applyColFilters('request-log-body')"
+                            class="w-full bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500">
+                    </td>
+                    <td colspan="2"></td>
                 </tr>
             </thead>
             <tbody id="request-log-body">
                 {% for ev in events %}
-                {% set ok = ev.status < 400 %} {% set sys=connector_systems.get(ev.connector, ev.connector) if
-                    ev.connector else '' %} {% set req_detail_id='req-detail-' ~ loop.index %}
-                    <tr
+                {% set ok = ev.status < 400 %}
+                {% set sys = connector_systems.get(ev.connector, ev.connector) if ev.connector else '' %}
+                {% set req_detail_id = 'req-detail-' ~ loop.index %}
+                <tr
                     class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
                     onclick="document.getElementById('{{ req_detail_id }}').classList.toggle('hidden')"
                     data-detail="{{ req_detail_id }}"
-                    data-search="{{ ev.status }} {{ ev.method }} {{ ev.path }} {{ sys }}{% if ev.datatype %}/{{ ev.datatype }}{% endif %}">
+                    data-status="{{ ev.status }}"
+                    data-method="{{ ev.method }}"
+                    data-path="{{ ev.path }}"
+                    data-sys="{{ sys }}"
+                    data-dt="{{ ev.datatype }}">
                     <td class="px-3 py-1.5 {{ 'text-green-400' if ok else 'text-red-400' }}">{{ ev.status }}</td>
                     <td class="px-3 py-1.5 text-sky-300">{{ ev.method }}</td>
                     <td class="px-3 py-1.5 text-slate-300 max-w-0 truncate">{{ ev.path }}</td>
-                    <td class="px-3 py-1.5 text-slate-500">{% if sys %}{{ sys }}{% if ev.datatype %}/{{ ev.datatype }}{%
-                        endif %}{% endif %}</td>
+                    <td class="px-3 py-1.5 text-slate-500">{{ sys }}</td>
+                    <td class="px-3 py-1.5 text-slate-500">{{ ev.datatype }}</td>
                     <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">{{ ev.duration_ms }}ms</td>
-                    <td class="px-3 py-1.5 text-slate-600 text-right">{{ ev.timestamp[11:19] if ev.timestamp else '' }}
+                    <td class="px-3 py-1.5 text-slate-600 text-right">{{ ev.timestamp[11:19] if ev.timestamp else '' }}</td>
+                </tr>
+                <tr id="{{ req_detail_id }}" class="hidden border-b border-slate-700">
+                    <td colspan="7" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1 text-xs font-mono">
+                        <div class="break-all"><span class="text-slate-500 mr-1">path</span><span
+                                class="text-slate-200">{{ ev.path }}</span></div>
+                        {% if ev.connector %}<div><span class="text-slate-500 mr-1">connector</span><span
+                                class="text-slate-200">{{ ev.connector }}</span>{% if ev.datatype %} · <span
+                                class="text-slate-500 mr-1">datatype</span><span class="text-slate-200">{{
+                                ev.datatype }}</span>{% endif %}</div>{% endif %}
+                        <div class="text-slate-600">{{ ev.timestamp }}</div>
                     </td>
-                    </tr>
-                    <tr id="{{ req_detail_id }}" class="hidden border-b border-slate-700">
-                        <td colspan="6" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1">
-                            <div class="break-all"><span class="text-slate-500 mr-1">path</span><span
-                                    class="text-slate-200">{{ ev.path }}</span></div>
-                            {% if ev.connector %}<div><span class="text-slate-500 mr-1">connector</span><span
-                                    class="text-slate-200">{{ ev.connector }}</span>{% if ev.datatype %} · <span
-                                    class="text-slate-500 mr-1">datatype</span><span class="text-slate-200">{{
-                                    ev.datatype }}</span>{% endif %}</div>{% endif %}
-                            <div class="text-slate-600">{{ ev.timestamp }}</div>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">No API requests recorded
-                            yet. Start the engine to see traffic here.</td>
-                    </tr>
-                    {% endfor %}
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">No API requests recorded
+                        yet. Start the engine to see traffic here.</td>
+                </tr>
+                {% endfor %}
             </tbody>
         </table>
     </div>
@@ -77,86 +103,109 @@
 
 {% block extra_scripts %}
 <script>
-    // Live SSE: prepend new request rows
     document.addEventListener('DOMContentLoaded', function () {
         const body = document.getElementById('request-log-body');
         const countEl = document.getElementById('req-count');
         let count = {{ events | length }};
         let liveCount = 0;
 
-    document.addEventListener('simulator:request', function (e) {
-        const d = e.detail;
-        const ok = d.status < 400;
-        const sys = (window._connectorSystems && window._connectorSystems[d.connector]) ? window._connectorSystems[d.connector] : (d.connector || '');
-        const sysLabel = sys ? (sys + (d.datatype ? '/' + d.datatype : '')) : '';
-        const ts = d.timestamp ? d.timestamp.substring(11, 19) : '';
-        const searchText = `${d.status} ${d.method} ${d.path} ${sysLabel}`;
+        document.addEventListener('simulator:request', function (e) {
+            const d = e.detail;
+            const ok = d.status < 400;
+            const sys = (window._connectorSystems && window._connectorSystems[d.connector])
+                ? window._connectorSystems[d.connector] : (d.connector || '');
+            const ts = d.timestamp ? d.timestamp.substring(11, 19) : '';
 
-        const placeholder = body.querySelector('td[colspan="6"]');
-        if (placeholder && placeholder.closest('tr')) placeholder.closest('tr').remove();
+            const placeholder = body.querySelector('td[colspan="7"]');
+            if (placeholder && placeholder.closest('tr')) placeholder.closest('tr').remove();
 
-        liveCount++;
-        const detailId = 'req-detail-live-' + liveCount;
+            liveCount++;
+            const detailId = 'req-detail-live-' + liveCount;
 
-        const summaryRow = document.createElement('tr');
-        summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
-        summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
-        summaryRow.setAttribute('data-detail', detailId);
-        summaryRow.setAttribute('data-search', searchText.toLowerCase());
-        summaryRow.innerHTML = `
+            const summaryRow = document.createElement('tr');
+            summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
+            summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
+            summaryRow.setAttribute('data-detail', detailId);
+            summaryRow.setAttribute('data-status', String(d.status));
+            summaryRow.setAttribute('data-method', d.method || '');
+            summaryRow.setAttribute('data-path', d.path || '');
+            summaryRow.setAttribute('data-sys', sys);
+            summaryRow.setAttribute('data-dt', d.datatype || '');
+            summaryRow.innerHTML = `
                 <td class="px-3 py-1.5 ${ok ? 'text-green-400' : 'text-red-400'}">${d.status}</td>
                 <td class="px-3 py-1.5 text-sky-300">${d.method}</td>
                 <td class="px-3 py-1.5 text-slate-300 max-w-0 truncate">${d.path}</td>
-                <td class="px-3 py-1.5 text-slate-500">${sysLabel}</td>
+                <td class="px-3 py-1.5 text-slate-500">${sys}</td>
+                <td class="px-3 py-1.5 text-slate-500">${d.datatype || ''}</td>
                 <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">${d.duration_ms}ms</td>
                 <td class="px-3 py-1.5 text-slate-600 text-right">${ts}</td>`;
-        const detailRow = document.createElement('tr');
-        detailRow.id = detailId;
-        detailRow.className = 'hidden border-b border-slate-700';
-        detailRow.innerHTML = `
-                <td colspan="6" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1 text-xs font-mono">
+            const detailRow = document.createElement('tr');
+            detailRow.id = detailId;
+            detailRow.className = 'hidden border-b border-slate-700';
+            detailRow.innerHTML = `
+                <td colspan="7" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1 text-xs font-mono">
                     <div class="break-all"><span class="text-slate-500 mr-1">path</span><span class="text-slate-200">${d.path}</span></div>
                     ${d.connector ? `<div><span class="text-slate-500 mr-1">connector</span><span class="text-slate-200">${d.connector}</span>${d.datatype ? ` · <span class="text-slate-500 mr-1">datatype</span><span class="text-slate-200">${d.datatype}</span>` : ''}</div>` : ''}
                     <div class="text-slate-600">${d.timestamp || ''}</div>
                 </td>`;
-        body.insertBefore(detailRow, body.firstChild);
-        body.insertBefore(summaryRow, body.firstChild);
+            body.insertBefore(detailRow, body.firstChild);
+            body.insertBefore(summaryRow, body.firstChild);
 
-        // Re-apply any active filter to the new row.
-        const filterVal = document.getElementById('req-filter')?.value?.trim().toLowerCase();
-        if (filterVal) {
-            const match = searchText.toLowerCase().includes(filterVal);
-            summaryRow.classList.toggle('hidden', !match);
-            if (!match) detailRow.classList.add('hidden');
-        }
+            // Apply active column filters to the new rows immediately
+            _applyFiltersToRow(summaryRow, detailRow);
 
-        count++;
-        if (countEl) countEl.textContent = count + ' events loaded';
-        while (body.children.length > 400) body.removeChild(body.lastChild);
-    });
+            count++;
+            if (countEl) countEl.textContent = count + ' events loaded';
+            while (body.children.length > 400) body.removeChild(body.lastChild);
+        });
     });
 
-    function filterLog(bodyId, rawQuery) {
-        const query = rawQuery.trim().toLowerCase();
-        const body = document.getElementById(bodyId);
-        body.querySelectorAll('tr[data-search]').forEach(function (row) {
-            const match = !query || row.dataset.search.toLowerCase().includes(query);
-            row.classList.toggle('hidden', !match);
-            const detailId = row.dataset.detail;
-            if (detailId) {
-                const detailRow = document.getElementById(detailId);
-                if (detailRow && !match) detailRow.classList.add('hidden');
-            }
+    function applyColFilters(bodyId) {
+        const bodyEl = document.getElementById(bodyId);
+        if (!bodyEl) return;
+        const filters = _readFilters(bodyEl.closest('table'));
+        const hasAny = Object.keys(filters).length > 0;
+
+        bodyEl.querySelectorAll('tr[data-detail]').forEach(function (row) {
+            const visible = !hasAny || _rowMatchesFilters(row, filters);
+            row.classList.toggle('hidden', !visible);
+            const detailRow = document.getElementById(row.dataset.detail);
+            if (detailRow && !visible) detailRow.classList.add('hidden');
         });
     }
 
+    function _readFilters(table) {
+        const filters = {};
+        if (!table) return filters;
+        table.querySelectorAll('thead input[data-col]').forEach(function (inp) {
+            const v = inp.value.trim().toLowerCase();
+            if (v) filters[inp.dataset.col] = v;
+        });
+        return filters;
+    }
+
+    function _rowMatchesFilters(row, filters) {
+        for (const [col, query] of Object.entries(filters)) {
+            if (!(row.dataset[col] || '').toLowerCase().includes(query)) return false;
+        }
+        return true;
+    }
+
+    function _applyFiltersToRow(summaryRow, detailRow) {
+        const table = document.getElementById('request-log-body').closest('table');
+        const filters = _readFilters(table);
+        if (Object.keys(filters).length === 0) return;
+        const visible = _rowMatchesFilters(summaryRow, filters);
+        summaryRow.classList.toggle('hidden', !visible);
+        if (!visible && detailRow) detailRow.classList.add('hidden');
+    }
+
     function clearLog() {
-        const body = document.getElementById('request-log-body');
-        body.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New requests will appear here.</td></tr>';
+        document.getElementById('request-log-body').innerHTML =
+            '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New requests will appear here.</td></tr>';
         const countEl = document.getElementById('req-count');
         if (countEl) countEl.textContent = '0 events loaded';
-        const filterEl = document.getElementById('req-filter');
-        if (filterEl) filterEl.value = '';
+        document.querySelectorAll('thead input[data-col]').forEach(function (inp) { inp.value = ''; });
     }
 </script>
 {% endblock %}
