@@ -4,23 +4,32 @@
   "title": "Webhook Configuration",
   "type": "object",
   "additionalProperties": true,
-  "required": ["path"],
+  "required": [
+    "path"
+  ],
   "properties": {
     "path": {
       "type": "string",
       "minLength": 1,
       "description": "URL path the engine exposes for inbound webhook deliveries."
     },
-
     "signature": {
       "description": "HMAC signature verification. Omit when using auth_header_name instead.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["algorithm", "header", "credential_ref"],
+      "required": [
+        "algorithm",
+        "header",
+        "credential_ref"
+      ],
       "properties": {
         "algorithm": {
           "type": "string",
-          "enum": ["hmac-sha256", "hmac-sha1", "rsa-sha256"]
+          "enum": [
+            "hmac-sha256",
+            "hmac-sha1",
+            "rsa-sha256"
+          ]
         },
         "header": {
           "type": "string",
@@ -32,7 +41,10 @@
         },
         "encoding": {
           "type": "string",
-          "enum": ["hex_prefix", "base64"],
+          "enum": [
+            "hex_prefix",
+            "base64"
+          ],
           "default": "hex_prefix",
           "description": "hex_prefix: 'sha256=<hex>' (GitHub). base64: raw base64 (Shopify, SuperOffice)."
         },
@@ -51,7 +63,6 @@
         }
       }
     },
-
     "auth_header_name": {
       "type": "string",
       "description": "Header name for static-value auth (e.g. X-Simulator-Auth). Used instead of HMAC when the provider forwards a fixed token (e.g. Tripletex)."
@@ -60,12 +71,13 @@
       "type": "string",
       "description": "Credential ref for the expected value of auth_header_name."
     },
-
     "fan_out": {
       "description": "Event-type discriminator and per-datatype route mapping.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["unmatched"],
+      "required": [
+        "unmatched"
+      ],
       "properties": {
         "discriminator": {
           "type": "string",
@@ -79,7 +91,10 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["match", "datatype"],
+            "required": [
+              "match",
+              "datatype"
+            ],
             "additionalProperties": true,
             "properties": {
               "match": {
@@ -105,17 +120,21 @@
         },
         "unmatched": {
           "type": "string",
-          "enum": ["log_and_discard", "reject_400"],
+          "enum": [
+            "log_and_discard",
+            "reject_400"
+          ],
           "description": "What to do when no route matches the discriminator value."
         }
       }
     },
-
     "registration": {
       "description": "Active webhook lifecycle management — register/renew/deregister subscriptions with the source system.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["register_path"],
+      "required": [
+        "register_path"
+      ],
       "properties": {
         "register_path": {
           "type": "string",
@@ -144,8 +163,7 @@
         },
         "health_check_active_value": {
           "type": "string",
-          "default": "ACTIVE",
-          "description": "Expected value at health_check_active_field. Defaults to 'ACTIVE'."
+          "description": "Expected value at health_check_active_field. Must be set explicitly when health_check_active_field is used (no default)."
         },
         "id_response_path": {
           "type": "string",
@@ -164,12 +182,16 @@
         },
         "register_body_extra": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "Extra body fields for the registration POST. Supports ${route_event} and ${credential:<ref>} placeholders."
         },
         "register_headers_extra": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "Extra HTTP headers for the registration POST. Same placeholder support as register_body_extra."
         },
         "register_events_field": {
@@ -178,7 +200,6 @@
         }
       }
     },
-
     "event_id_field": {
       "type": "string",
       "description": "Payload field holding a unique event ID for idempotency / deduplication."
@@ -190,11 +211,16 @@
     },
     "ip_allowlist": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "CIDR ranges from which deliveries are accepted. Restricts beyond any server-wide allowlist."
     },
     "rate_limit_per_minute": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Per-connector inbound rate limit. null inherits the server-wide default."
     }
   }

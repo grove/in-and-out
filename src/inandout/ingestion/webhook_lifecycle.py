@@ -266,7 +266,7 @@ class WebhookLifecycleManager:
             async with HttpTransportAdapter(self._connector) as transport:
                 resp = await transport._raw_request("GET", path)
             is_active = resp.status_code == 200
-            if is_active and reg.health_check_active_field:
+            if is_active and reg.health_check_active_field and reg.health_check_active_value is not None:
                 try:
                     body_json = orjson.loads(resp.content)
                     actual = _resolve_dot_path(body_json, reg.health_check_active_field)

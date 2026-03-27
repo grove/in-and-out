@@ -930,6 +930,10 @@ def _add_webhook_registration_routes(
                     return JSONResponse({"error": "not found"}, status_code=404)
                 resp: dict = {}
                 _set_path(resp, id_path, webhook_id)
+                # If the connector declares a health_check_active_field, embed
+                # the expected active value so the engine's health check passes.
+                if reg.health_check_active_field and reg.health_check_active_value is not None:
+                    _set_path(resp, reg.health_check_active_field, reg.health_check_active_value)
                 elapsed = int((time.monotonic() - t0) * 1000)
                 if event_bus is not None:
                     event_bus.publish_request(

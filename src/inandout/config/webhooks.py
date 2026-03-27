@@ -74,9 +74,10 @@ class WebhookRegistrationConfig(BaseModel):
     # When set, the health_check response body is parsed as JSON and the value
     # at this dot-notation path is compared against health_check_active_value.
     # If it does not match, the subscription is treated as inactive even on 200.
+    # Both fields must be set together; health_check_active_value has no default.
     # Example: health_check_active_field: "value.status" (Tripletex)
     health_check_active_field: str | None = None
-    health_check_active_value: str = "ACTIVE"
+    health_check_active_value: str | None = None
     id_response_path: str = "id"  # dot-notation path to extract webhook ID
     callback_url_runtime_param: str = "callback_url"  # runtime param name for our URL
     # When True, register one subscription per fan_out route (e.g. Tripletex
