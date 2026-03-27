@@ -2076,6 +2076,9 @@ The three onboarding plans each interact with record linkage differently:
 | Handles linkage oscillation | No | No | No | No |
 | Detects junk values (over-linking) | Only via cluster metrics | Blue vs green cluster size comparison | Via high-fanout shadow delta counts | Via high-fanout shadow delta counts |
 | Detects missed matches (under-linking) | Only if operator queries for duplicate clusters | Blue vs green comparison may reveal | Indirectly — duplicate inserts appear as `new_record` in shadow | Indirectly — duplicate `new_record` rows visible with attribution |
+| Bulk import / backfill safety (§4.43) | Mode B gating provides window; pre-bootstrap quality pass required | Blue pipeline is safest: bulk load into blue, validate before cutover | System-3-caused deltas held; but golden record may absorb bad bulk data | Same as shadow; held deltas give correction window |
+| Partial-ingest instability (§4.54) | Sync completion marker required before ungate | Blue pipeline isolated; partial ingests do not affect production | No protection — partial ingest triggers identity refresh immediately | Same exposure as shadow; sync completion marker required |
+| Fragile transitivity chain exposure (§4.44) | Full system 3 dataset arrives at once; worst-case chain formation | Chain effects visible in blue vs green cluster diff before cutover | Chain effects fire in production immediately; operator sees downstream consequences only | Same as shadow; but chain effects on systems 1 and 2 are held for review |
 
 **Key insight:** No onboarding approach directly reviews individual identity links. They all operate at a higher level — clusters, deltas, or pipeline-level diffs. This is the gap that human curation of links would fill.
 
@@ -2101,6 +2104,8 @@ Source data → Identity matching → Proposed links → HUMAN REVIEW → Accept
 3. **Cross-system inserts** — the `new_record` classification from PLAN_ONBOARDING_SHADOW_MODE.md §10.6. When system 3 causes a new record to appear in systems 1 and 2, a human should confirm this is a genuine new entity — not a duplicate caused by under-linking.
 4. **Cluster re-merges** — when two previously separate clusters are bridged by a system 3 record. These are the highest-risk link decisions because they affect records that were already stable.
 5. **Suspected under-links (duplicate clusters)** — two or more clusters whose records are suspiciously similar (near-identical names, overlapping addresses, same phone number with different formatting) but were not matched by the identity rules. These need a human to decide: should they be linked (forced merge via override), or are they genuinely distinct entities? Left unreviewed, each cluster generates cross-system inserts that create duplicates in every writable system.
+6. **Dual-relationship candidates (§4.51)** — two records where all identity fields match but the records represent intentionally distinct business relationships (vendor AND customer; employee AND patient). These must be explicitly reviewed before the bootstrap because a post-writeback block requires manual unwinding across all systems. The review question is not "are these the same person?" but "should these records be managed as a unit?"
+7. **Recycled-identifier candidates (§4.45)** — a newly created record that immediately matches the identity fields of a cluster whose members were created significantly earlier. Could be a legitimate returning customer or a recycled phone/email. The age gap between the new record and the existing cluster is the flag.
 
 **What would NOT be curated:**
 1. **High-confidence matches** — same tax_id in two systems with consistent names. No human review needed.
@@ -2130,6 +2135,11 @@ CREATE TABLE inout_link_overrides (
     decided_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     identity_field  TEXT,                  -- which field caused the proposed link
     identity_value  TEXT,                  -- the value that matched
+
+    -- Override lifecycle (§4.52, §4.58)
+    review_due_at    DATE,                 -- when this override should be re-evaluated
+    last_reviewed_at TIMESTAMPTZ,          -- most recent human review
+    reviewed_by      TEXT,                 -- reviewer for audit trail
 
     UNIQUE (source_a, external_id_a, source_b, external_id_b)
 );
@@ -2275,10 +2285,12 @@ WHERE a.email NOT IN (SELECT blocked_value FROM inout_identity_blocklist WHERE f
 | Pattern | Example |
 |---|---|
 | Placeholder email | `noemail@*`, `test@*`, `nobody@*` |
+| IANA reserved domains | `@example.com`, `@example.net`, `@example.org`, `@test`, `@localhost` |
 | Placeholder phone | `000-000-0000`, `+1-000-0000`, `999-999-9999` |
 | Placeholder name | `Unknown`, `N/A`, `Test`, `DO NOT USE` |
 | System-generated values | Sequential IDs that look like identity fields |
 | High-frequency values | Any value appearing in more than 1% of records |
+| Empty strings | `''` — must be coerced to NULL before matching (`NULLIF(trim(field), '')`) — see §4.46 |
 
 The blocklist is cheaper and faster than per-link curation. It should be the first line of defence.
 
@@ -2601,6 +2613,8 @@ This scales to millions of clusters because embedding + ANN search is O(n log n)
 | **Cost** | At $0.01–0.10 per LLM call (depending on model and token count), 5,000 curation decisions cost $50–500. Acceptable for onboarding; may be costly for continuous steady-state curation. | Batch calls. Use a smaller/cheaper model for clear cases, escalate to a larger model for ambiguous ones. |
 | **Inconsistency** | The same record pair presented twice may get different LLM responses (non-deterministic generation). This is confusing if a human overrides an LLM decision and the LLM later contradicts itself. | Set temperature to 0. Cache decisions. Once a decision is made (by LLM or human), store it in the override table — don't re-evaluate. |
 | **Bias amplification** | If the LLM has biases about name patterns (e.g., assuming names from certain cultures are more likely to be the same person), it may systematically over-link or under-link records from those groups. | Audit LLM decisions by demographic segment. Compare acceptance rates across name origins, geographies, and source systems. |
+| **Corroboration loop amplification (§4.48)** | The writeback-induced corroboration feedback loop (§4.48) causes an email written by the MDM to appear as independently confirmed by two sources. To the LLM, this looks like multi-source corroboration and inflates its confidence. The LLM cannot distinguish a native value from a writeback echo. | Tag writeback-origin fields with `writeback_echo: true` at ingest (§4.48). Strip echo-tagged fields from the record representation fed to the LLM prompt, or annotate them explicitly: `email (writeback-echo — single source)`. |
+| **GDPR purpose limitation on LLM calls (§4.49)** | Sending a record pair to an LLM for curation is a processing operation. If the two records were collected under different legal bases (e.g., support ticket email vs. marketing CRM email), cross-referencing them — even for identity matching — may require a compatible legal basis. The LLM call itself is the processing act, not just storage. | Confirm with legal counsel that the curation processing purpose is covered by the DPIA. Self-hosted LLMs reduce the data transfer dimension of this concern. Do not send records to an external API if they contain health, financial, or legally privileged information without explicit DPA and legal review. |
 
 ### 7.10 Updated Curation Spectrum
 
@@ -2743,11 +2757,27 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 2. **Populate the blocklist.** Based on audit results, block known junk values before system 3 enters the pipeline.
 
-3. **Add normalisation expressions.** Ensure every identity field has appropriate `normalize:` in the OSI-mapping YAML — `lower(trim(email))`, phone formatting, name standardisation.
+3. **Add normalisation expressions.** Ensure every identity field has appropriate `normalize:` in the OSI-mapping YAML — `lower(trim(email))`, phone formatting, name standardisation. Coerce empty strings to NULL (`NULLIF(trim(field), '')`) for all identity fields (§4.46).
 
-4. **Define link groups for weak fields.** If using name-based matching, require composite keys (first_name + last_name + DOB) rather than individual fields.
+4. **Run a character encoding and locale audit (§4.39, §4.50).** If identity fields contain non-ASCII characters, add Unicode NFC normalisation. Identify any sources using non-Latin scripts or regional transliteration. Confirm the date format convention (MM/DD vs DD/MM) for any source using DOB or date-based identity fields, and coerce all dates to ISO 8601 at the forward view layer before bootstrap.
 
-5. **Set cluster size alerts.** Configure monitoring to alert if any cluster exceeds a reasonable threshold (e.g., 100 records).
+5. **Define link groups for weak fields.** If using name-based matching, require composite keys (first_name + last_name + DOB) rather than individual fields.
+
+6. **Check for surrogate key leakage (§4.42).** For every field declared in `identity_fields` in the connector YAML, confirm it is semantically meaningful to an external observer. Sequential integers and system-internal GUIDs must not be declared as identity fields. Run a cardinality check: any identity field with cardinality equal to total record count is a surrogate key.
+
+7. **Filter test and sandbox records (§4.47).** Count records matching known test patterns (`@example.com`, `test@*`, `DO NOT DELETE`, `555-01xx` phone ranges). Any count > 0 must be addressed with a connector-level `exclude_filter` before bootstrap.
+
+8. **Document platform deduplication behaviour per source (§4.53).** Record whether the source system enforces uniqueness on email, phone, or other identity fields at the platform level. High within-source duplicate rates require intra-source deduplication (§4.27) before cross-source matching.
+
+9. **Annotate entity granularity (§4.59).** For each connector, declare `record_granularity: entity` or `record_granularity: occurrence` in the YAML. Occurrence-granularity sources require deduplication in the forward view before identity resolution.
+
+10. **Inventory dual-relationship records (§4.51).** Ask: does this source contain records for individuals who also appear in other sources in a different capacity (vendor AND customer; employee AND patient)? If yes, enumerate cases and pre-create block-merge overrides before bootstrap.
+
+11. **Define conflict resolution policy per non-identity field (§4.55).** Before bootstrap, specify `source_priority` or `most_recent` policy for each field in the golden record YAML. Annotate fields where NULL means deliberately cleared, not unknown (`null_means_cleared: true`).
+
+12. **Document target-system field constraints for writeback (§4.56).** For each system that will receive writeback, query its schema for field length, character set, and format constraints. Declare them in the connector YAML. Any identity field that the target system transforms must not be used for cross-system matching via that system's re-ingested copy.
+
+13. **Set cluster size alerts.** Configure monitoring to alert if any cluster exceeds a reasonable threshold (e.g., 100 records).
 
 ### 10.2 During Onboarding
 
@@ -2770,9 +2800,15 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 9. **Monitor cluster metrics.** Use `clusters_merged` / `clusters_split` from `pgt_refresh_history` to detect unexpected linkage changes during steady-state operation.
 
-10. **Periodically audit the override table.** Expired overrides should be re-evaluated. Overrides that are no longer needed (because the underlying data changed) should be removed.
+10. **Periodically audit the override table.** Review overrides whose `review_due_at` date has passed (§4.58). Check for dormant blocks — overrides where the two records no longer share any identity field values and the block is no longer preventing any merge. Remove or renew. Track the `blocks_created / blocks_reviewed / blocks_expired` ratio over time: a growing block count with low review rate indicates stale-block accumulation.
 
-11. **Feedback loop to identity rules.** If the same pattern keeps appearing in the curation queue (e.g., shared family emails), adjust the OSI-mapping YAML — add a link group, change the identity field, or add a normalisation expression. The goal is for the curation queue to shrink over time as the rules improve.
+11. **Monitor override table count (§4.52).** Alert if the active override count drops by more than a threshold outside of an operator-initiated bulk action. A sudden drop from hundreds to zero indicates override table damage (migration, restore, or accidental truncation). Verify override table inclusion in the database backup and restore runbook.
+
+12. **Run writeback round-trip hash checks (§4.56).** Periodically re-fetch written-back identity field values from target systems and compare them to what was written. Any mismatch indicates a field constraint violation (truncation, charset narrowing, stripping) that is silently creating false negatives in identity matching. Add the affected field to the connector's constraint documentation.
+
+13. **Audit for writeback-induced corroboration (§4.48).** Regularly query for clusters where all sources' copies of an identity field value arrived at approximately the same time following a writeback event — these are echo clusters masquerading as multi-source corroboration. Use the `writeback_echo` provenance flag (if implemented) to identify which identity field instances are MDM-originated rather than natively observed.
+
+14. **Feedback loop to identity rules.** If the same pattern keeps appearing in the curation queue (e.g., shared family emails), adjust the OSI-mapping YAML — add a link group, change the identity field, or add a normalisation expression. The goal is for the curation queue to shrink over time as the rules improve.
 
 ---
 
@@ -2793,3 +2829,11 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 7. **What is the right LLM deployment model for curation?** Self-hosted models avoid PII concerns but require GPU infrastructure. API-based models (with DPAs) are simpler to deploy but add latency and cost. For onboarding (batch, non-real-time), API-based is likely acceptable. For steady-state continuous curation, self-hosted may be required for cost and latency reasons.
 
 8. **Should LLM curation decisions be treated as first-class overrides or as soft suggestions?** If LLM decisions go directly to the override table, they have the same authority as human decisions and persist until explicitly removed. If they are treated as suggestions, they need human confirmation but reduce the cognitive load per decision. The choice depends on the organisation's risk tolerance and the LLM's calibrated accuracy.
+
+9. **Who owns the sync completion marker — the connector or pg-trickle?** §4.54 proposes that pg-trickle's identity refresh be gated on a `sync_completed_at` marker written by the connector. Should this be a first-class pg-trickle feature (a `require_sync_complete: true` gate on a stream table) or an external orchestration responsibility handled outside the scheduler? If external, how is it integrated with pg-trickle's tiered scheduling?
+
+10. **How should occurrence-granularity sources be modelled in OSI-mapping YAML (§4.59)?** Currently there is no `record_granularity` concept in OSI-mapping. The workaround is deduplication in the forward view. Should OSI-mapping natively support an `occurrence_key` annotation that causes the `_fwd_*` layer to deduplicate automatically before identity resolution? Or is forward-view deduplication sufficient as a connector-authoring convention?
+
+11. **What is the right architecture for the identity edge table and cluster assignment history (§4.57)?** The view pipeline currently produces no log. The edge table and history could be: (a) maintained by a post-refresh trigger on `_id_{target}`, (b) computed by a separate materialisation job outside pg-trickle, or (c) a native pg-trickle feature that snapshots cluster assignments on each refresh. Option (c) would require a pg-trickle extension. Options (a) and (b) are implementable today but add pipeline complexity. What is the right tradeoff?
+
+12. **Where should conflict resolution policy per field be defined — OSI-mapping YAML or the bridge layer (§4.55)?** Field conflict resolution determines what value populates the golden record and therefore what gets written back. It could live in the OSI-mapping connector YAML (alongside the identity field definitions), in the bridge layer SQL (as CASE expressions over ranked sources), or in a dedicated resolution config file. Each has different maintenance implications. Currently there is no standardised location.
