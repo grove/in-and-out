@@ -11,6 +11,7 @@ the engine (resolved from the environment via ``credential_ref``).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -32,13 +33,20 @@ def _resolve_secret(credential_ref: str | None) -> str | None:
     return os.environ.get(env_key) or os.environ.get(credential_ref.upper())
 
 
-def _sign(payload_bytes: bytes, secret: str, algorithm: str) -> str:
+def _sign(payload_bytes: bytes, secret: str, algorithm: str, encoding: str = "hex_prefix") -> str:
     algo = algorithm.lower().replace("-", "")
     if "sha256" in algo:
-        return hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
-    if "sha1" in algo:
-        return hmac.new(secret.encode(), payload_bytes, hashlib.sha1).hexdigest()  # noqa: S324 — legacy signature scheme
-    return hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
+        digest = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).digest()
+    elif "sha1" in algo:
+        digest = hmac.new(secret.encode(), payload_bytes, hashlib.sha1).digest()  # noqa: S324 — legacy
+    else:
+        digest = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).digest()
+
+    if encoding == "base64":
+        return base64.b64encode(digest).decode()
+    # hex_prefix (default): "sha256=<hex>"
+    prefix = "sha256" if "sha256" in algo else "sha1"
+    return f"{prefix}={digest.hex()}"
 
 
 class WebhookDispatcher:
@@ -73,17 +81,18 @@ class WebhookDispatcher:
             return None
 
         # Find the event_type string for this (datatype, operation) pair.
-        discriminator_field = getattr(fan_out, "discriminator", "eventType")
         event_type: str | None = None
         for route in getattr(fan_out, "routes", []):
             if getattr(route, "datatype", None) == datatype:
-                event_type = getattr(route, "match", None)
-                et = (event_type or "").lower()
+                et = (getattr(route, "match", "") or "").lower()
                 if operation == "create" and ("creation" in et or et.endswith(".create")):
+                    event_type = route.match
                     break
                 if operation == "update" and ("change" in et or et.endswith(".update")):
+                    event_type = route.match
                     break
                 if operation == "delete" and ("delet" in et or et.endswith(".delete")):
+                    event_type = route.match
                     break
 
         if event_type is None:
@@ -101,14 +110,31 @@ class WebhookDispatcher:
             return None
 
         url = f"{self._engine_url}{path}"
-        payload: dict = {discriminator_field: event_type}
-        if record:
-            payload.update(record)
-        payload["_simulator_ts"] = datetime.now(timezone.utc).isoformat()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+
+        registration = getattr(webhook_cfg, "registration", None)
+        per_route = registration and getattr(registration, "per_route_registration", False)
+
+        if per_route:
+            # FEAT-SIM-01: registration-based payload (e.g. Tripletex).
+            # Shape: {"subscriptionId": 0, "event": "<route.match>",
+            #         "id": <record_id>, "value": <record | null>}
+            payload: dict = {
+                "subscriptionId": 0,
+                "event": event_type,
+                "id": _coerce_id(record_id),
+                "value": None if operation == "delete" else record,
+            }
+        else:
+            # Legacy HubSpot-style fan-out payload.
+            discriminator_field = getattr(fan_out, "discriminator", "eventType") or "eventType"
+            payload = {discriminator_field: event_type}
+            if record:
+                payload.update(record)
+            payload["_simulator_ts"] = datetime.now(timezone.utc).isoformat()
 
         payload_json = json.dumps(payload)
         payload_bytes = payload_json.encode()
-        headers: dict[str, str] = {"Content-Type": "application/json"}
 
         sig_cfg = getattr(webhook_cfg, "signature", None)
         if sig_cfg:
@@ -116,7 +142,21 @@ class WebhookDispatcher:
             if secret:
                 sig_header = getattr(sig_cfg, "header", "X-Simulator-Signature")
                 algorithm = getattr(sig_cfg, "algorithm", "hmac-sha256")
-                headers[sig_header] = _sign(payload_bytes, secret, algorithm)
+                encoding = getattr(sig_cfg, "encoding", "hex_prefix")
+                headers[sig_header] = _sign(payload_bytes, secret, algorithm, encoding)
+        elif getattr(webhook_cfg, "auth_header_name", None) and getattr(
+            webhook_cfg, "auth_header_credential_ref", None
+        ):
+            # FEAT-WH-03: custom header auth — forward the pre-configured value.
+            secret = _resolve_secret(webhook_cfg.auth_header_credential_ref)
+            if secret:
+                headers[webhook_cfg.auth_header_name] = secret
+
+        # FEAT-WH-08: add the discriminator header if configured so the engine
+        # can route by header without parsing the body.
+        discriminator_header = getattr(fan_out, "discriminator_header", None)
+        if discriminator_header:
+            headers[discriminator_header] = event_type
 
         try:
             t0 = time.monotonic()
@@ -157,3 +197,11 @@ class WebhookDispatcher:
         import asyncio
 
         asyncio.create_task(self.dispatch(connector, datatype, operation, record_id, record))
+
+
+def _coerce_id(record_id: str) -> int | str:
+    """Return an int if record_id is numeric (Tripletex uses integer IDs)."""
+    try:
+        return int(record_id)
+    except (ValueError, TypeError):
+        return record_id

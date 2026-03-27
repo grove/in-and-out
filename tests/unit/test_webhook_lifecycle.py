@@ -1,4 +1,5 @@
 """Unit tests for WebhookLifecycleManager (A1)."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -91,9 +92,9 @@ async def test_register_posts_and_stores_webhook_id() -> None:
         mgr = WebhookLifecycleManager(pool, connector_cfg, webhook_cfg, engine)
         webhook_id = await mgr.register("https://my.server/hook")
 
-    assert webhook_id == "wh-123"
+    assert webhook_id == ["wh-123"]
     transport_mock._raw_request.assert_called_once_with(
-        "POST", "/webhooks", json={"callback_url": "https://my.server/hook"}
+        "POST", "/webhooks", json={"callback_url": "https://my.server/hook"}, headers=None
     )
 
 
@@ -204,9 +205,7 @@ async def test_health_check_returns_false_on_404() -> None:
 
     # Simulate 404 by raising exception
     transport_mock = AsyncMock()
-    transport_mock._raw_request = AsyncMock(
-        side_effect=Exception("404 Not Found")
-    )
+    transport_mock._raw_request = AsyncMock(side_effect=Exception("404 Not Found"))
     transport_mock.__aenter__ = AsyncMock(return_value=transport_mock)
     transport_mock.__aexit__ = AsyncMock(return_value=None)
 

@@ -1,4 +1,5 @@
 """Unit tests for WebhookConfig Pydantic model."""
+
 from __future__ import annotations
 
 import pytest
@@ -32,6 +33,7 @@ def _make_fan_out() -> FanOutConfig:
 
 # --- Required fields ---
 
+
 def test_minimal_valid():
     cfg = WebhookConfig(path="/webhook", signature=_make_sig(), fan_out=_make_fan_out())
     assert cfg.path == "/webhook"
@@ -43,18 +45,19 @@ def test_missing_path_raises():
 
 
 def test_missing_signature_allowed():
-    # signature is optional — connectors may use auth_header_name instead (e.g. Tripletex)
+    # signature is optional — connectors may use auth_header_name instead (e.g. Tripletex) 22b9bd0 (feat(webhooks): implement registration-based webhook support)
     cfg = WebhookConfig(path="/webhook", fan_out=_make_fan_out())
     assert cfg.signature is None
 
 
 def test_missing_fan_out_allowed():
-    # fan_out is optional — fire-and-forget notification connectors don't need it
+    # fan_out is optional — fire-and-forget notification connectors don't need it 22b9bd0 (feat(webhooks): implement registration-based webhook support)
     cfg = WebhookConfig(path="/webhook", signature=_make_sig())
     assert cfg.fan_out is None
 
 
 # --- Optional fields ---
+
 
 def test_registration_default_none():
     cfg = WebhookConfig(path="/webhook", signature=_make_sig(), fan_out=_make_fan_out())

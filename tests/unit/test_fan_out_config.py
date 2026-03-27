@@ -1,4 +1,5 @@
 """Unit tests for FanOutRoute and FanOutConfig Pydantic models."""
+
 from __future__ import annotations
 
 import pytest
@@ -8,6 +9,7 @@ from inandout.config.webhooks import FanOutConfig, FanOutRoute, UnmatchedAction
 
 
 # --- FanOutRoute ---
+
 
 def test_fan_out_route_minimal():
     route = FanOutRoute(match="contact.created", datatype="contacts")
@@ -53,6 +55,7 @@ def test_fan_out_route_custom_external_id_field():
 
 # --- FanOutConfig ---
 
+
 def test_fan_out_config_minimal():
     cfg = FanOutConfig(discriminator="type", unmatched="log_and_discard", routes=[])
     assert cfg.discriminator == "type"
@@ -76,8 +79,25 @@ def test_fan_out_config_extra_field_forbidden():
 
 
 def test_fan_out_config_missing_discriminator_raises():
-    with pytest.raises(ValidationError):
-        FanOutConfig(unmatched="log_and_discard")
+    # Both discriminator and discriminator_header are None — now valid, since
+    # discriminator_header is an alternative to discriminator (FEAT-WH-08).
+    # A FanOutConfig with neither is allowed; routing will simply match nothing.
+    cfg = FanOutConfig(unmatched="log_and_discard")
+    assert cfg.discriminator is None
+    assert cfg.discriminator_header is None
+
+
+def test_fan_out_config_discriminator_header_only():
+    """FEAT-WH-08: header-based discriminator, no body-field discriminator needed."""
+    from inandout.config.webhooks import FanOutRoute
+
+    cfg = FanOutConfig(
+        discriminator_header="X-Event-Type",
+        routes=[FanOutRoute(match="contact.created", datatype="contacts")],
+        unmatched="log_and_discard",
+    )
+    assert cfg.discriminator is None
+    assert cfg.discriminator_header == "X-Event-Type"
 
 
 def test_fan_out_config_unmatched_log_and_discard():

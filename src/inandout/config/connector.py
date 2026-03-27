@@ -31,6 +31,7 @@ _ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ALLOWED_INTERPOLATION_PREFIXES = (
     "runtime.",
     "credential.",
+    "credential:",   # colon form used in register_body_extra placeholders
     "auth.",
     "record.",
     "data.",
@@ -49,6 +50,9 @@ _ALLOWED_INTERPOLATION_EXACT = frozenset(
         "pre_flight.etag",
         "pre_flight.version",
         "cluster_id",
+        # Lifecycle registration placeholders
+        "route_event",
+        "webhook_id",
     }
 )
 

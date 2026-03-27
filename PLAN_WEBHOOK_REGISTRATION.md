@@ -192,3 +192,167 @@ All five items are tightly coupled; the recommended implementation order is:
 4. **FEAT-WH-04** — null-value guard in fan-out router (independent)
 5. **FEAT-SIM-01** — simulator payload shape (integrates last, after 1–4 are
    testable end-to-end with a real Tripletex sandbox)
+
+---
+
+## Additional patterns (SuperOffice CRM + Shopify)
+
+These four items generalise the webhook subsystem beyond Tripletex to cover
+other registration-based connectors. They are independent of FEAT-WH-01–05.
+
+### FEAT-WH-05 — HMAC signature encoding variant
+
+**Problem**: The current `SignatureConfig` specifies `algorithm` but not how the
+resulting digest is serialised in the HTTP header.
+
+| Connector | Header | Format |
+|---|---|---|
+| GitHub | `X-Hub-Signature-256` | `sha256=<hex>` |
+| HubSpot | `X-HubSpot-Signature-v3` | raw base64 |
+| SuperOffice | `X-SuperOffice-Signature` | raw base64 |
+| Shopify | `X-Shopify-Hmac-Sha256` | raw base64 |
+
+**Config model** (`src/inandout/config/webhooks.py`):
+```python
+class SignatureEncoding(StrEnum):
+    hex_prefix = "hex_prefix"   # "sha256=deadbeef..."
+    base64     = "base64"       # "abc123=="
+
+class SignatureConfig(BaseModel):
+    ...
+    encoding: SignatureEncoding = SignatureEncoding.hex_prefix
+```
+
+**Receiver change**: after computing `hmac.new(secret, body, digestmod).digest()`,
+branch on `encoding`:
+```python
+if config.encoding == SignatureEncoding.base64:
+    computed = base64.b64encode(digest).decode()
+else:
+    computed = f"{config.algorithm.value.replace('-', '')}={digest.hex()}"
+```
+
+**Scope**: `SignatureConfig` model + receiver validation only. No lifecycle
+manager changes.
+
+---
+
+### FEAT-WH-06 — `register_headers_extra`
+
+**Problem**: SuperOffice's webhook subscription definition has a `Headers`
+property — a dict of headers that SuperOffice will include in every delivery
+POST it sends. This lets you configure SuperOffice to add an auth header to its
+outbound webhooks, which the receiver then verifies via FEAT-WH-03.
+
+Example SuperOffice registration body:
+```json
+{
+  "Name": "Contact Handler",
+  "Events": ["contact.created", "contact.changed", "contact.deleted"],
+  "TargetUrl": "https://engine.example.com/webhooks/superoffice",
+  "Secret": "...",
+  "State": "Active",
+  "Headers": {"X-Inout-Auth": "${credential:superoffice_webhook_token}"}
+}
+```
+
+**Config model** (`WebhookRegistrationConfig`):
+```python
+register_headers_extra: dict[str, str] = {}
+```
+
+**Lifecycle manager**: same placeholder resolver as `register_body_extra`
+(FEAT-WH-02) — resolve `${credential:<ref>}` values before POSTing. Include
+the resolved dict under the field name given by a sibling config key
+`register_headers_field: str = "Headers"`.
+
+---
+
+### FEAT-WH-07 — Events-array single registration
+
+**Problem**: SuperOffice can register all event types in a single webhook
+subscription (`Events: ["contact.created", "contact.changed", "contact.deleted"]`).
+Neither `per_route_registration: true` (one POST per route) nor the default
+(one POST, no events list) covers this.
+
+This is a third registration mode: **one POST, events array derived from
+`fan_out.routes`**.
+
+**Config model** (`WebhookRegistrationConfig`):
+```python
+register_events_field: str | None = None
+# When set, the lifecycle manager collects fan_out.routes[].match into a list
+# and includes it under this key in the single registration POST body.
+# e.g. register_events_field = "Events"
+```
+
+**Lifecycle manager logic** (mutually exclusive with `per_route_registration`):
+```python
+if config.registration.per_route_registration:
+    # FEAT-WH-01: one POST per route
+elif config.registration.register_events_field:
+    events = [r.match for r in config.fan_out.routes]
+    body = {config.registration.register_events_field: events, ...}
+    sub_id = await _register_one(body, config)
+else:
+    # Legacy: single registration, no events list
+```
+
+**Connector YAML** (SuperOffice example):
+```yaml
+registration:
+  register_path: /api/v1/Webhook
+  register_events_field: Events
+  id_response_path: WebhookId
+  register_body_extra:
+    State: Active
+    Type: webhook
+    Name: "in-and-out contact handler"
+```
+
+---
+
+### FEAT-WH-08 — Header-based fan-out discriminator
+
+**Problem**: SuperOffice includes the event name in the `X-SuperOffice-Event`
+HTTP header (`contact.changed`). Route matching from a header avoids parsing
+the JSON body before auth, and is cleaner for connectors that put no
+discriminator in the body.
+
+**Config model** (`FanOutConfig`):
+```python
+discriminator: str | None = None        # body field (existing, now optional)
+discriminator_header: str | None = None # HTTP header alternative
+```
+
+At least one of the two must be set. If both are set, `discriminator_header`
+takes precedence (header is cheaper — no body parse needed).
+
+**Fan-out router change**:
+```python
+if config.fan_out.discriminator_header:
+    event_value = request.headers.get(config.fan_out.discriminator_header)
+else:
+    payload = await request.json()
+    event_value = _get_nested(payload, config.fan_out.discriminator)
+```
+
+**Connector YAML** (SuperOffice):
+```yaml
+webhooks:
+  path: /webhooks/superoffice
+  signature:
+    algorithm: hmac-sha256
+    header: X-SuperOffice-Signature
+    credential_ref: superoffice_webhook_secret
+    encoding: base64
+  fan_out:
+    discriminator_header: X-SuperOffice-Event
+    routes:
+      - match: contact.created
+        datatype: contacts
+      - match: contact.changed
+        datatype: contacts
+      - match: contact.deleted
+        datatype: contacts
+```

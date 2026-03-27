@@ -4,83 +4,189 @@
   "title": "Webhook Configuration",
   "type": "object",
   "additionalProperties": true,
-  "required": [
-    "path",
-    "signature",
-    "fan_out"
-  ],
+  "required": ["path"],
   "properties": {
     "path": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "URL path the engine exposes for inbound webhook deliveries."
     },
+
     "signature": {
+      "description": "HMAC signature verification. Omit when using auth_header_name instead.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "algorithm",
-        "header",
-        "credential_ref"
-      ],
+      "required": ["algorithm", "header", "credential_ref"],
       "properties": {
         "algorithm": {
           "type": "string",
-          "enum": [
-            "hmac-sha256",
-            "hmac-sha1",
-            "rsa-sha256"
-          ]
+          "enum": ["hmac-sha256", "hmac-sha1", "rsa-sha256"]
         },
         "header": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
+          "type": "string",
+          "description": "HTTP header that carries the signature, e.g. X-Hub-Signature-256."
         },
         "credential_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "Credential ref resolved as INOUT_CREDENTIAL_<REF>."
+        },
+        "encoding": {
+          "type": "string",
+          "enum": ["hex_prefix", "base64"],
+          "default": "hex_prefix",
+          "description": "hex_prefix: 'sha256=<hex>' (GitHub). base64: raw base64 (Shopify, SuperOffice)."
+        },
+        "version": {
+          "type": "string",
+          "description": "Optional prefix used in the header value, e.g. 'v1' for Stripe."
+        },
+        "rotation_credential_ref": {
+          "type": "string",
+          "description": "Secondary credential accepted during secret rotation grace period."
+        },
+        "rotation_grace_period": {
+          "type": "string",
+          "default": "1h",
+          "description": "How long to accept both primary and rotation secrets, e.g. '1h'."
         }
       }
     },
+
+    "auth_header_name": {
+      "type": "string",
+      "description": "Header name for static-value auth (e.g. X-Simulator-Auth). Used instead of HMAC when the provider forwards a fixed token (e.g. Tripletex)."
+    },
+    "auth_header_credential_ref": {
+      "type": "string",
+      "description": "Credential ref for the expected value of auth_header_name."
+    },
+
     "fan_out": {
+      "description": "Event-type discriminator and per-datatype route mapping.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "discriminator",
-        "routes",
-        "unmatched"
-      ],
+      "required": ["unmatched"],
       "properties": {
         "discriminator": {
-          "type": "string"
+          "type": "string",
+          "description": "Body field whose value identifies the event type. Mutually exclusive with discriminator_header; discriminator_header takes precedence."
+        },
+        "discriminator_header": {
+          "type": "string",
+          "description": "HTTP request header that carries the event type (e.g. X-SuperOffice-Event). Avoids a body parse before auth verification."
         },
         "routes": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "type": "object",
-            "required": [
-              "match",
-              "datatype"
-            ],
+            "required": ["match", "datatype"],
+            "additionalProperties": true,
             "properties": {
               "match": {
-                "type": "string"
+                "type": "string",
+                "description": "Discriminator value to match, e.g. 'contact.created'."
               },
               "datatype": {
-                "type": "string"
+                "type": "string",
+                "description": "Connector datatype to route matched events into."
+              },
+              "notification_only": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true, the payload is a notification reference only; trigger a single-record fetch instead of a direct upsert."
+              },
+              "notification_external_id_field": {
+                "type": "string",
+                "default": "id",
+                "description": "Top-level payload field holding the external record ID for notification-only payloads."
               }
             }
           }
         },
         "unmatched": {
           "type": "string",
-          "enum": [
-            "log_and_discard",
-            "reject_400"
-          ]
+          "enum": ["log_and_discard", "reject_400"],
+          "description": "What to do when no route matches the discriminator value."
         }
       }
+    },
+
+    "registration": {
+      "description": "Active webhook lifecycle management — register/renew/deregister subscriptions with the source system.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["register_path"],
+      "properties": {
+        "register_path": {
+          "type": "string",
+          "description": "Path to POST to in order to create a subscription."
+        },
+        "deregister_path": {
+          "type": "string",
+          "description": "Path to DELETE to remove a subscription. Use ${webhook_id} placeholder."
+        },
+        "renew_path": {
+          "type": "string",
+          "description": "Path to PUT/PATCH to renew a subscription. Use ${webhook_id} placeholder."
+        },
+        "renew_interval": {
+          "type": "string",
+          "default": "7d",
+          "description": "How often to renew, e.g. '7d', '24h'."
+        },
+        "health_check_path": {
+          "type": "string",
+          "description": "Path to GET to verify a subscription is still active."
+        },
+        "id_response_path": {
+          "type": "string",
+          "default": "id",
+          "description": "Dot-notation path to extract the webhook ID from the registration response, e.g. 'value.id'."
+        },
+        "callback_url_runtime_param": {
+          "type": "string",
+          "default": "callback_url",
+          "description": "Body field name for the engine's inbound URL in the registration POST."
+        },
+        "per_route_registration": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, POST once per fan_out route (one subscription per event type). Used by Tripletex."
+        },
+        "register_body_extra": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra body fields for the registration POST. Supports ${route_event} and ${credential:<ref>} placeholders."
+        },
+        "register_headers_extra": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra HTTP headers for the registration POST. Same placeholder support as register_body_extra."
+        },
+        "register_events_field": {
+          "type": "string",
+          "description": "When set, collect all fan_out route match values into an array and include under this key in a single registration POST (SuperOffice 'Events' array pattern)."
+        }
+      }
+    },
+
+    "event_id_field": {
+      "type": "string",
+      "description": "Payload field holding a unique event ID for idempotency / deduplication."
+    },
+    "dedup_ttl": {
+      "type": "string",
+      "default": "24h",
+      "description": "How long to remember seen event IDs, e.g. '24h'."
+    },
+    "ip_allowlist": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "CIDR ranges from which deliveries are accepted. Restricts beyond any server-wide allowlist."
+    },
+    "rate_limit_per_minute": {
+      "type": ["integer", "null"],
+      "description": "Per-connector inbound rate limit. null inherits the server-wide default."
     }
   }
 }
