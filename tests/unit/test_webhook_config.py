@@ -42,14 +42,16 @@ def test_missing_path_raises():
         WebhookConfig(signature=_make_sig(), fan_out=_make_fan_out())
 
 
-def test_missing_signature_raises():
-    with pytest.raises(ValidationError):
-        WebhookConfig(path="/webhook", fan_out=_make_fan_out())
+def test_missing_signature_allowed():
+    # signature is optional — connectors may use auth_header_name instead (e.g. Tripletex)
+    cfg = WebhookConfig(path="/webhook", fan_out=_make_fan_out())
+    assert cfg.signature is None
 
 
-def test_missing_fan_out_raises():
-    with pytest.raises(ValidationError):
-        WebhookConfig(path="/webhook", signature=_make_sig())
+def test_missing_fan_out_allowed():
+    # fan_out is optional — fire-and-forget notification connectors don't need it
+    cfg = WebhookConfig(path="/webhook", signature=_make_sig())
+    assert cfg.fan_out is None
 
 
 # --- Optional fields ---
