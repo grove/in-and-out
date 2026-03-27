@@ -98,11 +98,48 @@ Record linkage has two fundamental error modes:
 | Error | Name | Effect | Severity |
 |---|---|---|---|
 | **False positive** | Over-linking | Two unrelated entities merged into one cluster | **High** — writeback pushes wrong data into both systems; hard to undo |
-| **False negative** | Under-linking | Same entity in two clusters; treated as different | **Medium** — duplicate golden records; missed sync; no data corruption |
+| **False negative** | Under-linking | Same entity in two separate clusters; treated as different | **High** — causes duplicate inserts, data divergence, and contradictory writeback |
 
-False positives are worse than false negatives. An over-linked cluster causes **active harm**: incorrect data written to systems that were previously correct. An under-linked entity merely fails to sync — the status quo is preserved.
+**Both error types cause active harm.** The harm is different in character but comparable in severity.
 
-This asymmetry is critical for onboarding. When system 3 joins the pipeline, new identity edges are created. Each new edge is either correct (improves matches) or incorrect (merges unrelated entities). The false positive risk grows with the number of new edges.
+**False positives (over-linking)** cause **data corruption by merging**: incorrect field values from an unrelated entity are pushed into systems that were previously correct. The golden record is wrong, and every system receives wrong updates. Reversal requires splitting the cluster and undoing the writeback — difficult because the overwritten values may be lost.
+
+**False negatives (under-linking)** cause **data corruption by duplicating**: two clusters that should be one each produce their own golden record. Each golden record generates reverse deltas for every system. If system 1 has record A and system 2 has record B, and A and B are the same entity but in separate clusters:
+
+- Cluster 1 (containing A) computes a delta that **inserts** A's data into system 2 — because system 2 doesn't have a record in this cluster.
+- Cluster 2 (containing B) computes a delta that **inserts** B's data into system 1 — because system 1 doesn't have a record in that cluster.
+- Both systems now have **two records for the same real-world entity**: the original plus the duplicate insert from the other cluster.
+
+```
+Before (under-linked):
+  Cluster 1: {System 1: Alice <alice@co.com>}
+  Cluster 2: {System 2: Alice Smith <alice@co.com>}
+
+Golden record 1: Alice <alice@co.com>
+Golden record 2: Alice Smith <alice@co.com>
+
+Delta for system 2 from cluster 1: INSERT Alice <alice@co.com>     ← duplicate
+Delta for system 1 from cluster 2: INSERT Alice Smith <alice@co.com> ← duplicate
+
+After writeback:
+  System 1: Alice (original) + Alice Smith (duplicate)
+  System 2: Alice Smith (original) + Alice (duplicate)
+```
+
+This is not merely "the status quo is preserved." Under-linking actively creates duplicates across every system touched by the affected clusters. In a pipeline with writeback enabled, **every missed link is a potential duplicate insert.**
+
+The consequence compounds: once duplicates exist in source systems, subsequent ingestion pulls them back into the pipeline, creating _additional_ clusters and _additional_ cross-system inserts. Without intervention, the duplicate count grows with every sync cycle.
+
+**The asymmetry between the two errors is situational:**
+
+| Situation | Worse Error | Reason |
+|---|---|---|
+| **Writeback enabled for all systems** | Roughly equal | Over-linking corrupts fields; under-linking creates duplicates. Both require manual cleanup. |
+| **Writeback enabled for some systems** | Under-linking may be worse | Duplicate inserts flow to every writable system. Over-linking only corrupts fields within the merged cluster. |
+| **Writeback disabled (read-only golden record)** | Over-linking is worse | Under-linking just produces duplicate golden records (annoying, not harmful). Over-linking produces a wrong golden record that downstream consumers (BI dashboards, reports) use for decisions. |
+| **During onboarding (system 3 joining)** | Over-linking is worse for _existing_ systems; under-linking is worse for _new_ system | Over-linking changes data in systems 1 and 2 that were previously stable. Under-linking inserts duplicates into system 3 (and potentially into systems 1 and 2 if system 3 has exclusive records). |
+
+**Implication for identity rule design:** The conventional wisdom "be conservative, avoid false positives" is correct for read-only MDM. For a bidirectional pipeline with writeback, **both directions are dangerous**, and the identity rules must be tuned to minimise both — not just one.
 
 ### 3.2 High-Confidence vs Low-Confidence Links
 
@@ -325,9 +362,12 @@ The three onboarding plans each interact with record linkage differently:
 | Individual link review possible | Ad-hoc SQL | Blue vs green diff | Indirectly via delta attribution | Indirectly via delta attribution |
 | Linkage error reversibility | Rollback (re-gate, revert query) | Discard blue | Difficult (golden record already changed) | Difficult (golden record already changed) |
 | Handles linkage oscillation | No | No | No | No |
-| Detects junk values | Only via cluster metrics | Blue vs green cluster size comparison | Via high-fanout shadow delta counts | Via high-fanout shadow delta counts |
+| Detects junk values (over-linking) | Only via cluster metrics | Blue vs green cluster size comparison | Via high-fanout shadow delta counts | Via high-fanout shadow delta counts |
+| Detects missed matches (under-linking) | Only if operator queries for duplicate clusters | Blue vs green comparison may reveal | Indirectly — duplicate inserts appear as `new_record` in shadow | Indirectly — duplicate `new_record` rows visible with attribution |
 
 **Key insight:** No onboarding approach directly reviews individual identity links. They all operate at a higher level — clusters, deltas, or pipeline-level diffs. This is the gap that human curation of links would fill.
+
+**Under-linking during onboarding is particularly dangerous.** When system 3 joins, its records should match with existing records in systems 1 and 2. If the identity rules fail to create these links (because of formatting differences, missing fields, or over-strict link groups), the pipeline treats system 3's records as new entities. The delta views for systems 1 and 2 then generate `insert` actions — pushing these "new" entities into systems that _already have them under a different cluster_. The result is duplicate records in systems 1 and 2 that grow with every sync cycle. Extended shadow mode catches these as `new_record` rows with `origin = system3_caused`, giving the operator a chance to investigate before the inserts execute — but only if the operator recognises that a `new_record` might be a missed match rather than a genuinely new entity.
 
 ---
 
@@ -346,8 +386,9 @@ Source data → Identity matching → Proposed links → HUMAN REVIEW → Accept
 **What would be curated:**
 1. **Conflict links** — two records that match on an identity field but disagree substantially on other fields (different names, different addresses). The identifier match alone is not enough context to know if this is a true match or a coincidental shared email.
 2. **High-fanout links** — a single identity value that would create more than N edges. These are the junk value candidates.
-3. **Cross-system inserts** — the `new_record` classification from PLAN_ONBOARDING_SHADOW_MODE.md §10.6. When system 3 causes a new record to appear in systems 1 and 2, a human should confirm this is a genuine new entity.
+3. **Cross-system inserts** — the `new_record` classification from PLAN_ONBOARDING_SHADOW_MODE.md §10.6. When system 3 causes a new record to appear in systems 1 and 2, a human should confirm this is a genuine new entity — not a duplicate caused by under-linking.
 4. **Cluster re-merges** — when two previously separate clusters are bridged by a system 3 record. These are the highest-risk link decisions because they affect records that were already stable.
+5. **Suspected under-links (duplicate clusters)** — two or more clusters whose records are suspiciously similar (near-identical names, overlapping addresses, same phone number with different formatting) but were not matched by the identity rules. These need a human to decide: should they be linked (forced merge via override), or are they genuinely distinct entities? Left unreviewed, each cluster generates cross-system inserts that create duplicates in every writable system.
 
 **What would NOT be curated:**
 1. **High-confidence matches** — same tax_id in two systems with consistent names. No human review needed.
