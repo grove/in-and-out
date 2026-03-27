@@ -864,7 +864,7 @@ def _add_webhook_registration_routes(
                         connector=connector.name,
                         datatype="webhook_subscription",
                         method="DELETE",
-                        path=reg.deregister_path.replace("{webhook_id}", str(webhook_id)),
+                        path=_wh_path_to_fa(reg.deregister_path).replace("{webhook_id}", str(webhook_id)),
                         status=200,
                         duration_ms=elapsed,
                         record_id=str(webhook_id),
@@ -895,7 +895,7 @@ def _add_webhook_registration_routes(
                         connector=connector.name,
                         datatype="webhook_subscription",
                         method="PUT",
-                        path=reg.renew_path.replace("{webhook_id}", str(webhook_id)),
+                        path=_wh_path_to_fa(reg.renew_path).replace("{webhook_id}", str(webhook_id)),
                         status=200,
                         duration_ms=elapsed,
                     )
@@ -923,7 +923,7 @@ def _add_webhook_registration_routes(
                             connector=connector.name,
                             datatype="webhook_subscription",
                             method="GET",
-                            path=reg.health_check_path.replace("{webhook_id}", str(webhook_id)),
+                            path=_wh_path_to_fa(reg.health_check_path).replace("{webhook_id}", str(webhook_id)),
                             status=404,
                             duration_ms=int((time.monotonic() - t0) * 1000),
                         )
@@ -940,7 +940,7 @@ def _add_webhook_registration_routes(
                         connector=connector.name,
                         datatype="webhook_subscription",
                         method="GET",
-                        path=reg.health_check_path.replace("{webhook_id}", str(webhook_id)),
+                        path=_wh_path_to_fa(reg.health_check_path).replace("{webhook_id}", str(webhook_id)),
                         status=200,
                         duration_ms=elapsed,
                     )
