@@ -7,6 +7,9 @@
     <div class="flex items-center gap-3 shrink-0">
         <h1 class="text-lg font-bold text-slate-100">API Request Log</h1>
         <span class="text-xs text-slate-500 tabular-nums" id="req-count">{{ events | length }} events loaded</span>
+        <input type="text" id="req-filter" placeholder="Filter by method, path, status…"
+            oninput="filterLog('request-log-body', this.value)"
+            class="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500 w-56">
         <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear
             display</button>
     </div>
@@ -33,9 +36,12 @@
             <tbody id="request-log-body">
                 {% for ev in events %}
                 {% set ok = ev.status < 400 %} {% set sys=connector_systems.get(ev.connector, ev.connector) if
-                    ev.connector else '' %} <tr
+                    ev.connector else '' %} {% set req_detail_id='req-detail-' ~ loop.index %}
+                    <tr
                     class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
-                    onclick="this.nextElementSibling.classList.toggle('hidden')">
+                    onclick="document.getElementById('{{ req_detail_id }}').classList.toggle('hidden')"
+                    data-detail="{{ req_detail_id }}"
+                    data-search="{{ ev.status }} {{ ev.method }} {{ ev.path }} {{ sys }}{% if ev.datatype %}/{{ ev.datatype }}{% endif %}">
                     <td class="px-3 py-1.5 {{ 'text-green-400' if ok else 'text-red-400' }}">{{ ev.status }}</td>
                     <td class="px-3 py-1.5 text-sky-300">{{ ev.method }}</td>
                     <td class="px-3 py-1.5 text-slate-300 max-w-0 truncate">{{ ev.path }}</td>
@@ -45,7 +51,7 @@
                     <td class="px-3 py-1.5 text-slate-600 text-right">{{ ev.timestamp[11:19] if ev.timestamp else '' }}
                     </td>
                     </tr>
-                    <tr class="hidden border-b border-slate-700">
+                    <tr id="{{ req_detail_id }}" class="hidden border-b border-slate-700">
                         <td colspan="6" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1">
                             <div class="break-all"><span class="text-slate-500 mr-1">path</span><span
                                     class="text-slate-200">{{ ev.path }}</span></div>
@@ -75,8 +81,8 @@
     document.addEventListener('DOMContentLoaded', function () {
         const body = document.getElementById('request-log-body');
         const countEl = document.getElementById('req-count');
-        let count = {{ events | length
-    }};
+        let count = {{ events | length }};
+        let liveCount = 0;
 
     document.addEventListener('simulator:request', function (e) {
         const d = e.detail;
@@ -84,13 +90,19 @@
         const sys = (window._connectorSystems && window._connectorSystems[d.connector]) ? window._connectorSystems[d.connector] : (d.connector || '');
         const sysLabel = sys ? (sys + (d.datatype ? '/' + d.datatype : '')) : '';
         const ts = d.timestamp ? d.timestamp.substring(11, 19) : '';
+        const searchText = `${d.status} ${d.method} ${d.path} ${sysLabel}`;
 
         const placeholder = body.querySelector('td[colspan="6"]');
         if (placeholder && placeholder.closest('tr')) placeholder.closest('tr').remove();
 
+        liveCount++;
+        const detailId = 'req-detail-live-' + liveCount;
+
         const summaryRow = document.createElement('tr');
         summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
-        summaryRow.setAttribute('onclick', 'this.nextElementSibling.classList.toggle("hidden")');
+        summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
+        summaryRow.setAttribute('data-detail', detailId);
+        summaryRow.setAttribute('data-search', searchText.toLowerCase());
         summaryRow.innerHTML = `
                 <td class="px-3 py-1.5 ${ok ? 'text-green-400' : 'text-red-400'}">${d.status}</td>
                 <td class="px-3 py-1.5 text-sky-300">${d.method}</td>
@@ -99,6 +111,7 @@
                 <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">${d.duration_ms}ms</td>
                 <td class="px-3 py-1.5 text-slate-600 text-right">${ts}</td>`;
         const detailRow = document.createElement('tr');
+        detailRow.id = detailId;
         detailRow.className = 'hidden border-b border-slate-700';
         detailRow.innerHTML = `
                 <td colspan="6" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1 text-xs font-mono">
@@ -108,18 +121,42 @@
                 </td>`;
         body.insertBefore(detailRow, body.firstChild);
         body.insertBefore(summaryRow, body.firstChild);
+
+        // Re-apply any active filter to the new row.
+        const filterVal = document.getElementById('req-filter')?.value?.trim().toLowerCase();
+        if (filterVal) {
+            const match = searchText.toLowerCase().includes(filterVal);
+            summaryRow.classList.toggle('hidden', !match);
+            if (!match) detailRow.classList.add('hidden');
+        }
+
         count++;
         if (countEl) countEl.textContent = count + ' events loaded';
-        // Trim to 400 rows
         while (body.children.length > 400) body.removeChild(body.lastChild);
     });
     });
+
+    function filterLog(bodyId, rawQuery) {
+        const query = rawQuery.trim().toLowerCase();
+        const body = document.getElementById(bodyId);
+        body.querySelectorAll('tr[data-search]').forEach(function (row) {
+            const match = !query || row.dataset.search.toLowerCase().includes(query);
+            row.classList.toggle('hidden', !match);
+            const detailId = row.dataset.detail;
+            if (detailId) {
+                const detailRow = document.getElementById(detailId);
+                if (detailRow && !match) detailRow.classList.add('hidden');
+            }
+        });
+    }
 
     function clearLog() {
         const body = document.getElementById('request-log-body');
         body.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New requests will appear here.</td></tr>';
         const countEl = document.getElementById('req-count');
         if (countEl) countEl.textContent = '0 events loaded';
+        const filterEl = document.getElementById('req-filter');
+        if (filterEl) filterEl.value = '';
     }
 </script>
 {% endblock %}

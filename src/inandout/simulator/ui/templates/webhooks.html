@@ -21,6 +21,9 @@
                 <span
                     class="ml-auto text-xs bg-green-900/50 text-green-400 border border-green-700 px-2 py-0.5 rounded-full">{{
                     subs | length }} active</span>
+                <button
+                    onclick="deleteAllRegistrations('{{ conn.name }}')"
+                    class="text-xs text-red-500 hover:text-red-300 transition-colors">Delete all</button>
                 {% else %}
                 <span class="ml-auto text-xs bg-slate-700 text-slate-400 px-2 py-0.5 rounded-full">none
                     registered</span>
@@ -34,6 +37,7 @@
                         <th class="px-4 py-1.5 text-left text-slate-500 font-medium w-32">Event</th>
                         <th class="px-4 py-1.5 text-left text-slate-500 font-medium">Callback URL</th>
                         <th class="px-4 py-1.5 text-left text-slate-500 font-medium w-20">Auth header</th>
+                        <th class="px-4 py-1.5 w-16"></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -44,6 +48,11 @@
                         <td class="px-4 py-1.5 text-slate-300 break-all">{{
                             sub.get(conn.webhooks.registration.callback_url_runtime_param, "—") }}</td>
                         <td class="px-4 py-1.5 text-slate-500">{{ sub.get("authHeaderName", "—") }}</td>
+                        <td class="px-4 py-1.5 text-right">
+                            <button
+                                onclick="deleteRegistration('{{ conn.name }}', {{ sub_id }})"
+                                class="text-xs text-red-500 hover:text-red-300 transition-colors">Delete</button>
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -63,6 +72,9 @@
     <div class="flex items-center gap-3 shrink-0">
         <h2 class="text-sm font-semibold text-slate-300">Outbound Events</h2>
         <span class="text-xs text-slate-500 tabular-nums" id="wh-count">{{ events | length }} events loaded</span>
+        <input type="text" id="wh-filter" placeholder="Filter by system, status, URL…"
+            oninput="filterLog('webhook-log-body', this.value)"
+            class="text-xs bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500 w-56">
         <button onclick="clearLog()" class="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear
             display</button>
     </div>
@@ -91,14 +103,17 @@
                     status_cls='text-red-400' if failed else ('text-green-400' if ok else 'text-amber-400' ) %} {% set
                     status_text='ERR' if failed else ev.status %} {% set op_icons={'create': '＋' , 'update' : '✎'
                     , 'delete' : '✕' } %} {% set sys=connector_systems.get(ev.connector, ev.connector) if ev.connector
-                    else '' %} {% set detail_id='wh-detail-' ~ loop.index %} <tr
+                    else '' %} {% set detail_id='wh-detail-' ~ loop.index %}
+                    {% set short_url = '/' ~ ev.webhook_url.split('/', 3)[3] if ev.webhook_url else '' %}
+                    <tr
                     class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
-                    onclick="document.getElementById('{{ detail_id }}').classList.toggle('hidden')">
+                    onclick="document.getElementById('{{ detail_id }}').classList.toggle('hidden')"
+                    data-detail="{{ detail_id }}"
+                    data-search="{{ status_text }} {{ ev.operation }} {{ sys }}{% if ev.datatype %}/{{ ev.datatype }}{% endif %} {{ short_url }}">
                     <td class="px-3 py-1.5 {{ status_cls }}">{{ status_text }}</td>
                     <td class="px-3 py-1.5 text-slate-400">{{ op_icons.get(ev.operation, '·') }}</td>
                     <td class="px-3 py-1.5 text-sky-300">{{ sys }}{% if ev.datatype %}/{{ ev.datatype }}{% endif %}</td>
-                    <td class="px-3 py-1.5 text-slate-400 max-w-0 truncate" title="{{ ev.webhook_url }}">{{ '/' ~
-                        ev.webhook_url.split('/', 3)[3] if ev.webhook_url else '' }}</td>
+                    <td class="px-3 py-1.5 text-slate-400 max-w-0 truncate" title="{{ ev.webhook_url }}">{{ short_url }}</td>
                     <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">{{ ev.duration_ms }}ms</td>
                     <td class="px-3 py-1.5 text-slate-600 text-right">{{ ev.timestamp[11:19] if ev.timestamp else '' }}
                     </td>
@@ -116,7 +131,7 @@
                             </div>
                             {% if ev.payload_json %}
                             <pre
-                                class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80">{{ ev.payload_json }}</pre>
+                                class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80">{{ ev.payload_json | pretty_json }}</pre>
                             {% endif %}
                             <div class="text-slate-600">{{ ev.timestamp }}</div>
                         </td>
@@ -162,13 +177,15 @@
             const placeholder = body.querySelector('td[colspan="6"]');
             if (placeholder && placeholder.closest('tr')) placeholder.closest('tr').remove();
 
-            // Use a stable detail-row ID so the toggle knows exactly which row to open.
             liveCount++;
             const detailId = 'wh-detail-live-' + liveCount;
+            const searchText = `${statusText} ${d.operation || ''} ${sys}${d.datatype ? '/' + d.datatype : ''} ${shortPath}`;
 
             const summaryRow = document.createElement('tr');
             summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
             summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
+            summaryRow.setAttribute('data-detail', detailId);
+            summaryRow.setAttribute('data-search', searchText.toLowerCase());
             summaryRow.innerHTML = `
                 <td class="px-3 py-1.5 ${statusCls}">${statusText}</td>
                 <td class="px-3 py-1.5 text-slate-400">${opIcons[d.operation] || '·'}</td>
@@ -191,19 +208,54 @@
             body.insertBefore(detailRow, body.firstChild);
             body.insertBefore(summaryRow, body.firstChild);
 
+            // Re-apply any active filter to the new row.
+            const filterVal = document.getElementById('wh-filter')?.value?.trim().toLowerCase();
+            if (filterVal) {
+                const match = searchText.toLowerCase().includes(filterVal);
+                summaryRow.classList.toggle('hidden', !match);
+                if (!match) detailRow.classList.add('hidden');
+            }
+
             const total = parseInt(countEl?.textContent) || 0;
             if (countEl) countEl.textContent = (total + 1) + ' events loaded';
 
-            // Trim old rows to keep DOM lean (each event = 2 rows).
             while (body.children.length > 400) body.removeChild(body.lastChild);
         });
     });
+
+    function filterLog(bodyId, rawQuery) {
+        const query = rawQuery.trim().toLowerCase();
+        const body = document.getElementById(bodyId);
+        body.querySelectorAll('tr[data-search]').forEach(function (row) {
+            const match = !query || row.dataset.search.toLowerCase().includes(query);
+            row.classList.toggle('hidden', !match);
+            const detailId = row.dataset.detail;
+            if (detailId) {
+                const detailRow = document.getElementById(detailId);
+                if (detailRow && !match) detailRow.classList.add('hidden');
+            }
+        });
+    }
 
     function clearLog() {
         const body = document.getElementById('webhook-log-body');
         body.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New webhooks will appear here.</td></tr>';
         const countEl = document.getElementById('wh-count');
         if (countEl) countEl.textContent = '0 events loaded';
+        const filterEl = document.getElementById('wh-filter');
+        if (filterEl) filterEl.value = '';
+    }
+
+    async function deleteRegistration(connectorName, subId) {
+        if (!confirm('Delete this registration? The engine will need to re-register.')) return;
+        const resp = await fetch(`/ui/_registrations/${connectorName}/${subId}`, { method: 'DELETE' });
+        if (resp.ok) location.reload();
+    }
+
+    async function deleteAllRegistrations(connectorName) {
+        if (!confirm(`Delete all registrations for ${connectorName}? The engine will need to re-register.`)) return;
+        const resp = await fetch(`/ui/_registrations/${connectorName}`, { method: 'DELETE' });
+        if (resp.ok) location.reload();
     }
 </script>
 {% endblock %}

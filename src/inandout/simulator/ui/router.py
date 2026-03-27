@@ -18,6 +18,19 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
+def _pretty_json(value: str) -> str:
+    """Jinja2 filter: parse a JSON string and re-format it with indentation."""
+    if not value:
+        return ""
+    try:
+        return json.dumps(json.loads(value), indent=2)
+    except (ValueError, TypeError):
+        return value
+
+
+templates.env.filters["pretty_json"] = _pretty_json
+
+
 def build_ui_router() -> APIRouter:
     router = APIRouter()
 
@@ -75,6 +88,28 @@ def build_ui_router() -> APIRouter:
                 "events": request_events,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Registration management API (called by the UI via fetch)
+    # ------------------------------------------------------------------
+
+    @router.delete("/ui/_registrations/{connector_name}/{sub_id}")
+    async def delete_registration(request: Request, connector_name: str, sub_id: int):
+        """Delete a single webhook subscription from the shared store."""
+        subs: dict = getattr(request.app.state, "webhook_subscriptions", {})
+        connector_subs = subs.get(connector_name)
+        if connector_subs is None:
+            return Response(status_code=404)
+        connector_subs.pop(sub_id, None)
+        return Response(status_code=204)
+
+    @router.delete("/ui/_registrations/{connector_name}")
+    async def delete_all_registrations(request: Request, connector_name: str):
+        """Delete all webhook subscriptions for a connector."""
+        subs: dict = getattr(request.app.state, "webhook_subscriptions", {})
+        if connector_name in subs:
+            subs[connector_name].clear()
+        return Response(status_code=204)
 
     @router.get("/ui/_webhooks", response_class=HTMLResponse)
     async def webhook_log_view(request: Request):

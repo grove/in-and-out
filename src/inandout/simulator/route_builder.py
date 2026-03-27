@@ -681,7 +681,11 @@ def build_connector_router(
     # Subscriptions are kept in a simple in-memory dict scoped to the router.
     if connector.webhooks and connector.webhooks.registration:
         _add_webhook_registration_routes(
-            connector, _add, registered, webhook_subscriptions_store=webhook_subscriptions_store
+            connector,
+            _add,
+            registered,
+            webhook_subscriptions_store=webhook_subscriptions_store,
+            event_bus=event_bus,
         )
 
     return router
@@ -725,6 +729,7 @@ def _add_webhook_registration_routes(
     _add,
     registered: set[tuple[str, str]],
     webhook_subscriptions_store: dict | None = None,
+    event_bus=None,
 ) -> None:
     """Register POST/DELETE/PUT/GET routes for the webhook lifecycle API."""
     import itertools
@@ -782,11 +787,23 @@ def _add_webhook_registration_routes(
 
     def _make_register():
         async def _register(request: Request) -> JSONResponse:
+            import time
+            t0 = time.monotonic()
             body = await request.json()
             sub_id = next(counter)
             subscriptions[sub_id] = {**body, "__id": sub_id, "__active": True}
             resp: dict = {}
             _set_path(resp, id_path, sub_id)
+            elapsed = int((time.monotonic() - t0) * 1000)
+            if event_bus is not None:
+                event_bus.publish_request(
+                    connector=connector.name,
+                    datatype="webhook_subscription",
+                    method="POST",
+                    path=reg.register_path,
+                    status=200,
+                    duration_ms=elapsed,
+                )
             return JSONResponse(resp, status_code=200)
 
         _register.__name__ = f"webhook_register_{connector.name}"
@@ -808,7 +825,19 @@ def _add_webhook_registration_routes(
 
         def _make_deregister():
             async def _deregister(request: Request, webhook_id: int) -> JSONResponse:
+                import time
+                t0 = time.monotonic()
                 subscriptions.pop(webhook_id, None)
+                elapsed = int((time.monotonic() - t0) * 1000)
+                if event_bus is not None:
+                    event_bus.publish_request(
+                        connector=connector.name,
+                        datatype="webhook_subscription",
+                        method="DELETE",
+                        path=reg.deregister_path.replace("{webhook_id}", str(webhook_id)),
+                        status=200,
+                        duration_ms=elapsed,
+                    )
                 return JSONResponse({}, status_code=200)
 
             _deregister.__name__ = f"webhook_deregister_{connector.name}"
@@ -824,8 +853,20 @@ def _add_webhook_registration_routes(
 
         def _make_renew():
             async def _renew(request: Request, webhook_id: int) -> JSONResponse:
+                import time
+                t0 = time.monotonic()
                 if webhook_id in subscriptions:
                     subscriptions[webhook_id]["__active"] = True
+                elapsed = int((time.monotonic() - t0) * 1000)
+                if event_bus is not None:
+                    event_bus.publish_request(
+                        connector=connector.name,
+                        datatype="webhook_subscription",
+                        method="PUT",
+                        path=reg.renew_path.replace("{webhook_id}", str(webhook_id)),
+                        status=200,
+                        duration_ms=elapsed,
+                    )
                 return JSONResponse({}, status_code=200)
 
             _renew.__name__ = f"webhook_renew_{connector.name}"
@@ -841,10 +882,31 @@ def _add_webhook_registration_routes(
 
         def _make_health():
             async def _health(request: Request, webhook_id: int) -> JSONResponse:
+                import time
+                t0 = time.monotonic()
                 if webhook_id not in subscriptions:
+                    if event_bus is not None:
+                        event_bus.publish_request(
+                            connector=connector.name,
+                            datatype="webhook_subscription",
+                            method="GET",
+                            path=reg.health_check_path.replace("{webhook_id}", str(webhook_id)),
+                            status=404,
+                            duration_ms=int((time.monotonic() - t0) * 1000),
+                        )
                     return JSONResponse({"error": "not found"}, status_code=404)
                 resp: dict = {}
                 _set_path(resp, id_path, webhook_id)
+                elapsed = int((time.monotonic() - t0) * 1000)
+                if event_bus is not None:
+                    event_bus.publish_request(
+                        connector=connector.name,
+                        datatype="webhook_subscription",
+                        method="GET",
+                        path=reg.health_check_path.replace("{webhook_id}", str(webhook_id)),
+                        status=200,
+                        duration_ms=elapsed,
+                    )
                 return JSONResponse(resp, status_code=200)
 
             _health.__name__ = f"webhook_health_{connector.name}"
