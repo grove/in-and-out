@@ -1106,6 +1106,197 @@ The enrichment-sourced value is indistinguishable from a system-originated value
 - **Treat enriched identity fields as lower trust:** Enrichment-sourced identity fields should be limited to supplementary matching — they can break ties or increase confidence in an existing link, but they should not independently create new cluster edges. Implement as a lower-priority identity tier that only fires when the primary (source-originated) identity fields have not already linked the records.
 - **Enrichment field separation:** Store enriched values in separate columns (`email_enriched`, `phone_enriched`) rather than overwriting the source-originated columns. Identity resolution uses only the authoritative columns; downstream consumers choose which to display.
 
+### 4.35 Identity Regression Testing
+
+§4.22 covers precision/recall evaluation before onboarding. Once the pipeline is live, there is no equivalent protection for ongoing changes to the OSI-mapping YAML — adding a new identity field, changing conflict resolution priority, updating a normalisation expression, or adjusting link groups.
+
+Each of these changes silently re-evaluates the identity graph. Previously-validated clusters may split. Previously-separate clusters may merge. The operator has no mechanism today to detect that a YAML change altered cluster assignments in unexpected ways.
+
+**What is needed:** An identity regression test suite that:
+
+1. **Snapshots cluster assignments** before a YAML change: for each `(source, external_id)` pair, record the `_cluster_id` it resolves to.
+2. **Re-evaluates** after the YAML change.
+3. **Diffs the snapshots**: which records changed cluster? Which clusters split, merged, or were newly created?
+4. **Classifies the diff** against previously curated decisions: did any known-correct link disappear? Did any known-incorrect link reappear?
+
+```sql
+-- Snapshot cluster state before YAML change
+CREATE TABLE inout_cluster_snapshot_before AS
+SELECT source, external_id, _cluster_id, snapshot_ts = NOW()
+FROM _id_contact;
+
+-- After deploying YAML change, compare:
+SELECT
+    b.source,
+    b.external_id,
+    b._cluster_id AS cluster_before,
+    a._cluster_id AS cluster_after,
+    CASE
+        WHEN b._cluster_id = a._cluster_id THEN 'unchanged'
+        WHEN b._cluster_id != a._cluster_id THEN 'reclassified'
+        WHEN a._cluster_id IS NULL           THEN 'lost'
+    END AS change_type
+FROM inout_cluster_snapshot_before b
+FULL OUTER JOIN _id_contact a
+    USING (source, external_id)
+WHERE b._cluster_id IS DISTINCT FROM a._cluster_id;
+```
+
+**Relationship to the override table:** Any record whose cluster assignment changed and which has a corresponding entry in `inout_link_overrides` should be flagged immediately — a YAML change invalidated a previous manual curation decision. The override must be re-evaluated against the new cluster state.
+
+**This regression test should be a mandatory gate on all OSI-mapping YAML deployments**, just as schema migrations require review before applying to production. The cluster diff report is the output of this gate.
+
+### 4.36 Hierarchical Entity Identity
+
+OSI-mapping clusters entities using connected-components: records are either in the same cluster (same entity) or in different clusters (different entities). There is no intermediate state: "related but distinct."
+
+Real-world entity hierarchies violate this binary. A global headquarters and its regional subsidiary are distinct legal entities that must remain separate in the pipeline — but they share many identity signals:
+
+| Signal | Shared? | Reason |
+|---|---|---|
+| Website domain | Often yes | `siemens.com` for both Siemens AG and Siemens USA |
+| Company name prefix | Yes | "Siemens AG" and "Siemens USA Inc." |
+| Parent tax ID | Sometimes | Consolidated tax filers |
+| Office address | Partially | Regional offices in the same building |
+| Switchboard phone | Often | Central number used by all subsidiaries |
+
+If these shared signals are declared as identity fields, the parent and all subsidiaries merge into one cluster. All subsidiaries' contacts, deals, and orders appear under one golden record entity. FK resolution produces incorrect cross-subsidiary references.
+
+If these signals are excluded from identity fields, genuine duplicates that should be linked (two separate CRM entries for Siemens AG) are missed.
+
+**The correct concept is an entity relationship table**, distinct from cluster membership:
+
+```sql
+CREATE TABLE inout_entity_relationships (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cluster_id_a    TEXT NOT NULL,   -- parent cluster
+    cluster_id_b    TEXT NOT NULL,   -- child/related cluster
+    relationship    TEXT NOT NULL,   -- 'parent_of' / 'subsidiary_of' /
+                                     -- 'acquired_by' / 'formerly_known_as'
+    valid_from      DATE,
+    valid_to        DATE,
+    source          TEXT,            -- 'system3' / 'manual' / 'enrichment'
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+Two clusters can be related without being merged. The FK resolution layer can use relationships to correctly route contacts: a contact that belongs to Siemens USA in the CRM should not receive Siemens AG's `company_id` during writeback, even though the two clusters are related.
+
+**This is a gap in OSI-mapping's current model.** The only current mechanisms are: merge (one cluster) or separate (two unrelated clusters). An `entity_relationship` construct is a meaningful extension that would reduce both false merges (from over-linking subsidiaries) and missed FK resolution (from under-linking related entities).
+
+### 4.37 Cross-Jurisdiction Regulatory Identifier Collision
+
+`tax_id` and similar regulatory identifiers exist within jurisdiction namespaces. Two organisations with the same identifier string in different jurisdictions are unrelated. Without namespace qualification, identity resolution treats them as the same entity.
+
+**Real collision examples:**
+
+| System 1 source | System 3 source | Identifier | Same entity? |
+|---|---|---|---|
+| UK Company number `12345678` | US EIN normalised to `12345678` | `tax_id = "12345678"` | No — different registries |
+| French SIRET `12345678901234` (14 digits) | German VAT `DE12345678` truncated to digits `12345678` | `tax_id = "12345678"` | No — different formats |
+| US SSN `123-45-6789` normalised to `123456789` | Colombian NIT `123456789` | `tax_id = "123456789"` | No — different countries |
+
+The normalisation expressions that strip punctuation and whitespace (designed to handle formatting differences within a jurisdiction) make cross-jurisdiction collisions *more* likely by removing the format cues that distinguish identifier types.
+
+**Required: jurisdiction-qualified identity fields.**
+
+The correct identity field for a company is not `tax_id` but `(jurisdiction, tax_id)` — a composite that uniquely identifies an entity within its registry. In OSI-mapping YAML terms:
+
+```yaml
+fields:
+  tax_id_jurisdiction:
+    strategy: identity
+    link_group: tax_key
+  tax_id_value:
+    strategy: identity
+    link_group: tax_key
+```
+
+This requires `tax_id_jurisdiction` to be populated correctly — which in turn requires the ingestion connector to extract or infer the jurisdiction from each source record. For sources that mix jurisdictions without a jurisdiction field, the forward view must derive it from the record's other fields (country, address, identifier format).
+
+**Implication for normalisation:** Normalisation expressions must be jurisdiction-aware. A UK company number is 8 digits; zero-padding is expected. A US EIN is 9 digits. Applying the same `regexp_replace` normalisation to both destroys the format information that would have prevented the collision.
+
+### 4.38 Derived Source Data as False Corroboration
+
+When system 3 was originally populated by exporting data from system 1 — a common scenario in legacy migrations, system consolidations, and "we copied the spreadsheet" onboardings — systems 1 and 3 share identity field values not because they independently observed the same entity, but because one was a copy of the other.
+
+**Why this matters for identity resolution:**
+
+Identity resolution implicitly assumes that a match between two sources is **independent corroboration** — two separate systems agreeing on a value is stronger evidence than one system alone. This assumption underpins the chain-of-confidence logic: if three sources all have `email = alice@co.com`, that is strong evidence.
+
+But if system 3 got `alice@co.com` from system 1 via a data export, there is only **one independent observation** of that email. The apparent three-source agreement is actually one source observed once and then copied twice. Any data quality error in system 1's original record is inherited verbatim by system 3 — and the identity resolution sees the error corroborated by both systems.
+
+**Concrete consequence:**
+```
+System 1: alice@co.com (original — correct)
+System 3: alice@co.com (copied from system 1 in 2022 export)
+System 2: alice@co.com (independent observation — correct)
+
+Apparent evidence: 3-way agreement on email = very high confidence link
+Actual evidence: 2-way agreement (system 1 original + system 2 independent)
+                 System 3 adds no information — it is an echo of system 1.
+
+Now: System 1 corrects Alice's email to a.smith@co.com.
+     System 3 still has alice@co.com (not yet updated from the pipeline).
+     System 2 still has alice@co.com.
+     
+Identity resolution: system 3 ↔ system 2 edge still active via alice@co.com.
+System 1's record leaves that cluster.
+System 3's stale copy maintains a link that no longer reflects any independent source.
+```
+
+**Mitigations:**
+- **Document source lineage at onboarding:** During the data quality audit (§10.1 recommendation 1), explicitly identify whether system 3 is an independent data source or derived from another system in the pipeline. If derived, note which fields were copied and from which source.
+- **Treat derived fields with lower identity trust:** Fields known to be copied from another pipeline source should be declared with lower identity weight (or excluded from identity matching entirely) until they have been independently updated in the source system. This can be tracked via `_field_source` provenance (§4.34).
+- **Time-based corroboration decay:** A match between system 1 and system 3 where system 3's value has not changed since the original export should be treated as weaker evidence than a match where both systems have updated the value independently. The `base` column timestamps provide a proxy for this.
+
+### 4.39 Non-Latin Script and Transliteration Inconsistency
+
+The normalisation section (§4.2) covers `lower()`, `trim()`, and phone formatting. These are effective for ASCII-range data. They are ineffective for identity fields in non-Latin scripts.
+
+**The problem:**
+
+The same entity's name may appear in different scripts or transliterations across source systems, all representing the same string but matching on zero identity field values:
+
+| System | Name value | Script |
+|---|---|---|
+| System 1 (EU CRM) | `Müller` | Latin with umlaut |
+| System 2 (US CRM) | `Mueller` | ASCII transliteration (German convention) |
+| System 3 (Internal) | `Muller` | Simplified (umlaut dropped) |
+
+```
+lower('Müller')  = 'müller'
+lower('Mueller') = 'mueller'
+lower('Muller')  = 'muller'
+
+All three are different strings. Identity resolution: three separate singletons.
+```
+
+For non-Latin scripts, the problem is more severe:
+
+| System | Name value | Issue |
+|---|---|---|
+| System 1 | `北京市朝阳区` | Chinese characters (address) |
+| System 2 | `Beijing Chaoyang` | Pinyin transliteration |
+| System 3 | `Peking, Chaoyang District` | Historical/Western romanisation |
+
+These three represent the same address. Standard normalisation cannot bridge them. No SQL `WHERE` clause will produce a match.
+
+**Why this matters for this pipeline:** Any deployment handling data from China, Japan, Korea, the Middle East, Eastern Europe, or any non-ASCII-first market will have this problem. It is a systematic false-negative generator for international identity resolution.
+
+**Mitigations:**
+
+1. **Unicode normalisation (NFC/NFD):** PostgreSQL's `normalize()` function handles composed vs decomposed Unicode forms. `Müller` (single `ü` character) and `Müller` (u + combining umlaut) are the same string after NFC normalisation, even if they differ at the byte level. This should be in every normalisation expression:
+   ```sql
+   normalize(lower(trim(name)), NFC)
+   ```
+
+2. **Transliteration at ingest time:** The connector YAML or forward view applies transliteration before storing identity field values. Chinese names are stored in both their original script and a Pinyin equivalent. Arabic names are stored in both Arabic script and a romanised form. Identity matching uses the romanised form; display uses the original.
+
+3. **LLM-assisted matching for cross-script candidates (§7.7):** After deterministic matching runs (and produces singletons for non-Latin records), the embedding-based under-link detection pipeline (§4.19, §7.7) uses semantic similarity to surface candidates. LLMs handle cross-script and cross-transliteration name matching well — "北京" and "Beijing" are close in embedding space regardless of script.
+
+4. **Per-source character encoding audit pre-onboarding:** Before ingesting system 3, run a character distribution analysis on identity fields. If a significant fraction of values contain non-ASCII characters, the normalisation strategy must account for them before the bootstrap refresh. Discovering transliteration inconsistencies after the bootstrap is much more expensive to fix.
+
 ---
 
 ## 5. Record Linkage and Onboarding
