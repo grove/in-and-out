@@ -136,6 +136,15 @@ connector:
       # "relationship" datatypes will provision a join-table schema.
       kind: entity
 
+      # ── OAuth2 scopes (optional) ───────────────────────────────────────────
+      # Declares which OAuth2 scopes this datatype needs for read vs write.
+      # The engine unions these across all active datatypes to compute the
+      # minimal scope string for the token request.  Omit for non-OAuth connectors.
+      # Req: scope-subset deployment (reusable connectors)
+      required_scopes:
+        read: [crm.objects.contacts.read]
+        write: [crm.objects.contacts.write]
+
       # ── Ingestion ─────────────────────────────────────────────────────────
       ingestion:
         # Field used as the stable external primary key (stored in external_id).

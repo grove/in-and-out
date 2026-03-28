@@ -26,6 +26,10 @@ connector:
 
   datatypes:
     contacts:
+      # Salesforce uses a single coarse-grained 'api' scope for all operations.
+      required_scopes:
+        read: [api]
+        write: [api]
       ingestion:
         primary_key: "Id"
         history_mode: overwrite
@@ -87,6 +91,8 @@ connector:
             LastModifiedDate: "2026-03-22T09:15:00Z"
 
     accounts:
+      required_scopes:
+        read: [api]
       ingestion:
         primary_key: "Id"
         history_mode: overwrite

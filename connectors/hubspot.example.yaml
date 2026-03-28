@@ -27,6 +27,8 @@ connector:
       scopes:
         - crm.objects.contacts.read
         - crm.objects.contacts.write
+        - crm.objects.companies.read
+        - crm.objects.companies.write
 
   rate_limit:
     requests_per_second: 9.0
@@ -94,6 +96,9 @@ connector:
     contacts:
       description: HubSpot CRM contacts
       kind: entity
+      required_scopes:
+        read: [crm.objects.contacts.read]
+        write: [crm.objects.contacts.write]
 
       ingestion:
         primary_key: id
@@ -160,6 +165,9 @@ connector:
     companies:
       description: HubSpot CRM companies
       kind: entity
+      required_scopes:
+        read: [crm.objects.companies.read]
+        write: [crm.objects.companies.write]
 
       ingestion:
         primary_key: id
@@ -225,6 +233,9 @@ connector:
     contacts_companies_associations:
       description: HubSpot CRM contact-to-company associations
       kind: relationship
+      # Associations are read-only ingestion; reuses the contacts read scope.
+      required_scopes:
+        read: [crm.objects.contacts.read]
 
       ingestion:
         primary_key: [fromObjectId, toObjectId]

@@ -24,6 +24,7 @@ from inandout.config.connector import (
     ConnectorConfig,
     ConnectorFileConfig,
     DatatypeConfig,
+    DatatypeScopes,
     GenerationProfile,
 )
 from inandout.config.ingestion import (
@@ -71,6 +72,7 @@ __all__ = [
     "ConnectorConfig",
     "ConnectorFileConfig",
     "DatatypeConfig",
+    "DatatypeScopes",
     "GenerationProfile",
     # ingestion
     "HistoryMode",

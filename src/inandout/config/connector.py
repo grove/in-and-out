@@ -31,7 +31,7 @@ _ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ALLOWED_INTERPOLATION_PREFIXES = (
     "runtime.",
     "credential.",
-    "credential:",   # colon form used in register_body_extra placeholders
+    "credential:",  # colon form used in register_body_extra placeholders
     "auth.",
     "record.",
     "data.",
@@ -208,11 +208,32 @@ class SimulatorConfig(BaseModel):
     seed_count: int = 1  # When seed_data has exactly 1 entry, auto-generate this many records
 
 
+class DatatypeScopes(BaseModel):
+    """OAuth2 scopes required to access this datatype.
+
+    Optional — only meaningful for connectors with ``auth.type: oauth2``.
+    When declared, the engine unions these across all active datatypes to build
+    the ``scope`` parameter sent on the token request, rather than relying on
+    the static ``auth.oauth2.scopes`` list.  The simulator uses the per-operation
+    split (``read`` vs ``write``) to enforce 403 responses on insufficient-scope
+    tokens.
+
+    Both fields accept a list to handle APIs that require multiple scopes for a
+    single operation class.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    read: list[str] = []  # scopes required for GET list / lookup
+    write: list[str] = []  # scopes required for POST / PATCH / DELETE
+
+
 class DatatypeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str | None = None
     kind: Literal["entity", "relationship"] | None = None
+    required_scopes: DatatypeScopes | None = None  # optional OAuth2 scope declarations
     ingestion: IngestionConfig | None = None
     writeback: WritebackConfig | None = None
     field_mappings: list[FieldMapping] = []
@@ -296,6 +317,47 @@ class ConnectorConfig(BaseModel):
         if _has_cycle(graph):
             raise ValueError("CFG-011: cyclic datatype dependency graph detected")
         return self
+
+    @model_validator(mode="after")
+    def scopes_superset_check(self) -> "ConnectorConfig":
+        """CFG-015: auth.oauth2.scopes must cover every scope declared in datatypes.
+
+        Only runs when both the top-level list and at least one per-datatype
+        ``required_scopes`` entry are non-empty.  If either side is absent the
+        check is skipped — the feature is fully optional.
+        """
+        from inandout.config.auth import OAuth2Auth  # local import to avoid circularity
+
+        if not isinstance(self.auth, OAuth2Auth):
+            return self
+        top_level = set(self.auth.oauth2.scopes)
+        if not top_level:
+            return self  # top-level list not declared — skip
+        per_datatype = set(self.computed_scopes())
+        if not per_datatype:
+            return self  # no per-datatype scopes declared — skip
+        missing = per_datatype - top_level
+        if missing:
+            raise ValueError(
+                f"CFG-015: auth.oauth2.scopes is missing scope(s) declared under datatypes: "
+                f"{sorted(missing)}.  Add them to auth.oauth2.scopes or remove the "
+                f"required_scopes declarations."
+            )
+        return self
+
+    def computed_scopes(self) -> list[str]:
+        """Union of all required_scopes across every declared datatype.
+
+        Use this to compute the minimal ``scope`` string for a token request
+        when deploying a subset of datatypes — the result is the exact set of
+        permissions needed, nothing more.
+        """
+        seen: set[str] = set()
+        for dt in self.datatypes.values():
+            if dt.required_scopes:
+                seen.update(dt.required_scopes.read)
+                seen.update(dt.required_scopes.write)
+        return sorted(seen)
 
 
 # ---------------------------------------------------------------------------
