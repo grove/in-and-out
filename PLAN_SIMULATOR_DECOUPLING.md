@@ -1,10 +1,220 @@
 # Plan: Decouple the simulator from the engine package
 
-> Status: **Implemented (shim phase — S3 complete, S1/S2 deferred)**
-> Goal: make the simulator installable and runnable with **zero dependency on
-> engine code**, so any alternative engine implementation (Go, Rust, Node, a
-> third-party tool) can point at the same simulator by reading the same YAML
-> connector files.
+> Status: **Revised — JSON-schema-native approach adopted**
+> Goal: make the simulator installable and runnable with **zero Python code
+> coupling to the engine**, so any alternative engine implementation (Go, Rust,
+> Node, a third-party tool) can point at the same simulator by reading the same
+> YAML connector files.  The contract is the **JSON schemas in `schemas/`**,
+> not the Python models in `inandout.config`.
+
+---
+
+## Final architecture
+
+```
+connector.yaml
+    │
+    ▼
+yaml.safe_load()
+    │
+    ├─► jsonschema.validate(schemas/connector.schema.json)  ← contract
+    │
+    ▼
+  raw dict
+    │
+    ├─► simulator/app.py          (startup, route registration)
+    ├─► simulator/route_builder.py (FastAPI routes, dict navigation)
+    ├─► simulator/webhooks.py      (fan-out dispatch)
+    └─► simulator/seed.py          (store pre-population)
+```
+
+The simulator imports **nothing from `inandout.config` or `inandout.schema`**.
+Dependencies are `pyyaml`, `jsonschema`, `fastapi`, `uvicorn`, `httpx`, `jinja2` —
+and nothing else from this repo.
+
+---
+
+## Current state (post shim phase)
+
+The simulator was moved from `inandout.config.*` → `inandout.schema.*` imports
+as a first step.  `inandout.schema` is a thin re-export shim over
+`inandout.config` (Pydantic models).  This achieves namespace separation but
+**not code decoupling** — the simulator still runs Python Pydantic models at
+runtime.
+
+| Simulator file      | Current import                      | Target                  |
+|---------------------|--------------------------------------|-------------------------|
+| `app.py`            | `inandout.schema.connector`, `loader`| None — raw dict         |
+| `route_builder.py`  | `inandout.schema.connector`, `pagination` | None — string compare  |
+| `webhooks.py`       | `inandout.schema.connector`          | None — raw dict         |
+| `seed.py`           | `inandout.schema.connector`          | None — raw dict         |
+
+---
+
+## The JSON schemas (the real contract)
+
+`schemas/connector.schema.json` + `schemas/defs/` already cover every field
+the simulator needs:
+
+| Field path | JSON schema location | Complete? |
+|---|---|---|
+| `connector.name`, `connector.auth.*` | `connector.schema.json` | ✓ |
+| `connector.datatypes[*].ingestion.*` | `defs/ingestion.schema.json` | ✓ |
+| `connector.datatypes[*].ingestion.list.pagination.*` | `defs/pagination.schema.json` | ✓ |
+| `connector.datatypes[*].writeback.operations.*` | `defs/writeback.schema.json` | ✓ |
+| `connector.datatypes[*].simulator.*` | `defs/simulator.schema.json` | ✓ |
+| `connector.webhooks.*`, `fan_out.*`, `is_delete`, `array_unwrap` | `defs/webhooks.schema.json` | ✓ |
+| `connector.datatypes[*].required_scopes` | ❌ Not yet added | Needs adding |
+
+The schemas must be kept in sync with the YAML connector files as the
+authoritative contract.  The Pydantic models in `inandout.config` remain the
+engine's typed representation but are no longer the simulator's source of truth.
+
+---
+
+## Steps
+
+### S1 — Add `required_scopes` to the JSON schema
+
+`schemas/connector.schema.json` (or a new `defs/` entry) needs:
+
+```json
+"required_scopes": {
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "read":  {"type": "array", "items": {"type": "string"}, "default": []},
+    "write": {"type": "array", "items": {"type": "string"}, "default": []}
+  }
+}
+```
+
+Add it to the datatype properties block (alongside `ingestion`, `writeback`,
+`simulator`).
+
+### S2 — New `simulator/loader.py` (schema-native YAML loading)
+
+Replace the `load_connector()` Pydantic-based loader with a standalone module
+the simulator owns:
+
+```python
+# src/inandout/simulator/loader.py
+import pathlib
+import json
+import yaml
+import jsonschema
+
+_SCHEMA_DIR = pathlib.Path(__file__).parent.parent.parent.parent / "schemas"
+_CONNECTOR_SCHEMA = json.loads((_SCHEMA_DIR / "connector.schema.json").read_text())
+
+def load_connector(path: str | pathlib.Path) -> dict:
+    """Load and validate a connector YAML file.  Returns the raw dict."""
+    raw = yaml.safe_load(pathlib.Path(path).read_text())
+    jsonschema.validate(raw, _CONNECTOR_SCHEMA)
+    return raw["connector"]
+```
+
+No Pydantic.  Validation errors surface as `jsonschema.ValidationError` with
+the field path clearly identified.
+
+### S3 — Migrate simulator internals to dict access
+
+Replace every typed attribute access with dict `[]` / `.get()` navigation:
+
+```python
+# Before (Pydantic)
+connector.auth.type
+dt_cfg.ingestion.list.path
+pagination.strategy == PaginationStrategy.cursor
+connector.webhooks.fan_out.routes
+
+# After (dict)
+connector["auth"]["type"]
+dt_cfg["ingestion"]["list"]["path"]
+pagination["strategy"] == "cursor"
+connector.get("webhooks", {}).get("fan_out", {}).get("routes", [])
+```
+
+`PaginationStrategy` enum import is removed; comparisons become plain string
+equality.  `ConnectorConfig` type hints become `dict`.
+
+### S4 — Remove `inandout.schema` imports from simulator
+
+Once S2 and S3 are complete, all four `from inandout.schema.*` import lines are
+deleted.  The CI boundary test (`test_simulator_schema_boundary.py`) is updated
+to also assert no `inandout.schema` imports:
+
+```python
+if module.startswith("inandout.config") or module.startswith("inandout.schema"):
+    violations.append(...)
+```
+
+### S5 — `pyproject.toml` extras
+
+```toml
+[project.optional-dependencies]
+engine    = ["inandout", "psycopg[binary]>=3", "httpx", "structlog",
+             "alembic", "orjson", "asyncpg"]
+simulator = ["pyyaml", "jsonschema", "fastapi", "uvicorn[standard]",
+             "jinja2", "httpx", "aiofiles"]
+```
+
+The simulator `Dockerfile` installs only `.[simulator]` — no Pydantic,
+no psycopg, no alembic, no orjson.
+
+---
+
+## What the `inandout.schema` shim becomes
+
+After S4 the `src/inandout/schema/` package is no longer needed by the
+simulator.  It can be:
+- **Kept** as a stable public API for external Python consumers who want typed
+  access to connector configs (e.g. tooling, validation scripts), or
+- **Removed** when S1/S2 of the original plan (full `inandout.config` →
+  `inandout.schema` rename) is done.
+
+Either way it has no bearing on the simulator's runtime.
+
+---
+
+## What stays the same
+
+The simulator's store (SQLite/memory), `route_builder` route logic, UI/HTMX
+templates, SSE push, and `WebhookDispatcher` are all already fully internal.
+The refactor is purely a change of *how the config dict is obtained* — from a
+Pydantic object to a raw dict.  All the route-building logic, pagination
+handling, seed expansion, and webhook dispatch are unchanged.
+
+---
+
+## What this enables
+
+- The simulator can be shipped as a **standalone Docker image** with a
+  sub-100 MB footprint (no DB drivers, no Pydantic, no async HTTP clients
+  beyond the outbound webhook dispatcher).
+- Alternative engine implementations in any language can be tested against the
+  same simulator simply by pointing at the right URL and reading the same YAML
+  connector files validated against the same JSON schemas.
+- The JSON schemas in `schemas/` become the **language-neutral contract**.
+  Other language SDKs can generate type-safe clients from them without ever
+  touching the Python models.
+- Linting rule: CI asserts the simulator directory has zero imports from
+  `inandout.*` — the complete boundary.
+
+---
+
+## Implementation notes (history)
+
+### Shim phase (completed — transitional only)
+
+1. `src/inandout/schema/` created as a re-export shim over `inandout.config`
+2. 4 simulator files migrated from `inandout.config.*` → `inandout.schema.*`
+3. CI boundary test added (`test_simulator_schema_boundary.py`)
+
+This gave namespace separation but not true decoupling.  It is superseded by
+the JSON-schema-native approach above.  The shim files remain harmless until
+S4 is complete.
+
 
 ---
 
