@@ -9,6 +9,219 @@
 
 ---
 
+## Long-term directory structure
+
+The repo currently has one `src/inandout/` package with everything inside it.
+The clean end state — which also supports eventual separate-repo extraction —
+is three independently-installable roots:
+
+```
+repo/
+├── schemas/                    ← language-neutral contract (JSON Schema)
+│   ├── connector.schema.json
+│   └── defs/
+│
+├── simulator/                  ← standalone Python package
+│   ├── pyproject.toml          (deps: pyyaml, jsonschema, fastapi, uvicorn, httpx, jinja2)
+│   └── src/
+│       └── inandout_simulator/
+│           ├── app.py
+│           ├── route_builder.py
+│           ├── loader.py       (yaml + jsonschema.validate — no Pydantic)
+│           ├── webhooks.py
+│           ├── seed.py
+│           ├── store.py
+│           └── …
+│
+└── engine/                     ← existing inandout package (renamed root)
+    ├── pyproject.toml          (deps: psycopg, httpx, pydantic, alembic, …)
+    └── src/
+        └── inandout/
+            ├── config/         (Pydantic models — engine's typed representation)
+            ├── ingestion/
+            ├── writeback/
+            └── …
+```
+
+Each of the three roots can be extracted to its own repo by copying the
+directory plus its `pyproject.toml`.  The only shared artefact is `schemas/`
+— which in a split-repo world would be a standalone `inandout-schemas` package
+or a git submodule.
+
+---
+
+## Current state (post shim phase)
+
+Everything lives under `src/inandout/simulator/` alongside the engine.  The
+simulator was moved from `inandout.config.*` → `inandout.schema.*` imports as
+a first step, but `inandout.schema` is still a Pydantic re-export shim — not
+true decoupling.
+
+---
+
+## Migration steps
+
+### S1 — Add `required_scopes` to the JSON schema
+
+`schemas/connector.schema.json` (datatype properties) needs:
+
+```json
+"required_scopes": {
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "read":  {"type": "array", "items": {"type": "string"}, "default": []},
+    "write": {"type": "array", "items": {"type": "string"}, "default": []}
+  }
+}
+```
+
+This is the only field currently in `DatatypeConfig` that is missing from the
+JSON schemas.
+
+### S2 — New `simulator/loader.py` (schema-native YAML loading)
+
+Add a standalone loader the simulator owns — no Pydantic:
+
+```python
+# src/inandout/simulator/loader.py
+import pathlib, json, yaml, jsonschema
+
+_SCHEMA_DIR = pathlib.Path(__file__).parent.parent.parent.parent / "schemas"
+_CONNECTOR_SCHEMA = json.loads((_SCHEMA_DIR / "connector.schema.json").read_text())
+
+def load_connector(path: str | pathlib.Path) -> dict:
+    raw = yaml.safe_load(pathlib.Path(path).read_text())
+    jsonschema.validate(raw, _CONNECTOR_SCHEMA)
+    return raw["connector"]
+```
+
+### S3 — Migrate simulator internals to dict access
+
+Replace every Pydantic attribute access with dict navigation:
+
+```python
+# Before                                    After
+connector.auth.type                →        connector["auth"]["type"]
+dt_cfg.ingestion.list.path         →        dt_cfg["ingestion"]["list"]["path"]
+pagination.strategy == PaginationStrategy.cursor  →  pagination["strategy"] == "cursor"
+connector.webhooks.fan_out.routes  →        connector.get("webhooks", {}).get("fan_out", {}).get("routes", [])
+```
+
+### S4 — Delete all `inandout.schema` imports from simulator
+
+Once S2+S3 are complete, the four `from inandout.schema.*` import lines are
+deleted.  The CI boundary test is updated to reject ALL `inandout.*` imports:
+
+```python
+if module.startswith("inandout."):
+    violations.append(...)
+```
+
+### S5 — Move simulator to its own package root
+
+Create `simulator/` at the repo root as a separate installable package:
+
+```
+simulator/
+├── pyproject.toml
+└── src/
+    └── inandout_simulator/
+        └── …  (files moved from src/inandout/simulator/)
+```
+
+`pyproject.toml` for the simulator:
+
+```toml
+[project]
+name = "inandout-simulator"
+dependencies = [
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "jinja2>=3.1",
+    "aiofiles>=24.0",
+]
+```
+
+No `pydantic`, no `psycopg`, no `alembic`, no `orjson`.
+
+The root `pyproject.toml` gains a workspace / path dependency so CI can still
+run everything together:
+
+```toml
+[tool.uv.workspace]
+members = ["engine", "simulator"]
+```
+
+(or equivalent for pip editable installs)
+
+### S6 — CI validation gate
+
+```bash
+# Install only simulator deps in a clean venv
+uv pip install --no-deps ./simulator
+python -c "from inandout_simulator.app import build_app; print('OK')"
+python -m pytest tests/simulators/ -q
+```
+
+Fails the PR if any engine import bleeds in.
+
+---
+
+## What the JSON schemas become
+
+`schemas/` is the shared contract artefact.  In a split-repo world it becomes
+either:
+- A standalone `inandout-schemas` package (JSON files + a `jsonschema`
+  validator helper), or
+- A git submodule in both `engine` and `simulator` repos.
+
+Either way it has no Python code — just JSON files any language can consume.
+
+---
+
+## What stays the same
+
+The simulator's store, `route_builder` route logic, UI/HTMX templates, SSE
+push, and `WebhookDispatcher` are all unchanged.  The refactor is purely a
+change of *how the config dict is obtained* and where the package lives.
+
+---
+
+## What this enables
+
+- Simulator ships as a **sub-100 MB Docker image** with no DB drivers or
+  Pydantic.
+- Any engine implementation (Go, Rust, Node) can be tested against it.
+- `schemas/` is the language-neutral contract; other SDKs generate clients
+  from it without touching Python.
+- Each of the three roots (`schemas/`, `simulator/`, `engine/`) can be
+  extracted to its own repo with a directory copy.
+
+---
+
+## Implementation history
+
+### Shim phase (done — transitional)
+
+1. `src/inandout/schema/` created as a Pydantic re-export shim over `inandout.config`
+2. 4 simulator files migrated from `inandout.config.*` → `inandout.schema.*`
+3. CI boundary test added (`test_simulator_schema_boundary.py`)
+
+This gave namespace separation but not true decoupling.  It is superseded by
+S2–S6 above.  The shim files remain harmless until S4 removes the imports.
+
+> Goal: make the simulator installable and runnable with **zero Python code
+> coupling to the engine**, so any alternative engine implementation (Go, Rust,
+> Node, a third-party tool) can point at the same simulator by reading the same
+> YAML connector files.  The contract is the **JSON schemas in `schemas/`**,
+> not the Python models in `inandout.config`.
+
+---
+
 ## Final architecture
 
 ```
