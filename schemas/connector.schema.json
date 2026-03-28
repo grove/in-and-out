@@ -51,7 +51,7 @@
           "minLength": 1
         },
         "api_deprecation_deadline": {
-          "type": "string"
+          "type": ["string", "null"]
         },
         "runtime_params": {
           "type": "object",
@@ -166,6 +166,29 @@
         },
         "simulator": {
           "$ref": "defs/simulator.schema.json"
+        },
+        "required_scopes": {
+          "type": "object",
+          "description": "OAuth2 scopes required to access this datatype. Optional — only meaningful for oauth2 connectors. Enables per-datatype scope enforcement in the simulator and minimal scope computation by the engine.",
+          "additionalProperties": false,
+          "properties": {
+            "read": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Scopes required for GET list and lookup operations."
+            },
+            "write": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Scopes required for POST / PATCH / PUT / DELETE operations."
+            }
+          }
         }
       },
       "anyOf": [

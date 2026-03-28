@@ -1,6 +1,6 @@
 """Config-driven FastAPI router builder for the demo simulator.
 
-Reads a ``ConnectorConfig`` and registers FastAPI routes for every endpoint
+Reads a connector config ``dict`` and registers FastAPI routes for every endpoint
 the engine is expected to call:
 
 * List endpoint (GET) with full pagination support for all five strategies.
@@ -22,8 +22,6 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from inandout.schema.connector import ConnectorConfig
-from inandout.schema.pagination import PaginationStrategy
 from inandout.simulator.events import EventBus
 from inandout.simulator.store import RecordStore
 from inandout.simulator.webhooks import WebhookDispatcher
@@ -73,14 +71,15 @@ def _get_path(obj: dict, dot_path: str) -> Any:
 
 def _get_incremental_params(ingestion_cfg) -> tuple[str | None, str | None, str | None]:
     """Return (cursor_field, filter_param, cursor_type) from ingestion config."""
-    inc = ingestion_cfg.list.incremental
-    if not inc or not inc.enabled:
+    inc = (ingestion_cfg.get("list") or {}).get("incremental") if isinstance(ingestion_cfg, dict) else None
+    if not inc or not inc.get("enabled"):
         return None, None, None
-    cursor_field = inc.cursor_field
-    cursor_type = inc.cursor_type.value if inc.cursor_type else None
+    cursor_field = inc.get("cursor_field")
+    cursor_type = inc.get("cursor_type")
     filter_param: str | None = None
-    if inc.request_filter:
-        filter_param = getattr(inc.request_filter, "param", None)
+    rf = inc.get("request_filter")
+    if rf:
+        filter_param = rf.get("param") if isinstance(rf, dict) else None
     return cursor_field, filter_param, cursor_type
 
 
@@ -116,19 +115,19 @@ def _build_openapi_extra(
                 }
             )
         if pagination is not None:
-            strategy = pagination.strategy
-            if strategy == PaginationStrategy.cursor and pagination.cursor:
+            strategy = (pagination or {}).get("strategy") if isinstance(pagination, dict) else None
+            if strategy == "cursor" and pagination.get("cursor", {}):
                 params.append(
                     {
-                        "name": pagination.cursor.request_param,
+                        "name": pagination.get("cursor", {}).get("request_param"),
                         "in": "query",
                         "required": False,
                         "schema": {"type": "string"},
                         "description": "Cursor token for the next page (from previous response)",
                     }
                 )
-            elif strategy == PaginationStrategy.offset:
-                off_cfg = pagination.offset or {}
+            elif strategy == "offset":
+                off_cfg = pagination.get("offset", {}) or {}
                 off_p = off_cfg.get("param", "offset") if isinstance(off_cfg, dict) else "offset"
                 lim_p = (
                     off_cfg.get("limit_param", "limit") if isinstance(off_cfg, dict) else "limit"
@@ -151,8 +150,8 @@ def _build_openapi_extra(
                         "description": "Maximum records per page",
                     }
                 )
-            elif strategy == PaginationStrategy.page_number:
-                pn_cfg = pagination.page_number or {}
+            elif strategy == "page_number":
+                pn_cfg = pagination.get("page_number", {}) or {}
                 page_p = pn_cfg.get("page_param", "page") if isinstance(pn_cfg, dict) else "page"
                 pp_p = (
                     pn_cfg.get("per_page_param", "per_page")
@@ -177,23 +176,23 @@ def _build_openapi_extra(
                         "description": "Records per page",
                     }
                 )
-            elif strategy == PaginationStrategy.keyset and pagination.keyset:
-                ks = pagination.keyset
+            elif strategy == "keyset" and pagination.get("keyset", {}):
+                ks = pagination.get("keyset") or {}
                 params.append(
                     {
-                        "name": ks.request_param,
+                        "name": ks.get("request_param", "after"),
                         "in": "query",
                         "required": False,
                         "schema": {"type": "string"},
-                        "description": f"Keyset cursor: return records with {ks.keyset_field} > this value",
+                        "description": f"Keyset cursor: return records with {ks.get('keyset_field', 'id')} > this value",
                     }
                 )
                 params.append(
                     {
-                        "name": ks.page_size_param,
+                        "name": ks.get("page_size_param", "per_page"),
                         "in": "query",
                         "required": False,
-                        "schema": {"type": "integer", "default": ks.page_size},
+                        "schema": {"type": "integer", "default": ks.get("page_size", 20)},
                         "description": "Page size",
                     }
                 )
@@ -289,7 +288,7 @@ def _build_openapi_extra(
 
 
 def build_connector_router(
-    connector: ConnectorConfig,
+    connector: dict,
     store: RecordStore,
     event_bus: EventBus,
     dispatcher: WebhookDispatcher,
@@ -298,7 +297,7 @@ def build_connector_router(
 ) -> APIRouter:
     """Return a FastAPI ``APIRouter`` with all routes for *connector*.
 
-    Mount this router at ``prefix="/{connector.name}"`` in the main app.
+    Mount this router at ``prefix="/{connector["name"]}"`` in the main app.
     """
     router = APIRouter()
     # Track (method, path) pairs to avoid duplicate registrations.
@@ -323,14 +322,14 @@ def build_connector_router(
                     summary=summary,
                 )
 
-    connector_name = connector.name
+    connector_name = connector["name"]
 
     # ------------------------------------------------------------------
     # Auth — OAuth2 token endpoint
     # ------------------------------------------------------------------
-    auth = connector.auth
-    if getattr(auth, "type", None) == "oauth2":
-        token_url_path = _extract_url_path(auth.oauth2.token_url)
+    auth = connector.get("auth") or {}
+    if auth.get("type") == "oauth2":
+        token_url_path = _extract_url_path(auth["oauth2"]["token_url"])
 
         def _make_token_handler():
             async def token_endpoint(request: Request) -> JSONResponse:
@@ -350,18 +349,18 @@ def build_connector_router(
     # ------------------------------------------------------------------
     # Per-datatype routes
     # ------------------------------------------------------------------
-    for dt_name, dt_cfg in connector.datatypes.items():
-        pk_field = _pk_field(dt_cfg.ingestion.primary_key if dt_cfg.ingestion else "id")
+    for dt_name, dt_cfg in connector["datatypes"].items():
+        pk_field = _pk_field(dt_cfg.get("ingestion", {}).get("primary_key", "id") if dt_cfg.get("ingestion") else "id")
 
         # ----------------------------------------------------------
         # Ingestion: list endpoint
         # ----------------------------------------------------------
-        if dt_cfg.ingestion:
-            list_path = dt_cfg.ingestion.list.path
-            record_selector = dt_cfg.ingestion.list.record_selector or "results"
-            pagination = dt_cfg.ingestion.list.pagination
-            strategy = pagination.strategy
-            cursor_field, filter_param, cursor_type = _get_incremental_params(dt_cfg.ingestion)
+        if dt_cfg.get("ingestion"):
+            list_path = (dt_cfg.get("ingestion") or {}).get("list", {}).get("path")
+            record_selector = (dt_cfg.get("ingestion") or {}).get("list", {}).get("record_selector") or "results"
+            pagination = (dt_cfg.get("ingestion") or {}).get("list", {}).get("pagination") or {}
+            strategy = pagination.get("strategy") if pagination else None
+            cursor_field, filter_param, cursor_type = _get_incremental_params(dt_cfg.get("ingestion"))
 
             def _make_list_handler(
                 _dt_name=dt_name,
@@ -397,8 +396,8 @@ def build_connector_router(
                     offset = 0
                     effective_page_size = default_page_size
 
-                    if _strategy == PaginationStrategy.cursor:
-                        cursor_param = _pagination.cursor.request_param
+                    if _strategy == "cursor":
+                        cursor_param = _pagination.get("cursor", {}).get("request_param")
                         raw_cursor = params.get(cursor_param) if cursor_param else None
                         if raw_cursor and raw_cursor.lstrip("-").isdigit():
                             offset = int(raw_cursor)
@@ -408,8 +407,8 @@ def build_connector_router(
                             if seg.lstrip("-").isdigit():
                                 offset = int(seg)
 
-                    elif _strategy == PaginationStrategy.offset:
-                        off_cfg = _pagination.offset or {}
+                    elif _strategy == "offset":
+                        off_cfg = _pagination.get("offset", {}) or {}
                         off_p = (
                             off_cfg.get("param", "offset")
                             if isinstance(off_cfg, dict)
@@ -425,8 +424,8 @@ def build_connector_router(
                             params.get(lim_p, default_page_size) or default_page_size
                         )
 
-                    elif _strategy == PaginationStrategy.page_number:
-                        pn_cfg = _pagination.page_number or {}
+                    elif _strategy == "page_number":
+                        pn_cfg = _pagination.get("page_number", {}) or {}
                         page_p = (
                             pn_cfg.get("page_param", "page") if isinstance(pn_cfg, dict) else "page"
                         )
@@ -441,13 +440,13 @@ def build_connector_router(
                         )
                         offset = (page_num - 1) * effective_page_size
 
-                    elif _strategy == PaginationStrategy.keyset:
-                        ks = _pagination.keyset
-                        after = params.get(ks.request_param) if ks else None
-                        effective_page_size = ks.page_size if ks else default_page_size
+                    elif _strategy == "keyset":
+                        ks = _pagination.get("keyset") or {}
+                        after = params.get(ks.get("request_param", "after")) if ks else None
+                        effective_page_size = ks.get("page_size", default_page_size) if ks else default_page_size
                         if after:
                             all_records = [
-                                r for r in all_records if str(r.get(ks.keyset_field, "")) > after
+                                r for r in all_records if str(r.get(ks.get("keyset_field", "id"), "")) > after
                             ]
                         total = len(all_records)
 
@@ -464,24 +463,24 @@ def build_connector_router(
                     headers_out: dict[str, str] = {}
 
                     if has_more:
-                        if _strategy == PaginationStrategy.cursor:
-                            _set_path(body, _pagination.cursor.response_path, str(next_offset))
+                        if _strategy == "cursor":
+                            _set_path(body, _pagination.get("cursor", {}).get("response_path"), str(next_offset))
 
-                        elif _strategy == PaginationStrategy.offset:
-                            off_cfg = _pagination.offset or {}
+                        elif _strategy == "offset":
+                            off_cfg = _pagination.get("offset", {}) or {}
                             if isinstance(off_cfg, dict) and off_cfg.get("total_path"):
                                 _set_path(body, off_cfg["total_path"], total)
 
-                        elif _strategy == PaginationStrategy.page_number:
-                            pn_cfg = _pagination.page_number or {}
+                        elif _strategy == "page_number":
+                            pn_cfg = _pagination.get("page_number", {}) or {}
                             if isinstance(pn_cfg, dict) and pn_cfg.get("total_pages_path"):
                                 total_pages = (
                                     total + effective_page_size - 1
                                 ) // effective_page_size
                                 _set_path(body, pn_cfg["total_pages_path"], total_pages)
 
-                        elif _strategy == PaginationStrategy.link_header:
-                            lh_cfg = _pagination.link_header or {}
+                        elif _strategy == "link_header":
+                            lh_cfg = _pagination.get("link_header", {}) or {}
                             hdr = (
                                 lh_cfg.get("header", "Link") if isinstance(lh_cfg, dict) else "Link"
                             )
@@ -509,7 +508,7 @@ def build_connector_router(
                 _make_list_handler(),
                 openapi_extra=_build_openapi_extra(
                     "list",
-                    dt_cfg.simulator.seed_data if dt_cfg.simulator else [],
+                    (dt_cfg.get("simulator") or {}).get("seed_data", []),
                     pk_field,
                     selector=record_selector,
                     pagination=pagination,
@@ -521,18 +520,18 @@ def build_connector_router(
         # ----------------------------------------------------------
         # Writeback: lookup / insert / update / delete / archive / upsert
         # ----------------------------------------------------------
-        if dt_cfg.writeback:
-            ops = dt_cfg.writeback.operations
+        if dt_cfg.get("writeback"):
+            ops = (dt_cfg.get("writeback") or {}).get("operations", {})
             cursor_field_wb: str | None = None
-            if dt_cfg.ingestion and dt_cfg.ingestion.list.incremental:
-                cursor_field_wb = dt_cfg.ingestion.list.incremental.cursor_field
+            if dt_cfg.get("ingestion") and (dt_cfg.get("ingestion") or {}).get("list", {}).get("incremental"):
+                cursor_field_wb = ((dt_cfg.get("ingestion") or {}).get("list", {}).get("incremental") or {}).get("cursor_field")
 
             for action in ("lookup", "insert", "update", "delete", "archive", "upsert"):
-                op_cfg = getattr(ops, action, None)
+                op_cfg = ops.get(action)
                 if op_cfg is None:
                     continue
-                method = op_cfg.method.upper()
-                fa_path = _to_fa_path(op_cfg.path)
+                method = op_cfg.get("method", "GET").upper()
+                fa_path = _to_fa_path(op_cfg.get("path", "/"))
                 has_id = "{record_id}" in fa_path
 
                 def _make_write_handler(
@@ -543,7 +542,7 @@ def build_connector_router(
                     _has_id=has_id,
                     _cursor_field=cursor_field_wb,
                     _fa_path=fa_path,
-                    _seed=dt_cfg.simulator.seed_data if dt_cfg.simulator else [],
+                    _seed=(dt_cfg.get("simulator") or {}).get("seed_data", []),
                 ):
                     async def write_endpoint(
                         request: Request,
@@ -704,7 +703,7 @@ def build_connector_router(
     # the connector's registration.register_path.  In the simulator that
     # path lives on *this* process, so we generate matching handlers here.
     # Subscriptions are kept in a simple in-memory dict scoped to the router.
-    if connector.webhooks and connector.webhooks.registration:
+    if connector.get("webhooks") and (connector.get("webhooks") or {}).get("registration"):
         _add_webhook_registration_routes(
             connector,
             _add,
@@ -721,19 +720,21 @@ def _wh_path_to_fa(path: str) -> str:
     return path.replace("${webhook_id}", "{webhook_id}")
 
 
-def _build_registration_example(connector: ConnectorConfig) -> dict:
+def _build_registration_example(connector: dict) -> dict:
     """Build an OpenAPI example request body for the webhook registration POST."""
-    reg = connector.webhooks.registration  # type: ignore[union-attr]
-    wh = connector.webhooks  # type: ignore[union-attr]
+    wh = connector.get("webhooks") or {}
+    reg = wh.get("registration") or {}
 
     # Seed the body from register_body_extra, resolving placeholder tokens to
     # human-readable example strings so Swagger is self-documenting.
     body: dict = {}
     first_event: str | None = None
-    if wh.fan_out and wh.fan_out.routes:
-        first_event = wh.fan_out.routes[0].match
+    fan_out = wh.get("fan_out") or {}
+    routes = fan_out.get("routes") or []
+    if routes:
+        first_event = routes[0].get("match") if isinstance(routes[0], dict) else None
 
-    for key, val_template in reg.register_body_extra.items():
+    for key, val_template in (reg.get("register_body_extra") or {}).items():
         if "${route_event}" in val_template:
             body[key] = first_event or "<event_type>"
         elif val_template.startswith("${credential:"):
@@ -743,14 +744,15 @@ def _build_registration_example(connector: ConnectorConfig) -> dict:
             body[key] = val_template
 
     # Add the callback URL field last.
-    webhook_path = wh.path if wh else "/webhooks/<connector>"
-    body[reg.callback_url_runtime_param] = f"http://engine:9090{webhook_path}"
+    webhook_path = wh.get("path", "/webhooks/<connector>")
+    cb_param = reg.get("callback_url_runtime_param", "callback_url")
+    body[cb_param] = f"http://engine:9090{webhook_path}"
 
     return body
 
 
 def _add_webhook_registration_routes(
-    connector: ConnectorConfig,
+    connector: dict,
     _add,
     registered: set[tuple[str, str]],
     webhook_subscriptions_store: dict | None = None,
@@ -759,18 +761,20 @@ def _add_webhook_registration_routes(
     """Register POST/DELETE/PUT/GET routes for the webhook lifecycle API."""
     import itertools
 
-    reg = connector.webhooks.registration  # type: ignore[union-attr]
-    id_path = reg.id_response_path  # e.g. "value.id"
+    reg = (connector.get("webhooks") or {}).get("registration") or {}
+    id_path = reg.get("id_response_path", "id")  # e.g. "value.id"
 
     # Use the shared store when available so the UI and dispatcher can see
     # active subscriptions; fall back to a process-local dict.
     if webhook_subscriptions_store is not None:
-        webhook_subscriptions_store.setdefault(connector.name, {})
-        subscriptions: dict[int, dict] = webhook_subscriptions_store[connector.name]
+        webhook_subscriptions_store.setdefault(connector["name"], {})
+        subscriptions: dict[int, dict] = webhook_subscriptions_store[connector["name"]]
     else:
         subscriptions = {}
     counter = itertools.count(1)
 
+    if not reg:
+        return
     # Build example body once — shown in Swagger so callers can see the expected shape.
     example_body = _build_registration_example(connector)
     id_example: dict = {}
@@ -808,7 +812,9 @@ def _add_webhook_registration_routes(
     # ------------------------------------------------------------------
     # POST {register_path} — accept a new subscription, return the ID
     # ------------------------------------------------------------------
-    register_fa_path = reg.register_path
+    register_fa_path = reg.get("register_path")
+    if not register_fa_path:
+        return
 
     def _make_register():
         async def _register(request: Request) -> JSONResponse:
@@ -823,10 +829,10 @@ def _add_webhook_registration_routes(
             elapsed = int((time.monotonic() - t0) * 1000)
             if event_bus is not None:
                 event_bus.publish_request(
-                    connector=connector.name,
+                    connector=connector["name"],
                     datatype="webhook_subscription",
                     method="POST",
-                    path=reg.register_path,
+                    path=reg.get("register_path", "/"),
                     status=200,
                     duration_ms=elapsed,
                     request_body_json=json.dumps(body),
@@ -835,7 +841,7 @@ def _add_webhook_registration_routes(
                 )
             return JSONResponse(resp, status_code=200)
 
-        _register.__name__ = f"webhook_register_{connector.name}"
+        _register.__name__ = f"webhook_register_{connector["name"]}"
         return _register
 
     _add(
@@ -849,8 +855,8 @@ def _add_webhook_registration_routes(
     # ------------------------------------------------------------------
     # DELETE {deregister_path} — remove a subscription
     # ------------------------------------------------------------------
-    if reg.deregister_path:
-        dereg_fa = _wh_path_to_fa(reg.deregister_path)
+    if reg.get("deregister_path"):
+        dereg_fa = _wh_path_to_fa(reg["deregister_path"])
 
         def _make_deregister():
             async def _deregister(request: Request, webhook_id: int) -> JSONResponse:
@@ -861,10 +867,10 @@ def _add_webhook_registration_routes(
                 elapsed = int((time.monotonic() - t0) * 1000)
                 if event_bus is not None:
                     event_bus.publish_request(
-                        connector=connector.name,
+                        connector=connector["name"],
                         datatype="webhook_subscription",
                         method="DELETE",
-                        path=_wh_path_to_fa(reg.deregister_path).replace(
+                        path=_wh_path_to_fa(reg.get("deregister_path", "/")).replace(
                             "{webhook_id}", str(webhook_id)
                         ),
                         status=200,
@@ -873,7 +879,7 @@ def _add_webhook_registration_routes(
                     )
                 return JSONResponse({}, status_code=200)
 
-            _deregister.__name__ = f"webhook_deregister_{connector.name}"
+            _deregister.__name__ = f"webhook_deregister_{connector["name"]}"
             return _deregister
 
         _add(dereg_fa, ["DELETE"], _make_deregister(), summary="Deregister webhook subscription")
@@ -881,8 +887,8 @@ def _add_webhook_registration_routes(
     # ------------------------------------------------------------------
     # PUT {renew_path} — renew / heartbeat (no-op, always 200)
     # ------------------------------------------------------------------
-    if reg.renew_path:
-        renew_fa = _wh_path_to_fa(reg.renew_path)
+    if reg.get("renew_path"):
+        renew_fa = _wh_path_to_fa(reg["renew_path"])
 
         def _make_renew():
             async def _renew(request: Request, webhook_id: int) -> JSONResponse:
@@ -894,10 +900,10 @@ def _add_webhook_registration_routes(
                 elapsed = int((time.monotonic() - t0) * 1000)
                 if event_bus is not None:
                     event_bus.publish_request(
-                        connector=connector.name,
+                        connector=connector["name"],
                         datatype="webhook_subscription",
                         method="PUT",
-                        path=_wh_path_to_fa(reg.renew_path).replace(
+                        path=_wh_path_to_fa(reg.get("renew_path", "/")).replace(
                             "{webhook_id}", str(webhook_id)
                         ),
                         status=200,
@@ -905,7 +911,7 @@ def _add_webhook_registration_routes(
                     )
                 return JSONResponse({}, status_code=200)
 
-            _renew.__name__ = f"webhook_renew_{connector.name}"
+            _renew.__name__ = f"webhook_renew_{connector["name"]}"
             return _renew
 
         _add(renew_fa, ["PUT"], _make_renew(), summary="Renew webhook subscription")
@@ -913,8 +919,8 @@ def _add_webhook_registration_routes(
     # ------------------------------------------------------------------
     # GET {health_check_path} — verify subscription still exists
     # ------------------------------------------------------------------
-    if reg.health_check_path:
-        health_fa = _wh_path_to_fa(reg.health_check_path)
+    if reg.get("health_check_path"):
+        health_fa = _wh_path_to_fa(reg["health_check_path"])
 
         def _make_health():
             async def _health(request: Request, webhook_id: int) -> JSONResponse:
@@ -924,10 +930,10 @@ def _add_webhook_registration_routes(
                 if webhook_id not in subscriptions:
                     if event_bus is not None:
                         event_bus.publish_request(
-                            connector=connector.name,
+                            connector=connector["name"],
                             datatype="webhook_subscription",
                             method="GET",
-                            path=_wh_path_to_fa(reg.health_check_path).replace(
+                            path=_wh_path_to_fa(reg.get("health_check_path", "/")).replace(
                                 "{webhook_id}", str(webhook_id)
                             ),
                             status=404,
@@ -938,15 +944,17 @@ def _add_webhook_registration_routes(
                 _set_path(resp, id_path, webhook_id)
                 # If the connector declares a health_check_active_field, embed
                 # the expected active value so the engine's health check passes.
-                if reg.health_check_active_field and reg.health_check_active_value is not None:
-                    _set_path(resp, reg.health_check_active_field, reg.health_check_active_value)
+                hc_active_field = reg.get("health_check_active_field")
+                hc_active_value = reg.get("health_check_active_value")
+                if hc_active_field and hc_active_value is not None:
+                    _set_path(resp, hc_active_field, hc_active_value)
                 elapsed = int((time.monotonic() - t0) * 1000)
                 if event_bus is not None:
                     event_bus.publish_request(
-                        connector=connector.name,
+                        connector=connector["name"],
                         datatype="webhook_subscription",
                         method="GET",
-                        path=_wh_path_to_fa(reg.health_check_path).replace(
+                        path=_wh_path_to_fa(reg.get("health_check_path", "/")).replace(
                             "{webhook_id}", str(webhook_id)
                         ),
                         status=200,
@@ -954,7 +962,7 @@ def _add_webhook_registration_routes(
                     )
                 return JSONResponse(resp, status_code=200)
 
-            _health.__name__ = f"webhook_health_{connector.name}"
+            _health.__name__ = f"webhook_health_{connector["name"]}"
             return _health
 
         _add(health_fa, ["GET"], _make_health(), summary="Webhook subscription health check")

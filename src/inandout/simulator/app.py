@@ -10,8 +10,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from inandout.schema.connector import ConnectorConfig
-from inandout.schema.loader import load_connector
+from inandout.simulator.loader import load_connector
 from inandout.simulator.events import EventBus
 from inandout.simulator.route_builder import build_connector_router
 from inandout.simulator.seed import seed_from_connector
@@ -111,13 +110,13 @@ def create_app(
         event_bus=event_bus,
     )
 
-    connector_configs: list[ConnectorConfig] = []
+    connector_configs: list[dict] = []
     for path in connector_paths:
-        connector_configs.append(load_connector(path).connector)
+        connector_configs.append(load_connector(path))
 
     # Build a summary for the parent app description.
     connector_list = "\n".join(
-        f"- **[{c.system}](/{c.name}/docs)** — `/{c.name}`" for c in connector_configs
+        f"- **[{c['system']}](/{c['name']}/docs)** — `/{c['name']}`" for c in connector_configs
     )
 
     app = FastAPI(
@@ -140,19 +139,19 @@ def create_app(
     for connector in connector_configs:
         app.state.connectors.append(connector)
 
-        description = connector.description or f"Simulated {connector.system} API."
+        description = connector.get("description") or f"Simulated {connector['system']} API."
 
         # Each connector gets its own sub-application so it has a dedicated
-        # Swagger UI at /{connector.name}/docs with the correct title/description.
+        # Swagger UI at /{connector["name"]}/docs with the correct title/description.
         sub = FastAPI(
-            title=f"{connector.system} Simulator",
+            title=f"{connector['system']} Simulator",
             description=description,
             version="0.1.0",
             docs_url=None,  # custom /docs endpoint below (error highlighting)
             redoc_url="/redoc",
             servers=[
                 {
-                    "url": f"/{connector.name}",
+                    "url": f"/{connector["name"]}",
                     "description": "Simulator",
                 },
             ],
@@ -160,7 +159,7 @@ def create_app(
         )
         sub.add_api_route(
             "/docs",
-            _make_swagger_endpoint(connector.name, f"{connector.system} Simulator"),
+            _make_swagger_endpoint(connector["name"], f"{connector['system']} Simulator"),
             include_in_schema=False,
             response_class=HTMLResponse,
         )
@@ -173,7 +172,7 @@ def create_app(
             webhook_subscriptions_store=webhook_subscriptions,
         )
         sub.include_router(api_router)
-        app.mount(f"/{connector.name}", sub)
+        app.mount(f"/{connector["name"]}", sub)
 
     # Mount the web UI + admin CRUD + SSE routes.
     from inandout.simulator.ui.router import build_ui_router
@@ -186,11 +185,11 @@ def create_app(
     async def _root(request: Request) -> HTMLResponse:
         connector_rows = "".join(
             f'<li class="mb-3">'
-            f'<span class="font-semibold text-slate-200">{c.system}</span>'
-            f'<span class="text-slate-500 font-mono text-sm ml-2">/{c.name}</span>'
+            f'<span class="font-semibold text-slate-200">{c["system"]}</span>'
+            f'<span class="text-slate-500 font-mono text-sm ml-2">/{c["name"]}</span>'
             f'<div class="flex gap-4 mt-1 text-sm">'
-            f'<a href="/{c.name}/docs" class="text-sky-400 hover:underline">Swagger UI</a>'
-            f'<a href="/{c.name}/redoc" class="text-sky-400 hover:underline">ReDoc</a>'
+            f'<a href="/{c["name"]}/docs" class="text-sky-400 hover:underline">Swagger UI</a>'
+            f'<a href="/{c["name"]}/redoc" class="text-sky-400 hover:underline">ReDoc</a>'
             f"</div>"
             f"</li>"
             for c in request.app.state.connectors

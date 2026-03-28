@@ -1,7 +1,20 @@
 # Plan: Monorepo Modularization
 
-> Status: **Draft / Exploring options**
-> Strategy: uv workspace monorepo, lockstep versioning, namespace packages
+> Status: **Superseded by `PLAN_SIMULATOR_DECOUPLING.md`**
+>
+> The ingestion/writeback/core split described here was rejected in favour of a
+> simpler boundary: `schemas/` (JSON contract) / `simulator/` / `engine/`.
+> The core decomposition axis was along *code coupling*, not *deployment
+> boundaries*.  See `PLAN_SIMULATOR_DECOUPLING.md` for the current plan.
+>
+> Specific problems with this plan:
+> - `inandout-core` is a junk drawer, not a coherent package
+> - `inandout-ingestion` and `inandout-writeback` still pull in all of core,
+>   including Pydantic, psycopg, alembic — the image-size goal is not met
+> - The simulator ends up inside a meta `inandout` package, still coupled
+> - Namespace packages (PEP 420) are fragile with mypy, pytest, and IDEs
+
+---
 
 ## Motivation
 

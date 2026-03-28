@@ -7,7 +7,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from inandout.schema.connector import ConnectorConfig
 from inandout.simulator.store import RecordStore
 
 
@@ -55,25 +54,28 @@ def _expand_seed(template: dict[str, Any], pk_field: str, count: int) -> list[di
 
 async def seed_from_connector(
     store: RecordStore,
-    connector: ConnectorConfig,
+    connector: dict,
 ) -> None:
     """Load seed_data declared in each datatype's connector manifest."""
-    for dt_name, dt_cfg in connector.datatypes.items():
-        sim = dt_cfg.simulator
-        if not sim or not sim.seed_data:
+    for dt_name, dt_cfg in connector["datatypes"].items():
+        sim = dt_cfg.get("simulator") or {}
+        seed_data = sim.get("seed_data") if isinstance(sim, dict) else []
+        if not seed_data:
             continue
-        pk_field = _pk_field(dt_cfg.ingestion.primary_key if dt_cfg.ingestion else "id")
+        pk_field = _pk_field(dt_cfg.get("ingestion", {}).get("primary_key", "id") if dt_cfg.get("ingestion") else "id")
         cursor_field: str | None = None
-        if dt_cfg.ingestion and dt_cfg.ingestion.list.incremental:
-            cursor_field = dt_cfg.ingestion.list.incremental.cursor_field
+        inc = ((dt_cfg.get("ingestion") or {}).get("list") or {}).get("incremental")
+        if inc and inc.get("enabled"):
+            cursor_field = inc.get("cursor_field")
 
-        records = sim.seed_data
+        records = seed_data
+        seed_count = sim.get("seed_count", 1) if isinstance(sim, dict) else 1
         # Auto-expand when there is exactly one template record and seed_count > 1
-        if len(records) == 1 and sim.seed_count > 1:
-            records = _expand_seed(records[0], pk_field, sim.seed_count)
+        if len(records) == 1 and seed_count > 1:
+            records = _expand_seed(records[0], pk_field, seed_count)
 
         await store.seed(
-            connector.name,
+            connector["name"],
             dt_name,
             records,
             pk_field=pk_field,

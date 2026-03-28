@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 
 import httpx
 
-from inandout.schema.connector import ConnectorConfig
 
 
 def _resolve_secret(credential_ref: str | None) -> str | None:
@@ -75,17 +74,17 @@ class WebhookDispatcher:
 
     async def dispatch(
         self,
-        connector: ConnectorConfig,
+        connector: dict,
         datatype: str,
         operation: str,  # "create" | "update" | "delete"
         record_id: str,
         record: dict | None,
     ) -> dict | None:
         """POST a webhook event; returns a result dict or None if no webhook configured."""
-        if not connector.webhooks:
+        if not connector.get("webhooks", {}):
             return None
 
-        webhook_cfg = connector.webhooks
+        webhook_cfg = connector.get("webhooks", {})
         fan_out = getattr(webhook_cfg, "fan_out", None)
         if not fan_out:
             return None
@@ -96,13 +95,13 @@ class WebhookDispatcher:
             if getattr(route, "datatype", None) == datatype:
                 et = (getattr(route, "match", "") or "").lower()
                 if operation == "create" and ("creation" in et or et.endswith(".create")):
-                    event_type = route.match
+                    event_type = route.get("match")
                     break
                 if operation == "update" and ("change" in et or et.endswith(".update")):
-                    event_type = route.match
+                    event_type = route.get("match")
                     break
                 if operation == "delete" and ("delet" in et or et.endswith(".delete")):
-                    event_type = route.match
+                    event_type = route.get("match")
                     break
 
         if event_type is None:
@@ -126,7 +125,7 @@ class WebhookDispatcher:
         # registered at least one subscription (otherwise every UI mutation would
         # fire a failing outbound webhook before the engine is set up).
         if per_route and self._webhook_subscriptions is not None:
-            active_subs = self._webhook_subscriptions.get(connector.name, {})
+            active_subs = self._webhook_subscriptions.get(connector["name"], {})
             if not active_subs:
                 return None
 
@@ -134,7 +133,7 @@ class WebhookDispatcher:
         # subscription that matches this event_type.  Fall back to engine_url+path
         # only if no matching subscription is found.
         if per_route and self._webhook_subscriptions is not None:
-            active_subs = self._webhook_subscriptions.get(connector.name, {})
+            active_subs = self._webhook_subscriptions.get(connector["name"], {})
             cb_param = (
                 getattr(registration, "callback_url_runtime_param", "callback_url")
                 if registration
@@ -158,7 +157,7 @@ class WebhookDispatcher:
 
         if per_route:
             # FEAT-SIM-01: registration-based payload (e.g. Tripletex).
-            # Shape: {"subscriptionId": 0, "event": "<route.match>",
+            # Shape: {"subscriptionId": 0, "event": "<route.get("match")>",
             #         "id": <record_id>, "value": <record | null>}
             payload: dict = {
                 "subscriptionId": 0,
@@ -209,7 +208,7 @@ class WebhookDispatcher:
                 "duration_ms": duration_ms,
                 "payload_json": payload_json,
                 "sent_headers": headers,
-                "connector": connector.name,
+                "connector": connector["name"],
                 "datatype": datatype,
                 "operation": operation,
                 "record_id": record_id,
@@ -222,7 +221,7 @@ class WebhookDispatcher:
                 "payload_json": payload_json,
                 "sent_headers": headers,
                 "error": str(exc),
-                "connector": connector.name,
+                "connector": connector["name"],
                 "datatype": datatype,
                 "operation": operation,
                 "record_id": record_id,
@@ -245,7 +244,7 @@ class WebhookDispatcher:
 
     def dispatch_nowait(
         self,
-        connector: ConnectorConfig,
+        connector: dict,
         datatype: str,
         operation: str,
         record_id: str,

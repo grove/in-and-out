@@ -50,11 +50,11 @@ def build_ui_router() -> APIRouter:
         store: RecordStore = request.app.state.store
         counts: dict[str, dict[str, int]] = {}
         for conn in connectors:
-            counts[conn.name] = {}
-            for dt_name in conn.datatypes:
-                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+            counts[conn["name"]] = {}
+            for dt_name in conn["datatypes"]:
+                counts[conn["name"]][dt_name] = await store.count(conn["name"], dt_name)
         recent = request.app.state.event_bus.recent(limit=40)
-        connector_systems = {conn.name: conn.system for conn in connectors}
+        connector_systems = {conn["name"]: conn["system"] for conn in connectors}
         webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
         return templates.TemplateResponse(
             request,
@@ -74,10 +74,10 @@ def build_ui_router() -> APIRouter:
         counts: dict[str, dict[str, int]] = {}
         store: RecordStore = request.app.state.store
         for conn in connectors:
-            counts[conn.name] = {}
-            for dt_name in conn.datatypes:
-                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
-        connector_systems = {conn.name: conn.system for conn in connectors}
+            counts[conn["name"]] = {}
+            for dt_name in conn["datatypes"]:
+                counts[conn["name"]][dt_name] = await store.count(conn["name"], dt_name)
+        connector_systems = {conn["name"]: conn["system"] for conn in connectors}
         all_events = request.app.state.event_bus.recent(limit=200)
         request_events = [e for e in all_events if e.event_type == "request"]
         return templates.TemplateResponse(
@@ -101,10 +101,10 @@ def build_ui_router() -> APIRouter:
         counts: dict[str, dict[str, int]] = {}
         store: RecordStore = request.app.state.store
         for conn in connectors:
-            counts[conn.name] = {}
-            for dt_name in conn.datatypes:
-                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
-        connector_systems = {conn.name: conn.system for conn in connectors}
+            counts[conn["name"]] = {}
+            for dt_name in conn["datatypes"]:
+                counts[conn["name"]][dt_name] = await store.count(conn["name"], dt_name)
+        connector_systems = {conn["name"]: conn["system"] for conn in connectors}
         webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
         return templates.TemplateResponse(
             request,
@@ -141,10 +141,10 @@ def build_ui_router() -> APIRouter:
         counts: dict[str, dict[str, int]] = {}
         store: RecordStore = request.app.state.store
         for conn in connectors:
-            counts[conn.name] = {}
-            for dt_name in conn.datatypes:
-                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
-        connector_systems = {conn.name: conn.system for conn in connectors}
+            counts[conn["name"]] = {}
+            for dt_name in conn["datatypes"]:
+                counts[conn["name"]][dt_name] = await store.count(conn["name"], dt_name)
+        connector_systems = {conn["name"]: conn["system"] for conn in connectors}
         all_events = request.app.state.event_bus.recent(limit=200)
         webhook_events = [e for e in all_events if e.event_type == "webhook"]
         webhook_subscriptions = getattr(request.app.state, "webhook_subscriptions", {})
@@ -163,19 +163,19 @@ def build_ui_router() -> APIRouter:
     @router.get("/ui/{connector_name}/{datatype}", response_class=HTMLResponse)
     async def table_view(request: Request, connector_name: str, datatype: str):
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return HTMLResponse("<h1>Not Found</h1>", status_code=404)
         store: RecordStore = request.app.state.store
-        dt_cfg = connector.datatypes[datatype]
+        dt_cfg = connector["datatypes"][datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         records = await store.list_all(connector_name, datatype, include_deleted=True)
         live_count = await store.count(connector_name, datatype)
         counts: dict[str, dict[str, int]] = {}
         for conn in connectors:
-            counts[conn.name] = {}
-            for dt_name in conn.datatypes:
-                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+            counts[conn["name"]] = {}
+            for dt_name in conn["datatypes"]:
+                counts[conn["name"]][dt_name] = await store.count(conn["name"], dt_name)
         return templates.TemplateResponse(
             request,
             "table.html",
@@ -199,11 +199,11 @@ def build_ui_router() -> APIRouter:
     async def table_rows_fragment(request: Request, connector_name: str, datatype: str):
         """Return all table rows (live + deleted) for HTMX refresh."""
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return HTMLResponse("")
         store: RecordStore = request.app.state.store
-        dt_cfg = connector.datatypes[datatype]
+        dt_cfg = connector["datatypes"][datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         records = await store.list_all(connector_name, datatype, include_deleted=True)
         columns = _columns_from_cfg(dt_cfg)
@@ -217,8 +217,8 @@ def build_ui_router() -> APIRouter:
     async def table_count_fragment(request: Request, connector_name: str, datatype: str):
         """Return live (non-deleted) record count as plain text."""
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return Response("0", media_type="text/plain")
         store: RecordStore = request.app.state.store
         count = await store.count(connector_name, datatype)
@@ -232,8 +232,8 @@ def build_ui_router() -> APIRouter:
     ):
         """Return only the mutation history list for live refresh."""
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return HTMLResponse("")
         store: RecordStore = request.app.state.store
         mutations = await store.recent_mutations(connector_name, datatype, limit=20)
@@ -246,8 +246,8 @@ def build_ui_router() -> APIRouter:
     ):
         """Compact record view for the side panel on the table page."""
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return HTMLResponse('<p class="text-red-400 text-sm">Not found.</p>', status_code=404)
         store: RecordStore = request.app.state.store
         record = await store.get_by_id(connector_name, datatype, record_id)
@@ -385,8 +385,8 @@ def build_ui_router() -> APIRouter:
     @router.get("/ui/{connector_name}/{datatype}/{record_id}", response_class=HTMLResponse)
     async def record_view(request: Request, connector_name: str, datatype: str, record_id: str):
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return HTMLResponse("<h1>Not Found</h1>", status_code=404)
         store: RecordStore = request.app.state.store
         record = await store.get_by_id(connector_name, datatype, record_id)
@@ -395,9 +395,9 @@ def build_ui_router() -> APIRouter:
         display = {k: v for k, v in record.items() if k != "__deleted_at__"}
         counts: dict[str, dict[str, int]] = {}
         for conn in connectors:
-            counts[conn.name] = {}
-            for dt_name in conn.datatypes:
-                counts[conn.name][dt_name] = await store.count(conn.name, dt_name)
+            counts[conn["name"]] = {}
+            for dt_name in conn["datatypes"]:
+                counts[conn["name"]][dt_name] = await store.count(conn["name"], dt_name)
         return templates.TemplateResponse(
             request,
             "record.html",
@@ -421,8 +421,8 @@ def build_ui_router() -> APIRouter:
     async def admin_get(request: Request, connector_name: str, datatype: str, record_id: str):
         """Return the current record as JSON with an ETag header for optimistic locking."""
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return Response(status_code=404)
         store: RecordStore = request.app.state.store
         record = await store.get_by_id(connector_name, datatype, record_id)
@@ -435,15 +435,15 @@ def build_ui_router() -> APIRouter:
     @router.post("/admin/{connector_name}/{datatype}", response_class=HTMLResponse)
     async def admin_create(request: Request, connector_name: str, datatype: str):
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return Response(status_code=404)
         store: RecordStore = request.app.state.store
         try:
             body = await request.json()
         except Exception:
             body = {}
-        dt_cfg = connector.datatypes[datatype]
+        dt_cfg = connector["datatypes"][datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         record = await store.create(connector_name, datatype, body, pk_field=pk_field, source="ui")
         evs = await store.recent_mutations(connector_name, datatype, 1)
@@ -459,8 +459,8 @@ def build_ui_router() -> APIRouter:
     @router.put("/admin/{connector_name}/{datatype}/{record_id}", response_class=HTMLResponse)
     async def admin_update(request: Request, connector_name: str, datatype: str, record_id: str):
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return Response(status_code=404)
         store: RecordStore = request.app.state.store
         # Optimistic locking: reject the update if the caller's version is stale.
@@ -476,10 +476,11 @@ def build_ui_router() -> APIRouter:
             body = await request.json()
         except Exception:
             body = {}
-        dt_cfg = connector.datatypes[datatype]
+        dt_cfg = connector["datatypes"][datatype]
         cursor_field: str | None = None
-        if dt_cfg.ingestion and dt_cfg.ingestion.list.incremental:
-            cursor_field = dt_cfg.ingestion.list.incremental.cursor_field
+        inc = ((dt_cfg.get("ingestion") or {}).get("list") or {}).get("incremental")
+        if inc and inc.get("enabled"):
+            cursor_field = inc.get("cursor_field")
         if cursor_field:
             from datetime import datetime, timezone
 
@@ -508,8 +509,8 @@ def build_ui_router() -> APIRouter:
     @router.delete("/admin/{connector_name}/{datatype}/{record_id}")
     async def admin_delete(request: Request, connector_name: str, datatype: str, record_id: str):
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return Response(status_code=404)
         store: RecordStore = request.app.state.store
         deleted = await store.delete(connector_name, datatype, record_id, source="ui")
@@ -521,7 +522,7 @@ def build_ui_router() -> APIRouter:
         disp = request.app.state.dispatcher
         await disp.dispatch(connector, datatype, "delete", record_id, None)
         # Return a struck-through row with a Restore button instead of removing.
-        dt_cfg = connector.datatypes[datatype]
+        dt_cfg = connector["datatypes"][datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         record = await store.get_by_id(connector_name, datatype, record_id)
         return HTMLResponse(_row_html(connector_name, datatype, pk_field, record or {}))
@@ -531,8 +532,8 @@ def build_ui_router() -> APIRouter:
     )
     async def admin_restore(request: Request, connector_name: str, datatype: str, record_id: str):
         connectors = request.app.state.connectors
-        connector = next((c for c in connectors if c.name == connector_name), None)
-        if connector is None or datatype not in connector.datatypes:
+        connector = next((c for c in connectors if c["name"] == connector_name), None)
+        if connector is None or datatype not in connector["datatypes"]:
             return Response(status_code=404)
         store: RecordStore = request.app.state.store
         restored = await store.restore(connector_name, datatype, record_id, source="ui")
@@ -543,7 +544,7 @@ def build_ui_router() -> APIRouter:
             request.app.state.event_bus.publish_mutation(evs[0])
         disp = request.app.state.dispatcher
         await disp.dispatch(connector, datatype, "create", record_id, restored)
-        dt_cfg = connector.datatypes[datatype]
+        dt_cfg = connector["datatypes"][datatype]
         pk_field = _pk_from_cfg(dt_cfg)
         return HTMLResponse(_row_html(connector_name, datatype, pk_field, restored))
 
@@ -556,7 +557,7 @@ def build_ui_router() -> APIRouter:
 
 
 def _pk_from_cfg(dt_cfg) -> str:
-    pk = (dt_cfg.ingestion.primary_key if dt_cfg.ingestion else None) or "id"
+    pk = ((dt_cfg.get("ingestion") or {}).get("primary_key")) if isinstance(dt_cfg, dict) else None
     if isinstance(pk, str):
         return pk
     if isinstance(pk, list) and pk:
@@ -566,7 +567,7 @@ def _pk_from_cfg(dt_cfg) -> str:
 
 def _columns_from_cfg(dt_cfg) -> list[str] | None:
     """Return column names derived from seed data, or None if no seed data."""
-    seed = dt_cfg.simulator.seed_data if dt_cfg.simulator else []
+    seed = (dt_cfg.get("simulator") or {}).get("seed_data", []) if isinstance(dt_cfg, dict) else []
     if seed:
         return [k for k in seed[0] if not k.startswith("__")]
     return None
