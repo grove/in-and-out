@@ -9,7 +9,7 @@
 #   - The schema-validation rule it triggers (CFG-NNN), where applicable
 #
 # Copy this file to connectors/<your-system>.yaml and customise.
-# Run `python scripts/validate_connector_fixtures.py connectors/` to validate.
+# Validate with: just validate-connectors
 # ---------------------------------------------------------------------------
 
 # Schema version — must be 1. Governs backward-compat rules.

@@ -207,9 +207,9 @@ docs-serve:
 # Validation
 # ---------------------------------------------------------------------------
 
-# Validate connector fixture files
+# Validate connector fixture files (also runs as part of `just test`)
 validate-connectors:
-    uv run python scripts/validate_connector_fixtures.py
+    uv run --package inandout pytest engine/tests/unit/test_connector_fixtures.py -v
 
 # ---------------------------------------------------------------------------
 # Housekeeping

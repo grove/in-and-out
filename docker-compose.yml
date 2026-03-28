@@ -34,7 +34,9 @@ services:
       - demo
 
   migrate:
-    build: .
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
     command: inandout db upgrade --config /config/ingestion.yaml
     depends_on:
       postgres:
@@ -45,7 +47,9 @@ services:
       INOUT_DATABASE_URL: postgresql://inandout:inandout@postgres:5432/inandout
 
   ingest:
-    build: .
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
     command: inandout ingest run --config /config/ingestion.yaml
     depends_on:
       migrate:
@@ -61,7 +65,9 @@ services:
       INOUT_SALESFORCE_BASE_URL: http://simulator:6100/salesforce
 
   writeback:
-    build: .
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
     command: inandout writeback run --config /config/writeback.yaml
     depends_on:
       migrate:
