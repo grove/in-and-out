@@ -170,9 +170,212 @@ for connector in connectors:
 None.  All required information is already in `connector.auth`.  The simulator
 reuses the same `INOUT_CREDENTIAL_<REF>` env var convention the engine uses.
 
+The `required_scopes` per-datatype declarations (`DatatypeScopes.read` /
+`DatatypeScopes.write`) were added to `DatatypeConfig` in a separate commit and
+are already available — they are the data source for the scope enforcement
+described below.
+
 ---
 
-## Swagger UI — zero friction
+## OAuth2 scope enforcement (Layer 1c)
+
+> **Precondition**: Layer 1 (credential verification) is in place.  Scope
+> enforcement is layered on top — a request that fails the Bearer token check
+> never reaches scope validation.  A connector with no `required_scopes`
+> declared on any datatype skips scope checks entirely (opt-in).
+
+### Why it belongs in the plan
+
+The existing plan's Layer 1 checks *who* the caller is (valid token), but not
+*what they're allowed to do*.  With `required_scopes` now in the connector
+schema, the simulator can check *what scopes the token was issued with* and
+enforce the same per-datatype, per-operation rules that the real provider would.
+
+This makes two important test scenarios possible:
+1. **Insufficient scope on writeback** — token was issued with only read scopes;
+   writeback should get `403 {"error": "insufficient_scope"}`, not a silent
+   success or a 401.
+2. **Subset deployment** — a project deploys only the `contacts` datatype.
+   The engine requests only `crm.objects.contacts.read`; an attempt to call the
+   `companies` list endpoint should get a 403, confirming the scope request was
+   correctly computed.
+
+---
+
+### Data flow
+
+```
+POST /token  (scope=crm.objects.contacts.read crm.objects.contacts.write)
+    │
+    ▼
+OAuthTokenStore.issue(granted_scopes=[...])
+    │  returns sim_token_hubspot_<nonce>
+    ▼
+GET /crm/v3/objects/contacts          ← checks token.granted_scopes ⊇ {contacts.read}  → 200
+PATCH /crm/v3/objects/contacts/{id}   ← checks token.granted_scopes ⊇ {contacts.write} → 200
+GET /crm/v3/objects/companies         ← checks token.granted_scopes ⊇ {companies.read} → 403
+```
+
+---
+
+### `OAuthTokenStore` changes (extends Layer 1b design)
+
+The Layer 1b `OAuthTokenStore` already tracks issued tokens.  Add `granted_scopes`
+to `IssuedToken`:
+
+```python
+@dataclass
+class IssuedToken:
+    access_token: str
+    refresh_token: str
+    issued_at: float = field(default_factory=time.monotonic)
+    expires_in: int = 3600
+    revoked: bool = False
+    granted_scopes: list[str] = field(default_factory=list)  # NEW
+
+    def has_scope(self, required: str) -> bool:
+        """Return True if *required* is in the granted scope set."""
+        return required in self.granted_scopes
+```
+
+`OAuthTokenStore.issue()` gains a `scopes` parameter:
+
+```python
+def issue(self, scopes: list[str] = (), expires_in: int = 3600) -> IssuedToken:
+    tok = IssuedToken(
+        ...,
+        granted_scopes=list(scopes),
+    )
+    ...
+```
+
+---
+
+### Updated token endpoint
+
+The token endpoint parses the `scope` form field (space-separated, standard
+OAuth2 wire format) and passes it to the store:
+
+```python
+@router.post(token_path)
+async def _token(
+    grant_type: str = Form(...),
+    client_id: str | None = Form(default=None),
+    client_secret: str | None = Form(default=None),
+    scope: str | None = Form(default=None),         # NEW
+    refresh_token: str | None = Form(default=None),
+):
+    store: OAuthTokenStore = request.app.state.oauth_stores[connector.name]
+    requested_scopes = scope.split() if scope else []
+
+    if grant_type == "client_credentials":
+        # ... validate client_id / client_secret (unchanged from Layer 1b) ...
+        tok = store.issue(scopes=requested_scopes)       # pass scopes through
+        return {
+            "access_token": tok.access_token,
+            "token_type": "bearer",
+            "scope": " ".join(tok.granted_scopes),       # echo back
+            "refresh_token": tok.refresh_token,
+            "expires_in": tok.expires_in,
+        }
+```
+
+**The simulator grants exactly what was requested** — it does not narrow or
+expand the scope.  Scope negotiation (e.g. provider refusing an unknown scope)
+is out of scope for now.
+
+---
+
+### Per-route scope check in `build_connector_router()`
+
+After the Bearer token is validated (Layer 1), check that the token's
+`granted_scopes` contains the required scope for this specific route.  This is
+a second dependency, or a combined dependency that checks both:
+
+```python
+def _make_scope_check(required_scope: str, store: OAuthTokenStore):
+    """Return a FastAPI dependency that enforces *required_scope*."""
+    async def _dep(request: Request):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            # Layer 1 will already reject this; defensive only.
+            return
+        token = auth_header.removeprefix("Bearer ")
+        issued = store.get(token)          # new store.get() method → IssuedToken | None
+        if issued is None:
+            return  # Layer 1 handles invalid tokens
+        if not issued.has_scope(required_scope):
+            raise HTTPException(
+                403,
+                detail={
+                    "error": "insufficient_scope",
+                    "required_scope": required_scope,
+                    "granted_scopes": issued.granted_scopes,
+                },
+            )
+    return _dep
+```
+
+Attached per-route in `build_connector_router()`:
+
+```python
+# List / lookup (read operations)
+read_scope = dt_cfg.required_scopes.read[0] if (
+    dt_cfg.required_scopes and dt_cfg.required_scopes.read
+) else None
+read_deps = [Depends(_make_scope_check(read_scope, store))] if read_scope else []
+
+# Write operations (insert / update / delete / archive / upsert)
+write_scope = dt_cfg.required_scopes.write[0] if (
+    dt_cfg.required_scopes and dt_cfg.required_scopes.write
+) else None
+write_deps = [Depends(_make_scope_check(write_scope, store))] if write_scope else []
+```
+
+Note: the plan uses the first declared scope as "the" required scope per
+operation class.  Multi-scope AND-logic (all must be present) is a trivial
+extension but deferred.
+
+---
+
+### Interaction with the fault injection admin API (Layer 1b)
+
+The `PUT /{c}/admin/oauth/scopes` fault injection endpoint (from Layer 1b)
+manipulates the *granted_scopes* on every active token:
+
+```python
+# Override granted scopes on all active tokens — simulates a re-issued token
+# with reduced permissions (e.g. admin revoked write access via the provider portal).
+PUT /{c}/admin/oauth/scopes
+body: {"granted": ["crm.objects.contacts.read"]}
+```
+
+This replaces `IssuedToken.granted_scopes` in-place without revoking the token,
+so the engine continues to use the same Bearer value but suddenly gets 403 on
+write operations.  The engine should detect and surface this clearly.
+
+---
+
+### Behaviour matrix
+
+| Scenario | `required_scopes` on datatype? | Scope in token request? | Result |
+|---|---|---|---|
+| OAuth2 connector, no `required_scopes` | No | Any / none | No scope check — existing Layer 1 token validity check only |
+| OAuth2 connector, scope declared | Yes | Correct scope | 200 |
+| OAuth2 connector, scope declared | Yes | Missing scope | 403 `insufficient_scope` |
+| OAuth2 connector, scope declared | Yes | Empty (engine bug: no `scope` sent) | 403 `insufficient_scope` on read/write routes |
+| `api_key` connector | n/a | n/a | No scope check (scopes are an OAuth2 concept) |
+
+---
+
+### No changes needed outside `route_builder.py`
+
+- `OAuthTokenStore` lives in `simulator/oauth_store.py` (new file)  
+- `route_builder.py` — token endpoint + per-route scope dependency  
+- No changes to `app.py`, `seed.py`, `webhooks.py`, or any config model  
+- The `DatatypeScopes` model is already in `inandout.schema.connector`
+
+---
 
 The simulator already has a custom `/docs` endpoint per connector
 (`_make_swagger_endpoint` in `app.py`) that injects JavaScript into the page
@@ -717,9 +920,10 @@ predictable.
 | **P0** | Connector API credential verification | Uses existing `connector.auth` config | Catches engine config bugs at test time |
 | **P1a** | Auth fault injection — OAuth2 token store | None (in-process state) | Enables token expiry / revocation / refresh resilience tests |
 | **P1b** | Auth fault injection — api_key block/rotate | None (in-process state) | Enables Tripletex session revocation + credential rotation tests |
-| **P1c** | Admin API key | `INOUT_SIMULATOR_ADMIN_KEY` | Required once fault injection endpoints are exposed in CI |
+| **P1c** | OAuth2 scope enforcement | None — uses `datatype.required_scopes` | Catches missing/wrong scope in engine token requests; enables subset-deployment testing |
+| **P1d** | Admin API key | `INOUT_SIMULATOR_ADMIN_KEY` | Required once fault injection endpoints are exposed in CI |
 | **P2** | UI Basic auth | `INOUT_SIMULATOR_UI_USER` + `INOUT_SIMULATOR_UI_PASS` | Needed for shared / staging |
-| **P3** | Admin IP allowlist | `INOUT_SIMULATOR_ALLOW_ADMIN_IPS` | Defence-in-depth; low effort once P1c is in |
+| **P3** | Admin IP allowlist | `INOUT_SIMULATOR_ALLOW_ADMIN_IPS` | Defence-in-depth; low effort once P1d is in |
 
 ---
 
