@@ -14,6 +14,7 @@
 | [PLAN_ONBOARDING_BLUE_GREEN.md](PLAN_ONBOARDING_BLUE_GREEN.md) | Blue/Green source table onboarding evaluation | 📋 Draft |
 | [PLAN_ONBOARDING_SHADOW_MODE.md](PLAN_ONBOARDING_SHADOW_MODE.md) | Shadow mode onboarding evaluation | 📋 Draft |
 | [PLAN_RECORD_LINKAGE.md](PLAN_RECORD_LINKAGE.md) | Record linkage in in-and-out + OSI-Mapping | 📋 Draft |
+| [PLAN_HOUSEKEEPING.md](PLAN_HOUSEKEEPING.md) | Repository housekeeping — Docker, Compose, docs consolidation | 📋 Draft |
 
 ## Reports
 

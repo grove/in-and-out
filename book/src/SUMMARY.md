@@ -7,6 +7,7 @@
 - [Architecture Overview](./architecture.md)
 - [Installation](./installation.md)
 - [Getting Started](./getting-started.md)
+- [Deployment Playbook](./deployment.md)
 
 # Reference
 
@@ -21,3 +22,7 @@
 - [Database & Migrations](./database.md)
 - [OSI-Mapping Integration Contract](./osi-mapping-contract.md)
 - [FAQ](./faq.md)
+
+# Operations
+
+- [Troubleshooting](./troubleshooting.md)

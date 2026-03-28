@@ -6,7 +6,7 @@ services:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/prometheus:/etc/prometheus/prometheus:ro
     ports:
-      - "9090:9090"
+      - "9092:9090"
     networks:
       - inandout
 
