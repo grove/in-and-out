@@ -22,8 +22,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from inandout.config.connector import ConnectorConfig
-from inandout.config.pagination import PaginationStrategy
+from inandout.schema.connector import ConnectorConfig
+from inandout.schema.pagination import PaginationStrategy
 from inandout.simulator.events import EventBus
 from inandout.simulator.store import RecordStore
 from inandout.simulator.webhooks import WebhookDispatcher

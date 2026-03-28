@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from inandout.config.connector import ConnectorConfig
+from inandout.schema.connector import ConnectorConfig
 from inandout.simulator.store import RecordStore
 
 

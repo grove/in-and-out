@@ -10,8 +10,8 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from inandout.config.connector import ConnectorConfig
-from inandout.config.loader import load_connector
+from inandout.schema.connector import ConnectorConfig
+from inandout.schema.loader import load_connector
 from inandout.simulator.events import EventBus
 from inandout.simulator.route_builder import build_connector_router
 from inandout.simulator.seed import seed_from_connector

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from inandout.config.connector import ConnectorConfig
+from inandout.schema.connector import ConnectorConfig
 
 
 def _resolve_secret(credential_ref: str | None) -> str | None:
