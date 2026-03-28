@@ -34,7 +34,9 @@ def test_simulator_does_not_import_inandout_config() -> None:
         source = py_file.read_text(encoding="utf-8")
         for module in _collect_import_modules(source):
             if module.startswith("inandout.config"):
-                violations.append(f"{py_file.relative_to(_SIMULATOR_DIR.parent.parent.parent)}: {module!r}")
+                violations.append(
+                    f"{py_file.relative_to(_SIMULATOR_DIR.parent.parent.parent)}: {module!r}"
+                )
 
     assert not violations, (
         "Simulator files must import from inandout.schema, not inandout.config.\n"
