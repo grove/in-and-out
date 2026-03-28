@@ -43,7 +43,7 @@ def sim_run(
     store: str = typer.Option(
         "memory",
         "--store",
-        help="Storage backend: 'memory' or 'sqlite:///path.db'.",
+        help="Storage backend: 'memory', 'sqlite:///path.db', or a postgres:// DSN.",
         show_default=True,
         envvar="INOUT_SIMULATOR_STORE",
     ),

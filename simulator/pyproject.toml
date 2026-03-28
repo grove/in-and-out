@@ -15,6 +15,8 @@ dependencies = [
     "watchfiles>=1.0",
     "typer>=0.9",
     "rich>=13.0",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
 ]
 
 [project.scripts]

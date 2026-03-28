@@ -27,7 +27,14 @@ def _make_store(store_dsn: str) -> RecordStore:
 
         path = store_dsn[len("sqlite:///") :]
         return SQLiteStore(path)
-    raise ValueError(f"Unknown store DSN: {store_dsn!r}.  Use 'memory' or 'sqlite:///path.db'.")
+    if store_dsn.startswith(("postgres://", "postgresql://")):
+        from inandout_simulator.store.postgres import PostgresStore
+
+        return PostgresStore(store_dsn)
+    raise ValueError(
+        f"Unknown store DSN: {store_dsn!r}.  "
+        "Use 'memory', 'sqlite:///path.db', or a postgres:// DSN."
+    )
 
 
 # Injected into every connector Swagger page to make 4xx/5xx responses visually prominent.
