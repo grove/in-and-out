@@ -10,7 +10,7 @@ and behaviour declared in a ``SimulatorConfig``.  No per-system Python code is
 required — connector-specific details (fixture records, route discriminators,
 cursor-URL templates, response envelope fields) live entirely in config.
 """
-from inandout.simulators.config import (
+from inandout.stubs.config import (
     ErrorInjection,
     ExtraRoute,
     RouteDiscriminator,
@@ -18,13 +18,13 @@ from inandout.simulators.config import (
     SimulatorConfig,
     SimulatorDatatypeConfig,
 )
-from inandout.simulators.generic import GenericSimulator
-from inandout.simulators.hubspot import (
+from inandout.stubs.generic import GenericSimulator
+from inandout.stubs.hubspot import (
     HUBSPOT_BASE_URL,
     make_hubspot_connector_config,
     make_hubspot_sim_config,
 )
-from inandout.simulators.salesforce import (
+from inandout.stubs.salesforce import (
     make_salesforce_connector_config,
     make_salesforce_sim_config,
 )

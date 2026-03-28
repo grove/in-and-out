@@ -27,8 +27,8 @@ What comes from ``SimulatorConfig``
 
 Usage::
 
-    from inandout.simulators.config import SimulatorConfig, SimulatorDatatypeConfig
-    from inandout.simulators.generic import GenericSimulator
+    from inandout.stubs.config import SimulatorConfig, SimulatorDatatypeConfig
+    from inandout.stubs.generic import GenericSimulator
 
     sim_cfg = SimulatorConfig(
         datatypes={
@@ -55,7 +55,7 @@ import respx
 
 from inandout.config.connector import ConnectorConfig
 from inandout.config.pagination import PaginationStrategy
-from inandout.simulators.config import ExtraRoute, SimulatorConfig, SimulatorDatatypeConfig
+from inandout.stubs.config import ExtraRoute, SimulatorConfig, SimulatorDatatypeConfig
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +308,12 @@ class GenericSimulator:
                 offset = int(raw)
             else:
                 offset = 0
+            # Honour ?limit=N (or whatever page_size_param is) sent by the engine.
+            # sim_dt.page_size is a test override that always takes precedence.
+            if sim_dt.page_size is None and pagination.cursor.page_size_param is not None:
+                raw_ps = request.url.params.get(pagination.cursor.page_size_param)
+                if raw_ps and raw_ps.isdigit():
+                    page_size = int(raw_ps)
         elif pagination.strategy == PaginationStrategy.offset:
             offset_cfg = pagination.offset or {}
             param = (

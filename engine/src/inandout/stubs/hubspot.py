@@ -14,12 +14,12 @@ from inandout.config.connector import (
 )
 from inandout.config.ingestion import HistoryMode, IngestionConfig, ListConfig, ScheduleConfig
 from inandout.config.pagination import CursorConfig, PaginationConfig, PaginationStrategy
-from inandout.simulators.config import (
+from inandout.stubs.config import (
     ExtraRoute,
     SimulatorConfig,
     SimulatorDatatypeConfig,
 )
-from inandout.simulators.generic import GenericSimulator
+from inandout.stubs.generic import GenericSimulator
 
 # ---------------------------------------------------------------------------
 # Default fixture data
@@ -99,6 +99,8 @@ def make_hubspot_sim_config(
 
 def make_hubspot_connector_config(
     base_url: str = "https://api.hubapi.com",
+    cursor_page_size: int | None = 100,
+    cursor_page_size_param: str | None = "limit",
 ) -> ConnectorConfig:
     """Build a minimal valid HubSpot connector config for use in tests."""
     return ConnectorConfig(
@@ -128,6 +130,8 @@ def make_hubspot_connector_config(
                                 cursor=CursorConfig(
                                     request_param="after",
                                     response_path="paging.next.after",
+                                    page_size=cursor_page_size,
+                                    page_size_param=cursor_page_size_param,
                                 ),
                             ),
                         )

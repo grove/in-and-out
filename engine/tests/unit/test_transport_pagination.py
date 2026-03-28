@@ -255,3 +255,102 @@ async def test_cursor_sends_cursor_param_on_second_request():
     assert "after" not in captured_requests[0]
     # Second request: cursor param set to "tok-XYZ"
     assert captured_requests[1].get("after") == "tok-XYZ"
+
+
+# ---------------------------------------------------------------------------
+# Cursor page_size / page_size_param tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_cursor_page_size_sent_on_every_request():
+    """When page_size + page_size_param are configured, the limit is sent on every request."""
+    os.environ["INOUT_CREDENTIAL_TEST_KEY"] = "test-secret"
+
+    page1_data = {
+        "results": [{"id": "1"}],
+        "paging": {"next": {"after": "tok-XYZ"}},
+    }
+    page2_data = {
+        "results": [{"id": "2"}],
+        "paging": {},
+    }
+
+    connector = make_connector()
+    list_config = ListConfig(
+        method="GET",
+        path="/items",
+        record_selector="results",
+        pagination=PaginationConfig(
+            strategy=PaginationStrategy.cursor,
+            cursor=CursorConfig(
+                response_path="paging.next.after",
+                request_param="after",
+                page_size=50,
+                page_size_param="limit",
+            ),
+        ),
+    )
+
+    captured_params: list[dict] = []
+
+    with respx.mock(base_url="https://api.example.com", assert_all_called=False) as mock:
+        mock.get("/items").mock(
+            side_effect=[
+                httpx.Response(200, content=orjson.dumps(page1_data)),
+                httpx.Response(200, content=orjson.dumps(page2_data)),
+            ]
+        )
+
+        async with HttpTransportAdapter(connector) as adapter:
+            original_request = adapter._request
+
+            async def capturing_request(method, path, **kwargs):
+                captured_params.append(kwargs.get("params", {}))
+                return await original_request(method, path, **kwargs)
+
+            adapter._request = capturing_request  # type: ignore[method-assign]
+
+            pages: list[list] = []
+            async for page in adapter.fetch_pages(list_config):
+                pages.append(page)
+
+    assert len(pages) == 2
+    # limit=50 must appear on BOTH requests
+    assert captured_params[0].get("limit") == "50"
+    assert captured_params[1].get("limit") == "50"
+    # cursor param only on second request
+    assert "after" not in captured_params[0]
+    assert captured_params[1].get("after") == "tok-XYZ"
+
+
+@pytest.mark.anyio
+async def test_cursor_no_page_size_means_no_limit_param():
+    """Without page_size configured, no limit param is injected into requests."""
+    os.environ["INOUT_CREDENTIAL_TEST_KEY"] = "test-secret"
+
+    page_data = {"results": [{"id": "1"}], "paging": {}}
+
+    connector = make_connector()
+    list_config = make_cursor_list_config()  # no page_size / page_size_param
+
+    captured_params: list[dict] = []
+
+    with respx.mock(base_url="https://api.example.com") as mock:
+        mock.get("/items").mock(
+            return_value=httpx.Response(200, content=orjson.dumps(page_data))
+        )
+
+        async with HttpTransportAdapter(connector) as adapter:
+            original_request = adapter._request
+
+            async def capturing_request(method, path, **kwargs):
+                captured_params.append(kwargs.get("params", {}))
+                return await original_request(method, path, **kwargs)
+
+            adapter._request = capturing_request  # type: ignore[method-assign]
+
+            async for _ in adapter.fetch_pages(list_config):
+                pass
+
+    assert len(captured_params) == 1
+    assert "limit" not in captured_params[0]

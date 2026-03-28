@@ -30,6 +30,15 @@
         },
         "request_param": {
           "type": "string"
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of records to request per page (e.g. HubSpot limit param). Omit to use API default."
+        },
+        "page_size_param": {
+          "type": "string",
+          "description": "Query parameter name used to send page_size. Required when page_size is set."
         }
       }
     },

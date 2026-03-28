@@ -1,8 +1,13 @@
-# These tests have moved to simulator/tests/test_simulator_events.py
-# (inandout.simulator was removed — use inandout_simulator instead)
+"""Unit tests for the simulator EventBus."""
+
+from __future__ import annotations
+
+import asyncio
+
 import pytest
 
-pytest.skip("moved to simulator/tests/test_simulator_events.py", allow_module_level=True)
+from inandout_simulator.events import EventBus, SimulatorEvent
+from inandout_simulator.store import MutationEvent
 
 
 def _mutation(record_id: str = "1", operation: str = "create") -> MutationEvent:
@@ -137,7 +142,9 @@ async def test_recent_returns_empty_before_any_publish() -> None:
 
 
 async def test_to_sse_format() -> None:
-    ev = SimulatorEvent(event_type="mutation", connector="acme", datatype="contacts", record_id="7")
+    ev = SimulatorEvent(
+        event_type="mutation", connector="acme", datatype="contacts", record_id="7"
+    )
     sse = ev.to_sse()
     assert sse.startswith("event: mutation\n")
     assert "acme" in sse

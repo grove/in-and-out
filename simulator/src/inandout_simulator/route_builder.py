@@ -130,6 +130,21 @@ def _build_openapi_extra(
                         "description": "Cursor token for the next page (from previous response)",
                     }
                 )
+                # Expose page_size_param in Swagger UI if the connector configures one
+                cursor_cfg = pagination.get("cursor", {})
+                if cursor_cfg.get("page_size_param"):
+                    params.append(
+                        {
+                            "name": cursor_cfg["page_size_param"],
+                            "in": "query",
+                            "required": False,
+                            "schema": {
+                                "type": "integer",
+                                "default": cursor_cfg.get("page_size", 10),
+                            },
+                            "description": "Maximum records per page",
+                        }
+                    )
             elif strategy == "offset":
                 off_cfg = pagination.get("offset", {}) or {}
                 off_p = off_cfg.get("param", "offset") if isinstance(off_cfg, dict) else "offset"
@@ -418,6 +433,12 @@ def build_connector_router(
                             seg = raw_cursor.rstrip("/").split("/")[-1]
                             if seg.lstrip("-").isdigit():
                                 offset = int(seg)
+                        # Honour page_size_param if the connector declares one (e.g. ?limit=100)
+                        ps_param = _pagination.get("cursor", {}).get("page_size_param")
+                        if ps_param:
+                            raw_ps = params.get(ps_param)
+                            if raw_ps and raw_ps.isdigit():
+                                effective_page_size = int(raw_ps)
 
                     elif _strategy == "offset":
                         off_cfg = _pagination.get("offset", {}) or {}

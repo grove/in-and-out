@@ -23,14 +23,14 @@ from inandout.config.connector import (
 )
 from inandout.config.ingestion import HistoryMode, IngestionConfig, ListConfig, ScheduleConfig
 from inandout.config.pagination import CursorConfig, PaginationConfig, PaginationStrategy
-from inandout.simulators.config import (
+from inandout.stubs.config import (
     ExtraRoute,
     RouteDiscriminator,
     SimulatorAuthConfig,
     SimulatorConfig,
     SimulatorDatatypeConfig,
 )
-from inandout.simulators.generic import GenericSimulator
+from inandout.stubs.generic import GenericSimulator
 
 # ---------------------------------------------------------------------------
 # Module-level constants (kept for backward compat — tests import them)

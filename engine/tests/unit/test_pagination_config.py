@@ -98,6 +98,27 @@ def test_offset_dict_set():
     assert cfg.offset["param"] == "skip"
 
 
+# --- CursorConfig: page_size and page_size_param ---
+
+def test_cursor_config_with_page_size_and_param():
+    cfg = CursorConfig(response_path="next", request_param="after", page_size=100, page_size_param="limit")
+    assert cfg.page_size == 100
+    assert cfg.page_size_param == "limit"
+
+
+def test_cursor_config_page_size_without_param_raises():
+    """page_size without page_size_param must fail with a clear error."""
+    with pytest.raises(ValidationError, match="page_size_param is required"):
+        CursorConfig(response_path="next", request_param="after", page_size=100)
+
+
+def test_cursor_config_no_page_size_no_param_ok():
+    """Omitting both page_size and page_size_param is valid (no limit injected)."""
+    cfg = CursorConfig(response_path="next", request_param="after")
+    assert cfg.page_size is None
+    assert cfg.page_size_param is None
+
+
 def test_round_trip_json_cursor():
     cursor = CursorConfig(response_path="meta.cursor", request_param="page_token")
     cfg = PaginationConfig(strategy="cursor", cursor=cursor)

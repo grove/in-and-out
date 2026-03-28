@@ -29,6 +29,8 @@ class CursorConfig(BaseModel):
 
     response_path: str
     request_param: str | None = None
+    page_size: int | None = None         # optional page size sent on every request (e.g. HubSpot limit=100)
+    page_size_param: str | None = None   # query param name for page size — required when page_size is set
 
     @model_validator(mode="after")
     def request_param_required(self) -> "CursorConfig":
@@ -36,6 +38,10 @@ class CursorConfig(BaseModel):
         if self.request_param is None:
             raise ValueError(
                 "CFG-001: cursor strategy requires cursor.response_path and cursor.request_param"
+            )
+        if self.page_size is not None and self.page_size_param is None:
+            raise ValueError(
+                "CFG-001: cursor.page_size_param is required when cursor.page_size is set"
             )
         return self
 

@@ -347,6 +347,9 @@ class HttpTransportAdapter:
             assert pagination.cursor is not None
             cursor_value: str | None = None
             page_num = 0
+            # If page_size is configured, include it as a constant param on every request
+            if pagination.cursor.page_size is not None and pagination.cursor.page_size_param is not None:
+                base_params[pagination.cursor.page_size_param] = str(pagination.cursor.page_size)
             while True:
                 page_num += 1
                 extra_params = {}

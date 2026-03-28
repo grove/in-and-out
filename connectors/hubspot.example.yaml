@@ -114,6 +114,8 @@ connector:
             cursor:
               request_param: after
               response_path: "paging.next.after"
+              page_size: 100        # HubSpot max; omit to use API default of 10
+              page_size_param: limit  # HubSpot uses ?limit=N
             termination:
               - empty_page
           incremental:
@@ -183,6 +185,8 @@ connector:
             cursor:
               request_param: after
               response_path: "paging.next.after"
+              page_size: 100        # HubSpot max; omit to use API default of 10
+              page_size_param: limit  # HubSpot uses ?limit=N
             termination:
               - empty_page
           incremental:
@@ -251,6 +255,8 @@ connector:
             cursor:
               request_param: after
               response_path: "paging.next.after"
+              page_size: 100        # HubSpot max; omit to use API default of 10
+              page_size_param: limit  # HubSpot uses ?limit=N
             termination:
               - empty_page
 

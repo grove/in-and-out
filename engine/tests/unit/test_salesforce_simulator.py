@@ -6,12 +6,12 @@ import os
 import pytest
 import httpx
 
-from inandout.simulators import (
+from inandout.stubs import (
     GenericSimulator,
     make_salesforce_connector_config,
     make_salesforce_sim_config,
 )
-from inandout.simulators.salesforce import (
+from inandout.stubs.salesforce import (
     _BASE_URL,
     _TOKEN_PATH,
     _QUERY_PATH,

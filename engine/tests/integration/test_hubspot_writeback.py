@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from inandout.simulators import GenericSimulator, make_hubspot_connector_config, make_hubspot_sim_config
+from inandout.stubs import GenericSimulator, make_hubspot_connector_config, make_hubspot_sim_config
 from inandout.config.writeback import (
     WritebackConfig, ProtectionLevel, ConflictResolution,
     OperationsConfig, OperationConfig, UpdateOperationConfig,

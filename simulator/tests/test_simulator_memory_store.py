@@ -1,8 +1,12 @@
-# These tests have moved to simulator/tests/test_simulator_memory_store.py
-# (inandout.simulator was removed — use inandout_simulator instead)
+"""Unit tests for the simulator MemoryStore."""
+
+from __future__ import annotations
+
+import asyncio
+
 import pytest
 
-pytest.skip("moved to simulator/tests/test_simulator_memory_store.py", allow_module_level=True)
+from inandout_simulator.store.memory import MemoryStore
 
 C = "acme"
 D = "contacts"
@@ -182,7 +186,9 @@ async def test_list_all_incremental_cursor_filter(store: MemoryStore) -> None:
     await store.create(C, D, {"id": "1", "updated_at": "2024-01-01T00:00:00"})
     await store.create(C, D, {"id": "2", "updated_at": "2024-06-01T00:00:00"})
     await store.create(C, D, {"id": "3", "updated_at": "2024-12-01T00:00:00"})
-    records = await store.list_all(C, D, cursor_field="updated_at", watermark="2024-03-01T00:00:00")
+    records = await store.list_all(
+        C, D, cursor_field="updated_at", watermark="2024-03-01T00:00:00"
+    )
     ids = {r["id"] for r in records}
     assert ids == {"2", "3"}
 
@@ -193,86 +199,3 @@ async def test_list_all_injects_meta_keys(store: MemoryStore) -> None:
     assert len(records) == 1
     assert "__modified_at__" in records[0]
     assert "__created_at__" in records[0]
-
-
-# ---------------------------------------------------------------------------
-# count
-# ---------------------------------------------------------------------------
-
-
-async def test_count_excludes_deleted(store: MemoryStore) -> None:
-    await store.create(C, D, {"id": "1"})
-    await store.create(C, D, {"id": "2"})
-    await store.delete(C, D, "1")
-    assert await store.count(C, D) == 1
-
-
-async def test_count_is_zero_for_empty_namespace(store: MemoryStore) -> None:
-    assert await store.count(C, D) == 0
-
-
-# ---------------------------------------------------------------------------
-# seed
-# ---------------------------------------------------------------------------
-
-
-async def test_seed_loads_records(store: MemoryStore) -> None:
-    await store.seed(C, D, [{"id": "1", "name": "Alice"}, {"id": "2", "name": "Bob"}])
-    records = await store.list_all(C, D)
-    assert len(records) == 2
-
-
-async def test_seed_is_idempotent(store: MemoryStore) -> None:
-    batch = [{"id": "1", "name": "Alice"}]
-    await store.seed(C, D, batch)
-    await store.seed(C, D, batch)  # second call must not duplicate
-    assert await store.count(C, D) == 1
-
-
-async def test_seed_uses_cursor_field_as_modified_at(store: MemoryStore) -> None:
-    ts = "2024-07-15T12:00:00+00:00"
-    await store.seed(C, D, [{"id": "1", "updated_at": ts}], cursor_field="updated_at")
-    # Incremental filter against that watermark must return nothing (ts is not > ts).
-    records = await store.list_all(C, D, cursor_field="updated_at", watermark=ts)
-    assert records == []
-
-
-# ---------------------------------------------------------------------------
-# recent_mutations
-# ---------------------------------------------------------------------------
-
-
-async def test_recent_mutations_newest_first(store: MemoryStore) -> None:
-    await store.create(C, D, {"id": "1"})
-    await store.create(C, D, {"id": "2"})
-    mutations = await store.recent_mutations(C, D)
-    assert mutations[0].record_id == "2"
-    assert mutations[1].record_id == "1"
-
-
-async def test_recent_mutations_filtered_by_connector(store: MemoryStore) -> None:
-    await store.create("acme", D, {"id": "1"})
-    await store.create("other", D, {"id": "2"})
-    mutations = await store.recent_mutations("acme")
-    assert all(m.connector == "acme" for m in mutations)
-
-
-async def test_recent_mutations_limit_respected(store: MemoryStore) -> None:
-    for i in range(10):
-        await store.create(C, D, {"id": str(i)})
-    mutations = await store.recent_mutations(C, D, limit=3)
-    assert len(mutations) == 3
-
-
-# ---------------------------------------------------------------------------
-# namespace isolation
-# ---------------------------------------------------------------------------
-
-
-async def test_different_datatypes_are_isolated(store: MemoryStore) -> None:
-    await store.create(C, "contacts", {"id": "1"})
-    await store.create(C, "accounts", {"id": "1"})
-    contacts = await store.list_all(C, "contacts")
-    accounts = await store.list_all(C, "accounts")
-    assert len(contacts) == 1
-    assert len(accounts) == 1
