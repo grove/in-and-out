@@ -83,7 +83,7 @@ test-all:
 
 # Run simulator tests
 test-simulator:
-    uv run pytest tests/simulators -v
+    uv run --package inandout-simulator pytest simulator/tests -v
 
 # Run a specific test file or expression (e.g.: just test-one engine/tests/unit/test_foo.py)
 test-one path:
@@ -139,7 +139,7 @@ down-clean:
 
 # Run the stateful demo simulator locally (no engine required)
 simulator:
-    uv run inandout-simulator run \
+    uv run inandout-simulator \
       --connector connectors/hubspot.example.yaml \
       --connector connectors/tripletex.example.yaml \
       --listen 0.0.0.0:6100 \

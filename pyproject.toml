@@ -16,13 +16,11 @@ package = false
 members = ["engine", "simulator"]
 
 # ---------------------------------------------------------------------------
-# pytest — root-level tests (simulator boundary + acceptance fixtures)
+# pytest — no tests live at root; each package configures its own
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
 addopts = "--tb=short"
-norecursedirs = [".git", ".tox", "dist", "build", "*.egg-info", "engine", "simulator"]
 markers = [
     "acceptance: marks tests as acceptance tests requiring real external APIs (deselect with '-m not acceptance')",
     "load: marks tests as load/performance tests requiring Docker and extended timeout",
