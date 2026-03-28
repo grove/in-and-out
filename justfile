@@ -14,11 +14,11 @@ default:
 
 # Install all dependencies (including dev) using uv
 install:
-    uv sync --all-extras
+    uv sync --all-packages --all-extras
 
 # Install production dependencies only
 install-prod:
-    uv sync --no-dev
+    uv sync --all-packages --no-dev
 
 # Show the active Python and uv versions
 versions:
@@ -31,19 +31,20 @@ versions:
 
 # Format code with ruff
 fmt:
-    uv run ruff format src tests
+    uv run --package inandout ruff format engine/src engine/tests
+    uv run --package inandout ruff format simulator/src
 
 # Lint code with ruff (auto-fix safe issues)
 lint:
-    uv run ruff check --fix src tests
+    uv run --package inandout ruff check --fix engine/src engine/tests
 
 # Lint without auto-fix (CI mode)
 lint-check:
-    uv run ruff check src tests
+    uv run --package inandout ruff check engine/src engine/tests
 
 # Type-check with mypy
 typecheck:
-    uv run mypy src
+    uv run --package inandout mypy engine/src
 
 # Run all code quality checks (no auto-fix)
 check: lint-check typecheck
@@ -54,33 +55,37 @@ check: lint-check typecheck
 
 # Run unit tests
 test:
-    uv run pytest tests/unit -v
+    uv run --package inandout pytest engine/tests/unit -v
 
 # Run unit tests with coverage report
 test-cov:
-    uv run pytest tests/unit --cov=src/inandout --cov-report=term-missing --cov-report=html -v
+    uv run --package inandout pytest engine/tests/unit --cov=engine/src/inandout --cov-report=term-missing --cov-report=html -v
 
 # Run integration tests (requires running Postgres — use `just up` first)
 test-integration:
-    uv run pytest tests/integration -v
+    uv run --package inandout pytest engine/tests/integration -v
 
 # Run contract tests
 test-contract:
-    uv run pytest tests/contract -v
+    uv run --package inandout pytest engine/tests/contract -v
 
 # Run acceptance tests (requires real external APIs)
 test-acceptance:
-    uv run pytest tests/acceptance -v -m acceptance
+    uv run --package inandout pytest engine/tests/acceptance -v -m acceptance
 
 # Run load tests
 test-load:
-    uv run pytest tests/load -v -m load
+    uv run --package inandout pytest engine/tests/load -v -m load
 
-# Run all tests except acceptance and load
+# Run all engine tests except acceptance and load
 test-all:
-    uv run pytest tests -v -m "not acceptance and not load"
+    uv run --package inandout pytest engine/tests -v -m "not acceptance and not load"
 
-# Run a specific test file or expression (e.g.: just test-one tests/unit/test_foo.py)
+# Run simulator tests
+test-simulator:
+    uv run pytest tests/simulators -v
+
+# Run a specific test file or expression (e.g.: just test-one engine/tests/unit/test_foo.py)
 test-one path:
     uv run pytest {{ path }} -v
 
@@ -90,23 +95,23 @@ test-one path:
 
 # Apply all pending migrations
 db-upgrade:
-    uv run alembic upgrade head
+    cd engine && uv run --package inandout alembic upgrade head
 
 # Roll back the last migration
 db-downgrade:
-    uv run alembic downgrade -1
+    cd engine && uv run --package inandout alembic downgrade -1
 
 # Show the current migration revision
 db-current:
-    uv run alembic current
+    cd engine && uv run --package inandout alembic current
 
 # Show migration history
 db-history:
-    uv run alembic history --verbose
+    cd engine && uv run --package inandout alembic history --verbose
 
 # Auto-generate a new migration (usage: just db-revision "add my table")
 db-revision msg:
-    uv run alembic revision --autogenerate -m "{{ msg }}"
+    cd engine && uv run --package inandout alembic revision --autogenerate -m "{{ msg }}"
 
 # ---------------------------------------------------------------------------
 # Docker — local development stack
@@ -134,7 +139,7 @@ down-clean:
 
 # Run the stateful demo simulator locally (no engine required)
 simulator:
-    uv run inandout simulator run \
+    uv run inandout-simulator run \
       --connector connectors/hubspot.example.yaml \
       --connector connectors/tripletex.example.yaml \
       --listen 0.0.0.0:6100 \
@@ -174,11 +179,11 @@ down-obs:
 
 # Run the ingest service locally
 ingest:
-    uv run inandout ingest run --config config/ingestion.yaml
+    uv run --package inandout inandout ingest run --config engine/config/ingestion.yaml
 
 # Run the writeback service locally
 writeback:
-    uv run inandout writeback run --config config/writeback.yaml
+    uv run --package inandout inandout writeback run --config engine/config/writeback.yaml
 
 # Show inandout CLI help
 cli-help:
@@ -216,5 +221,5 @@ clean:
     find . -type f -name "*.pyc" -delete 2>/dev/null || true
     rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
 
-# Full CI pipeline: format check → lint → typecheck → unit tests
-ci: lint-check typecheck test
+# Full CI pipeline: format check → lint → typecheck → engine unit tests → simulator tests
+ci: lint-check typecheck test test-simulator

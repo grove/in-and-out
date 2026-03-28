@@ -9,7 +9,7 @@ def test_writeback_response_columns_migration_exists() -> None:
     import importlib.util
     import pathlib
 
-    path = pathlib.Path("migrations/versions/018_20260323_writeback_response.py")
+    path = pathlib.Path(__file__).parent.parent.parent / "migrations/versions/018_20260323_writeback_response.py"
     assert path.exists(), "Migration 018 does not exist"
     spec = importlib.util.spec_from_file_location("migration_018", path)
     assert spec is not None

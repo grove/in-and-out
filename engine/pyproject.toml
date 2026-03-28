@@ -1,0 +1,124 @@
+[project]
+name = "inandout"
+version = "0.1.0"
+description = "Declarative MDM synchronization tools — HTTP API ingestion and writeback"
+requires-python = ">=3.13"
+dependencies = [
+    # Async runtime
+    "anyio>=4.7",
+    # PostgreSQL
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    # HTTP client
+    "httpx[http2]>=0.28",
+    # HTTP server (webhooks & health endpoints)
+    "uvicorn[standard]>=0.34",
+    # Configuration & validation
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "pyyaml>=6.0",
+    # Expression evaluation
+    "jmespath>=1.0",
+    # Data processing
+    "orjson>=3.10",
+    "deepdiff>=8.0",
+    # Scheduling
+    "croniter>=3.0",
+    # Rate limiting
+    "aiolimiter>=1.2",
+    # Retry logic
+    "tenacity>=9.0",
+    # Observability — Logging
+    "structlog>=24.0",
+    # Observability — Metrics
+    "prometheus-client>=0.21",
+    # Observability — Tracing
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp>=1.29",
+    "opentelemetry-instrumentation-httpx>=0.50b0",
+    "opentelemetry-instrumentation-psycopg>=0.50b0",
+    "opentelemetry-instrumentation-asgi>=0.50b0",
+    # CLI
+    "typer>=0.15",
+    "rich>=13.0",
+    # Cryptography
+    "cryptography>=43",
+    # Database migrations
+    "alembic>=1.14",
+    "fastapi>=0.115",
+    "watchfiles>=1.1",
+    "jinja2>=3.0",
+    "jsonschema>=4.26",
+]
+
+[project.scripts]
+inandout = "inandout.cli.main:app"
+inandout-ingest = "inandout.cli.main:ingest_app"
+inandout-writeback = "inandout.cli.main:writeback_app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inandout"]
+
+# ---------------------------------------------------------------------------
+# dependency groups (uv dev dependencies)
+# ---------------------------------------------------------------------------
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+    "testcontainers[postgres]>=4.0",
+    "pytest-cov>=6.0",
+    "hypothesis>=6.0",
+    "factory-boy>=3.3",
+    "mypy>=1.14",
+    "ruff>=0.9",
+]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "S", "B", "A", "C4", "PT", "RUF"]
+ignore = [
+    "S101", # use of assert — allowed in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--tb=short"
+norecursedirs = ["src", ".git", ".tox", "dist", "build", "*.egg-info"]
+markers = [
+    "acceptance: marks tests as acceptance tests requiring real external APIs (deselect with '-m not acceptance')",
+    "load: marks tests as load/performance tests requiring Docker and extended timeout",
+]
+
+[tool.coverage.run]
+source = ["src/inandout"]
+omit = ["tests/*"]

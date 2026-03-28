@@ -1,0 +1,29 @@
+connector:
+  name: invalid_missing_schema_version
+  system: demo
+  generation_profile: ingestion_polling_readonly
+  api_version: v1
+  connection:
+    base_url: https://api.example.com
+  auth:
+    type: api_key
+    api_key:
+      location: header
+      name: X-API-Key
+    credential_ref: demo_api_key
+  datatypes:
+    contacts:
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: 5m
+        list:
+          method: GET
+          path: /v1/contacts
+          record_selector: results
+          pagination:
+            strategy: cursor
+            cursor:
+              response_path: paging.next.after
+              request_param: after

@@ -13,7 +13,12 @@ dependencies = [
     "jinja2>=3.1",
     "aiofiles>=24.0",
     "watchfiles>=1.0",
+    "typer>=0.9",
+    "rich>=13.0",
 ]
+
+[project.scripts]
+inandout-simulator = "inandout_simulator.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,82 @@
+schema_version: 1
+
+connector:
+  name: demo_full_duplex
+  system: demo
+  generation_profile: full_duplex
+  api_version: v1
+  connection:
+    base_url: https://api.example.com
+  auth:
+    type: api_key
+    api_key:
+      location: header
+      name: X-API-Key
+    credential_ref: demo_api_key
+  webhooks:
+    path: /webhooks/demo
+    signature:
+      algorithm: hmac-sha256
+      header: X-Signature
+      credential_ref: demo_webhook_secret
+    fan_out:
+      discriminator: body.event_type
+      routes:
+        - match: contact.*
+          datatype: contacts
+      unmatched: log_and_discard
+  datatypes:
+    contacts:
+      description: Demo contacts
+      ingestion:
+        primary_key: id
+        history_mode: overwrite
+        schedule:
+          interval: 5m
+        list:
+          method: GET
+          path: /v1/contacts
+          record_selector: results
+          pagination:
+            strategy: cursor
+            cursor:
+              response_path: paging.next.after
+              request_param: after
+            termination:
+              - missing_next_link
+          incremental:
+            enabled: true
+            cursor_field: updated_at
+            cursor_type: timestamp
+            request_filter:
+              mode: query_param
+              param: updated_since
+              value: ${watermark}
+            sort:
+              field: updated_at
+              direction: asc
+            lookback: 30s
+        webhook_events:
+          subscriptions:
+            - event_type: contact.updated
+          record_id_path: body.object_id
+          payload_type: notification
+          ordering:
+            strategy: accept_latest_timestamp
+            sequence_path: body.occurred_at
+          debounce:
+            window: 2s
+      writeback:
+        protection_level: 2
+        conflict_resolution: dead_letter
+        supported_actions:
+          - update
+        operations:
+          lookup:
+            method: GET
+            path: /v1/contacts/${external_id}
+          update:
+            method: PATCH
+            path: /v1/contacts/${external_id}
+            conditional_write:
+              enabled: false

@@ -5,16 +5,13 @@
   },
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
-
   // Install all project deps (including dev extras).
   // Integration tests use testcontainers to spin up Postgres on demand — no sidecar needed.
   "postCreateCommand": "uv sync --all-packages --all-extras",
-
   "forwardPorts": [
-    9090,  // Health / metrics (ingest)
-    9091   // Health / metrics (writeback)
+    9090, // Health / metrics (ingest)
+    9091 // Health / metrics (writeback)
   ],
-
   "customizations": {
     "vscode": {
       "extensions": [
@@ -32,12 +29,17 @@
         "[python]": {
           "editor.defaultFormatter": "charliermarsh.ruff"
         },
-        "ruff.path": ["/workspace/.venv/bin/ruff"],
-        "mypy-type-checker.path": ["/workspace/.venv/bin/mypy"],
+        "ruff.path": [
+          "/workspace/.venv/bin/ruff"
+        ],
+        "mypy-type-checker.path": [
+          "/workspace/.venv/bin/mypy"
+        ],
         "python.testing.pytestEnabled": true,
-        "python.testing.pytestArgs": ["tests/unit"]
+        "python.testing.pytestArgs": [
+          "tests/unit"
+        ]
       }
     }
   },
-
 }

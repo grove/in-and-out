@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "inandout",
     "inandout-simulator",
+    "inandout-workspace",
 ]
 
 [[package]]
@@ -629,7 +630,7 @@ wheels = [
 [[package]]
 name = "inandout"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "engine" }
 dependencies = [
     { name = "aiolimiter" },
     { name = "alembic" },
@@ -663,20 +664,6 @@ dependencies = [
     { name = "watchfiles" },
 ]
 
-[package.optional-dependencies]
-dev = [
-    { name = "factory-boy" },
-    { name = "hypothesis" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "respx" },
-    { name = "ruff" },
-    { name = "testcontainers" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "factory-boy" },
@@ -698,14 +685,11 @@ requires-dist = [
     { name = "croniter", specifier = ">=3.0" },
     { name = "cryptography", specifier = ">=43" },
     { name = "deepdiff", specifier = ">=8.0" },
-    { name = "factory-boy", marker = "extra == 'dev'", specifier = ">=3.3" },
-    { name = "fastapi", specifier = ">=0.135.1" },
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28" },
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "jinja2", specifier = ">=3.0" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "jsonschema", specifier = ">=4.26.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "opentelemetry-api", specifier = ">=1.29" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.29" },
     { name = "opentelemetry-instrumentation-asgi", specifier = ">=0.50b0" },
@@ -718,22 +702,14 @@ requires-dist = [
     { name = "psycopg-pool", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "rich", specifier = ">=13.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "structlog", specifier = ">=24.0" },
     { name = "tenacity", specifier = ">=9.0" },
-    { name = "testcontainers", extras = ["postgres"], marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "typer", specifier = ">=0.15" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
-    { name = "watchfiles", specifier = ">=1.1.1" },
+    { name = "watchfiles", specifier = ">=1.1" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -760,6 +736,8 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pyyaml" },
     { name = "referencing" },
+    { name = "rich" },
+    { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "watchfiles" },
 ]
@@ -773,9 +751,16 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "referencing", specifier = ">=0.35" },
+    { name = "rich", specifier = ">=13.0" },
+    { name = "typer", specifier = ">=0.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
     { name = "watchfiles", specifier = ">=1.0" },
 ]
+
+[[package]]
+name = "inandout-workspace"
+version = "0.1.0"
+source = { virtual = "." }
 
 [[package]]
 name = "iniconfig"

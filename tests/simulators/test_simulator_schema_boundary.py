@@ -47,4 +47,3 @@ def test_simulator_has_zero_inandout_engine_imports() -> None:
         "Use inandout_simulator.loader for YAML loading and plain dicts for data.\n"
         "Violations:\n" + "\n".join(f"  {v}" for v in violations)
     )
-
