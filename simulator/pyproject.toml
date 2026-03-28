@@ -1,0 +1,23 @@
+[project]
+name = "inandout-simulator"
+version = "0.1.0"
+description = "Stateful demo simulator for in-and-out connectors"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
+    "referencing>=0.35",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "jinja2>=3.1",
+    "aiofiles>=24.0",
+    "watchfiles>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inandout_simulator"]

@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}API Request Log — Simulator{% endblock %}
+
+{% block content %}
+<div class="flex flex-col gap-4 h-full">
+
+    <div class="flex items-center gap-3 shrink-0">
+        <h1 class="text-lg font-bold text-slate-100">API Request Log</h1>
+        <span class="text-xs text-slate-500 tabular-nums" id="req-count">{{ events | length }} events loaded</span>
+        <div class="ml-auto flex items-center gap-2">
+            <input type="text" id="req-search" placeholder="Filter…"
+                oninput="filterLog('request-log-body', 'req-search')"
+                class="text-xs bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-300 placeholder-slate-500 w-36 focus:outline-none focus:border-slate-500">
+            <button onclick="clearLog()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear
+                display</button>
+        </div>
+    </div>
+
+    <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-y-auto min-h-0">
+        <table class="w-full text-xs font-mono">
+            <thead class="sticky top-0 z-10 bg-slate-800 border-b border-slate-700">
+                <tr>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-14">Status
+                    </th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-16">Method
+                    </th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide">Path</th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-28">System
+                    </th>
+                    <th class="px-3 py-2 text-left text-slate-400 font-semibold uppercase tracking-wide w-28">Datatype
+                    </th>
+                    <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Duration
+                    </th>
+                    <th class="px-3 py-2 text-slate-400 font-semibold uppercase tracking-wide w-20 text-right">Time</th>
+                </tr>
+            </thead>
+            <tbody id="request-log-body">
+                {% for ev in events %}
+                {% set ok = ev.status < 400 %} {% set sys=connector_systems.get(ev.connector, ev.connector) if
+                    ev.connector else '' %} {% set req_detail_id='req-detail-' ~ loop.index %} <tr
+                    class="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer"
+                    onclick="document.getElementById('{{ req_detail_id }}').classList.toggle('hidden')"
+                    data-detail="{{ req_detail_id }}" data-status="{{ ev.status }}" data-method="{{ ev.method }}"
+                    data-path="{{ ev.path }}" data-sys="{{ sys }}" data-dt="{{ ev.datatype }}">
+                    <td class="px-3 py-1.5 {{ 'text-green-400' if ok else 'text-red-400' }}">{{ ev.status }}</td>
+                    <td class="px-3 py-1.5 text-sky-300">{{ ev.method }}</td>
+                    <td class="px-3 py-1.5 text-slate-300 max-w-0 truncate">{{ ev.path }}</td>
+                    <td class="px-3 py-1.5 text-slate-500">{{ sys }}</td>
+                    <td class="px-3 py-1.5 text-slate-500">{{ ev.datatype }}</td>
+                    <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">{{ ev.duration_ms }}ms</td>
+                    <td class="px-3 py-1.5 text-slate-600 text-right">{{ ev.timestamp[11:19] if ev.timestamp else '' }}
+                    </td>
+                    </tr>
+                    <tr id="{{ req_detail_id }}" class="hidden border-b border-slate-700">
+                        <td colspan="7" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1 text-xs font-mono">
+                            <div class="break-all"><span class="text-slate-500 mr-1">path</span><span
+                                    class="text-slate-200">{{ ev.path }}</span></div>
+                            {% if ev.connector %}<div><span class="text-slate-500 mr-1">connector</span><span
+                                    class="text-slate-200">{{ ev.connector }}</span>{% if ev.datatype %} · <span
+                                    class="text-slate-500 mr-1">datatype</span><span class="text-slate-200">{{
+                                    ev.datatype }}</span>{% endif %}</div>{% endif %}
+                            {% if ev.request_headers_json %}
+                            <details>
+                                <summary class="text-slate-500 cursor-pointer select-none">request headers</summary>
+                                <pre
+                                    class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">{{ ev.request_headers_json | pretty_json }}</pre>
+                            </details>
+                            {% endif %}
+                            {% if ev.request_body_json %}
+                            <div><span class="text-slate-500 mr-1">body</span>
+                                <pre
+                                    class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">{{ ev.request_body_json | pretty_json }}</pre>
+                            </div>
+                            {% endif %}
+                            <div class="text-slate-600">{{ ev.timestamp }}</div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">No API requests recorded
+                            yet. Start the engine to see traffic here.</td>
+                    </tr>
+                    {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const body = document.getElementById('request-log-body');
+        const countEl = document.getElementById('req-count');
+        let count = {{ events | length
+    }};
+    let liveCount = 0;
+
+    document.addEventListener('simulator:request', function (e) {
+        const d = e.detail;
+        const ok = d.status < 400;
+        const sys = (window._connectorSystems && window._connectorSystems[d.connector])
+            ? window._connectorSystems[d.connector] : (d.connector || '');
+        const ts = d.timestamp ? d.timestamp.substring(11, 19) : '';
+
+        const placeholder = body.querySelector('td[colspan="7"]');
+        if (placeholder && placeholder.closest('tr')) placeholder.closest('tr').remove();
+
+        liveCount++;
+        const detailId = 'req-detail-live-' + liveCount;
+
+        const summaryRow = document.createElement('tr');
+        summaryRow.className = 'border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors cursor-pointer';
+        summaryRow.setAttribute('onclick', `document.getElementById('${detailId}').classList.toggle('hidden')`);
+        summaryRow.setAttribute('data-detail', detailId);
+        summaryRow.setAttribute('data-status', String(d.status));
+        summaryRow.setAttribute('data-method', d.method || '');
+        summaryRow.setAttribute('data-path', d.path || '');
+        summaryRow.setAttribute('data-sys', sys);
+        summaryRow.setAttribute('data-dt', d.datatype || '');
+        summaryRow.innerHTML = `
+                <td class="px-3 py-1.5 ${ok ? 'text-green-400' : 'text-red-400'}">${d.status}</td>
+                <td class="px-3 py-1.5 text-sky-300">${d.method}</td>
+                <td class="px-3 py-1.5 text-slate-300 max-w-0 truncate">${d.path}</td>
+                <td class="px-3 py-1.5 text-slate-500">${sys}</td>
+                <td class="px-3 py-1.5 text-slate-500">${d.datatype || ''}</td>
+                <td class="px-3 py-1.5 text-slate-500 text-right tabular-nums">${d.duration_ms}ms</td>
+                <td class="px-3 py-1.5 text-slate-600 text-right">${ts}</td>`;
+
+        let prettyReqHeaders = '';
+        if (d.request_headers_json) {
+            try { prettyReqHeaders = JSON.stringify(JSON.parse(d.request_headers_json), null, 2); }
+            catch (_) { prettyReqHeaders = d.request_headers_json; }
+        }
+        let prettyReqBody = '';
+        if (d.request_body_json) {
+            try { prettyReqBody = JSON.stringify(JSON.parse(d.request_body_json), null, 2); }
+            catch (_) { prettyReqBody = d.request_body_json; }
+        }
+        const detailRow = document.createElement('tr');
+        detailRow.id = detailId;
+        detailRow.className = 'hidden border-b border-slate-700';
+        detailRow.innerHTML = `
+                <td colspan="7" class="px-4 py-2 bg-slate-900/50 text-slate-400 space-y-1 text-xs font-mono">
+                    <div class="break-all"><span class="text-slate-500 mr-1">path</span><span class="text-slate-200">${d.path}</span></div>
+                    ${d.connector ? `<div><span class="text-slate-500 mr-1">connector</span><span class="text-slate-200">${d.connector}</span>${d.datatype ? ` · <span class="text-slate-500 mr-1">datatype</span><span class="text-slate-200">${d.datatype}</span>` : ''}</div>` : ''}
+                    ${prettyReqHeaders ? `<details><summary class="text-slate-500 cursor-pointer select-none">request headers</summary><pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">${prettyReqHeaders.replace(/</g, '&lt;')}</pre></details>` : ''}
+                    ${prettyReqBody ? `<div><span class="text-slate-500 mr-1">body</span><pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">${prettyReqBody.replace(/</g, '&lt;')}</pre></div>` : ''}
+                    <div class="text-slate-600">${d.timestamp || ''}</div>
+                </td>`;
+        body.insertBefore(detailRow, body.firstChild);
+        body.insertBefore(summaryRow, body.firstChild);
+        _applyFilterToRow(summaryRow, detailRow);
+
+        count++;
+        if (countEl) countEl.textContent = count + ' events loaded';
+        while (body.children.length > 400) body.removeChild(body.lastChild);
+    });
+    });
+
+    function filterLog(bodyId, searchId) {
+        const body = document.getElementById(bodyId);
+        const search = document.getElementById(searchId);
+        if (!body || !search) return;
+        const q = search.value.trim().toLowerCase();
+        body.querySelectorAll('tr[data-detail]').forEach(function (row) {
+            const text = Object.entries(row.dataset)
+                .filter(function (e) { return e[0] !== 'detail'; })
+                .map(function (e) { return e[1]; }).join(' ').toLowerCase();
+            const hide = q && !text.includes(q);
+            row.classList.toggle('hidden', hide);
+            const dr = document.getElementById(row.dataset.detail);
+            if (dr && hide) dr.classList.add('hidden');
+        });
+    }
+
+    function _applyFilterToRow(summaryRow, detailRow) {
+        const search = document.getElementById('req-search');
+        if (!search) return;
+        const q = search.value.trim().toLowerCase();
+        if (!q) return;
+        const text = Object.entries(summaryRow.dataset)
+            .filter(function (e) { return e[0] !== 'detail'; })
+            .map(function (e) { return e[1]; }).join(' ').toLowerCase();
+        const hide = !text.includes(q);
+        summaryRow.classList.toggle('hidden', hide);
+        if (hide && detailRow) detailRow.classList.add('hidden');
+    }
+
+    function clearLog() {
+        document.getElementById('request-log-body').innerHTML =
+            '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">Display cleared. New requests will appear here.</td></tr>';
+        const countEl = document.getElementById('req-count');
+        if (countEl) countEl.textContent = '0 events loaded';
+        const s = document.getElementById('req-search');
+        if (s) s.value = '';
+    }
+</script>
+{% endblock %}

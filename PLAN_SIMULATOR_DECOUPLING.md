@@ -1,6 +1,6 @@
 # Plan: Decouple the simulator from the engine package
 
-> Status: **Revised — JSON-schema-native approach adopted**
+> Status: **Complete — S1–S6 implemented**
 > Goal: make the simulator installable and runnable with **zero Python code
 > coupling to the engine**, so any alternative engine implementation (Go, Rust,
 > Node, a third-party tool) can point at the same simulator by reading the same

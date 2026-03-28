@@ -22,9 +22,9 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from inandout.simulator.events import EventBus
-from inandout.simulator.store import RecordStore
-from inandout.simulator.webhooks import WebhookDispatcher
+from inandout_simulator.events import EventBus
+from inandout_simulator.store import RecordStore
+from inandout_simulator.webhooks import WebhookDispatcher
 
 
 # ---------------------------------------------------------------------------

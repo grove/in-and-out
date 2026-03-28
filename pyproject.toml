@@ -84,6 +84,12 @@ build-backend = "hatchling.build"
 packages = ["src/inandout"]
 
 # ---------------------------------------------------------------------------
+# uv workspace — engine + simulator as co-installable packages
+# ---------------------------------------------------------------------------
+[tool.uv.workspace]
+members = ["simulator"]
+
+# ---------------------------------------------------------------------------
 # dependency groups (uv dev dependencies)
 # ---------------------------------------------------------------------------
 [dependency-groups]

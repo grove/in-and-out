@@ -10,20 +10,20 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from inandout.simulator.loader import load_connector
-from inandout.simulator.events import EventBus
-from inandout.simulator.route_builder import build_connector_router
-from inandout.simulator.seed import seed_from_connector
-from inandout.simulator.store import RecordStore
-from inandout.simulator.store.memory import MemoryStore
-from inandout.simulator.webhooks import WebhookDispatcher
+from inandout_simulator.loader import load_connector
+from inandout_simulator.events import EventBus
+from inandout_simulator.route_builder import build_connector_router
+from inandout_simulator.seed import seed_from_connector
+from inandout_simulator.store import RecordStore
+from inandout_simulator.store.memory import MemoryStore
+from inandout_simulator.webhooks import WebhookDispatcher
 
 
 def _make_store(store_dsn: str) -> RecordStore:
     if store_dsn == "memory" or store_dsn.startswith(":memory:"):
         return MemoryStore()
     if store_dsn.startswith("sqlite:///"):
-        from inandout.simulator.store.sqlite import SQLiteStore
+        from inandout_simulator.store.sqlite import SQLiteStore
 
         path = store_dsn[len("sqlite:///") :]
         return SQLiteStore(path)
@@ -175,7 +175,7 @@ def create_app(
         app.mount(f"/{connector['name']}", sub)
 
     # Mount the web UI + admin CRUD + SSE routes.
-    from inandout.simulator.ui.router import build_ui_router
+    from inandout_simulator.ui.router import build_ui_router
 
     _static_dir = Path(__file__).parent / "ui" / "static"
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
@@ -227,3 +227,16 @@ def create_app(
         await dispatcher.aclose()
 
     return app
+
+
+def _reload_app() -> FastAPI:
+    """App factory used only in uvicorn --reload mode (import string target)."""
+    import json
+    import os
+
+    return create_app(
+        connector_paths=json.loads(os.environ.get("_SIM_CONNECTORS", "[]")),
+        store_dsn=os.environ.get("_SIM_STORE", "memory"),
+        engine_url=os.environ.get("_SIM_ENGINE_URL", "http://localhost:9090"),
+        page_size=int(os.environ.get("_SIM_PAGE_SIZE", "20")),
+    )

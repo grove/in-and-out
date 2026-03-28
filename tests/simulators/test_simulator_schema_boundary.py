@@ -1,19 +1,18 @@
-"""CI boundary check — the simulator package must not import inandout.config or inandout.schema.
+"""CI boundary check — inandout_simulator must have zero inandout.* imports.
 
-This test walks every .py file under src/inandout/simulator/ with the AST
-parser and asserts that none of them contain a direct import from the engine's
-internal ``inandout.config`` namespace or the re-export shim ``inandout.schema``.
-The simulator must be schema-native: load YAML via ``inandout.simulator.loader``
-and work with plain dicts — zero Pydantic coupling.
+This test walks every .py file under simulator/src/inandout_simulator/ with
+the AST parser and asserts that none of them import from the engine's
+``inandout`` namespace at all.  The only allowed coupling is to the JSON
+schemas in ``schemas/`` (loaded via yaml + jsonschema at runtime) — no Python
+code from the engine may be referenced.
 """
 
 import ast
 import pathlib
 
-
-_SIMULATOR_DIR = pathlib.Path(__file__).parent.parent.parent / "src" / "inandout" / "simulator"
-
-_FORBIDDEN_PREFIXES = ("inandout.config", "inandout.schema")
+_SIMULATOR_SRC = (
+    pathlib.Path(__file__).parent.parent.parent / "simulator" / "src" / "inandout_simulator"
+)
 
 
 def _collect_import_modules(source: str) -> list[str]:
@@ -30,19 +29,22 @@ def _collect_import_modules(source: str) -> list[str]:
     return modules
 
 
-def test_simulator_does_not_import_inandout_config_or_schema() -> None:
-    """No simulator source file may import from inandout.config.* or inandout.schema.*."""
+def test_simulator_has_zero_inandout_engine_imports() -> None:
+    """No file in inandout_simulator may import from the inandout engine package."""
     violations: list[str] = []
-    for py_file in sorted(_SIMULATOR_DIR.rglob("*.py")):
+    for py_file in sorted(_SIMULATOR_SRC.rglob("*.py")):
         source = py_file.read_text(encoding="utf-8")
         for module in _collect_import_modules(source):
-            if any(module.startswith(prefix) for prefix in _FORBIDDEN_PREFIXES):
+            # Allow intra-simulator imports (inandout_simulator.*).
+            # Reject anything from the engine namespace (inandout.*).
+            if module.startswith("inandout."):
                 violations.append(
-                    f"{py_file.relative_to(_SIMULATOR_DIR.parent.parent.parent)}: {module!r}"
+                    f"{py_file.relative_to(_SIMULATOR_SRC.parent.parent.parent)}: {module!r}"
                 )
 
     assert not violations, (
-        "Simulator files must not import from inandout.config or inandout.schema.\n"
-        "Use inandout.simulator.loader for YAML loading and plain dicts for data.\n"
+        "inandout_simulator must not import from the inandout engine package.\n"
+        "Use inandout_simulator.loader for YAML loading and plain dicts for data.\n"
         "Violations:\n" + "\n".join(f"  {v}" for v in violations)
     )
+

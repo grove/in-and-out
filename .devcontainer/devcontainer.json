@@ -8,7 +8,7 @@
 
   // Install all project deps (including dev extras).
   // Integration tests use testcontainers to spin up Postgres on demand — no sidecar needed.
-  "postCreateCommand": "uv sync --all-extras",
+  "postCreateCommand": "uv sync --all-packages --all-extras",
 
   "forwardPorts": [
     9090,  // Health / metrics (ingest)

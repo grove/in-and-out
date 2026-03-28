@@ -68,7 +68,7 @@ def sim_run(
 ) -> None:
     """Start the stateful demo simulator server."""
     import uvicorn
-    from inandout.simulator.app import create_app
+    from inandout_simulator.app import create_app
 
     host, _, port_str = listen.rpartition(":")
     host = host or "0.0.0.0"
@@ -92,12 +92,12 @@ def sim_run(
         os.environ["_SIM_ENGINE_URL"] = engine_url
         os.environ["_SIM_PAGE_SIZE"] = str(page_size)
         uvicorn.run(
-            "inandout.simulator.cli:_reload_app",
+            "inandout_simulator.app:_reload_app",
             host=host,
             port=port,
             log_level=log_level,
             reload=True,
-            reload_dirs=["src"],
+            reload_dirs=["src", "simulator/src"],
         )
     else:
         application = create_app(
@@ -107,16 +107,3 @@ def sim_run(
             page_size=page_size,
         )
         uvicorn.run(application, host=host, port=port, log_level=log_level)
-
-
-def _reload_app():
-    """App factory used only in --reload mode (import string for uvicorn)."""
-    import os, json
-    from inandout.simulator.app import create_app
-
-    return create_app(
-        connector_paths=json.loads(os.environ.get("_SIM_CONNECTORS", "[]")),
-        store_dsn=os.environ.get("_SIM_STORE", "memory"),
-        engine_url=os.environ.get("_SIM_ENGINE_URL", "http://localhost:9090"),
-        page_size=int(os.environ.get("_SIM_PAGE_SIZE", "20")),
-    )

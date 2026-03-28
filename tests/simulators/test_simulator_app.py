@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from inandout.simulator.app import create_app
+from inandout_simulator.app import create_app
 
 # Path to a minimal connector fixture that includes both ingestion and writeback
 # operations (lookup + update) so the full set of routes is available.

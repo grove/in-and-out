@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<!-- Theme init: run before body renders to avoid flash -->
+<script>
+    (function () {
+        var stored = localStorage.getItem('theme');
+        var preferDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (stored === 'dark' || (!stored && preferDark)) {
+            document.documentElement.classList.add('dark');
+        } else if (stored === 'light') {
+            document.documentElement.classList.remove('dark');
+        } else {
+            // follow OS
+            if (preferDark) document.documentElement.classList.add('dark');
+        }
+    })();
+</script>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}in-and-out Demo Simulator{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        slate: { 750: '#1a2744' },
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/htmx.org@1.9.10" defer></script>
+    <style>
+        @keyframes flash-green {
+
+            0%,
+            100% {
+                background: transparent
+            }
+
+            50% {
+                background: rgba(34, 197, 94, .25)
+            }
+        }
+
+        @keyframes flash-yellow {
+
+            0%,
+            100% {
+                background: transparent
+            }
+
+            50% {
+                background: rgba(251, 191, 36, .20)
+            }
+        }
+
+        .flash-create {
+            animation: flash-green .8s ease;
+        }
+
+        .flash-update {
+            animation: flash-yellow .8s ease;
+        }
+
+        .activity-item {
+            transition: opacity .3s;
+        }
+
+        tr.row-selected {
+            background: rgba(14, 116, 144, 0.25) !important;
+            outline: 1px solid #38bdf8;
+            outline-offset: -1px;
+        }
+
+        /* Recently modified cell indicator (< 60s) */
+        td.cell-recent {
+            color: #f59e0b !important;
+            font-weight: 600;
+        }
+
+        /* Light theme overrides */
+        html:not(.dark) body {
+            background: #f1f5f9;
+            color: #0f172a;
+        }
+
+        html:not(.dark) nav {
+            background: #e2e8f0;
+            border-color: #cbd5e1;
+        }
+
+        html:not(.dark) aside {
+            background: #dde3ec !important;
+            border-color: #cbd5e1;
+        }
+
+        html:not(.dark) aside a {
+            color: #334155;
+        }
+
+        html:not(.dark) aside a:hover {
+            background: #cbd5e1;
+            color: #0f172a;
+        }
+
+        html:not(.dark) aside a.bg-sky-800 {
+            background: #0ea5e9;
+            color: #fff;
+        }
+
+        html:not(.dark) .bg-slate-800 {
+            background: #fff !important;
+        }
+
+        html:not(.dark) .bg-slate-900 {
+            background: #f8fafc !important;
+        }
+
+        html:not(.dark) .border-slate-700 {
+            border-color: #cbd5e1 !important;
+        }
+
+        html:not(.dark) .text-slate-100 {
+            color: #0f172a !important;
+        }
+
+        html:not(.dark) .text-slate-300 {
+            color: #334155 !important;
+        }
+
+        html:not(.dark) .text-slate-400 {
+            color: #64748b !important;
+        }
+
+        html:not(.dark) .text-slate-500 {
+            color: #94a3b8 !important;
+        }
+
+        html:not(.dark) .hover\:bg-slate-750:hover {
+            background: #e2e8f0 !important;
+        }
+
+        html:not(.dark) .hover\:bg-slate-700:hover {
+            background: #e2e8f0 !important;
+        }
+
+        html:not(.dark) tbody tr {
+            border-color: #e2e8f0;
+        }
+
+        html:not(.dark) thead tr {
+            background: #f1f5f9 !important;
+            border-color: #e2e8f0;
+        }
+
+        html:not(.dark) tr.row-selected {
+            background: rgba(14, 116, 144, 0.12) !important;
+        }
+
+        html:not(.dark) td.cell-recent {
+            color: #b45309 !important;
+            font-weight: 600;
+        }
+    </style>
+</head>
+
+<body class="h-full bg-slate-900 text-slate-100 font-sans flex flex-col">
+
+    <!-- Top nav bar -->
+    <nav class="bg-slate-800 border-b border-slate-700 px-4 py-2 flex items-center gap-4 shrink-0 z-10">
+        <a href="/ui"
+            class="flex items-center gap-2 text-sky-400 font-semibold text-base hover:text-sky-300 whitespace-nowrap">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+            </svg>
+            in-and-out
+        </a>
+        <span class="text-slate-500 text-sm font-medium">Simulator</span>
+        <!-- Theme cycle toggle: light → dark → system -->
+        <button id="theme-toggle" title="Follow system theme (click to cycle)"
+            class="ml-auto text-xs text-slate-400 hover:text-slate-200 px-2 py-0.5 rounded border border-slate-700 hover:border-slate-500 transition-colors"
+            onclick="cycleTheme()">Auto</button>
+        <span class="text-slate-500 text-sm">
+            <span id="sse-status" class="inline-flex items-center gap-1">
+                <span class="w-2 h-2 rounded-full bg-slate-500"></span> connecting…
+            </span>
+        </span>
+    </nav>
+
+    <!-- Body: sidebar + content -->
+    <div class="flex flex-1 min-h-0">
+
+        <!-- Sidebar nav -->
+        <aside class="w-52 shrink-0 bg-slate-850 border-r border-slate-700 overflow-y-auto flex flex-col"
+            style="background:#0f1729">
+            <div class="px-3 pt-3 pb-1">
+                <a href="/ui"
+                    class="flex items-center gap-1 text-xs font-semibold text-slate-500 uppercase tracking-wider hover:text-sky-400 mb-2">
+                    ⬡ Dashboard
+                </a>
+            </div>
+            {% if connectors is defined %}
+            {% for conn in connectors %}
+            <div class="px-3 pt-2 pb-1">
+                <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider truncate mb-1">{{ conn.system or
+                    conn.name }}</p>
+                {% for dt_name in conn.datatypes %}
+                {% set active = (connector is defined and connector.name == conn.name and datatype is defined and
+                datatype == dt_name) %}
+                <a href="/ui/{{ conn.name }}/{{ dt_name }}" title="{{ dt_name }}"
+                    class="flex items-center gap-1.5 px-2 py-1 rounded text-sm mb-0.5 truncate transition-colors
+                          {% if active %}bg-sky-800 text-sky-200{% else %}text-slate-400 hover:bg-slate-700 hover:text-slate-100{% endif %}">
+                    <span
+                        class="w-1.5 h-1.5 rounded-full shrink-0 {% if active %}bg-sky-400{% else %}bg-slate-600{% endif %}"></span>
+                    {{ dt_name }}
+                    <span id="count-{{ conn.name }}-{{ dt_name }}"
+                        class="ml-auto text-xs tabular-nums {% if active %}text-sky-300{% else %}text-slate-500{% endif %}">
+                        {% if counts is defined and conn.name in counts and dt_name in counts[conn.name] %}{{
+                        counts[conn.name][dt_name] }}{% endif %}
+                    </span>
+                </a>
+                {% endfor %}
+            </div>
+            {% if not loop.last %}<div class="mx-3 border-t border-slate-700/50 my-1"></div>{% endif %}
+            {% endfor %}
+            {% endif %}
+            <!-- Activity section at bottom of sidebar -->
+            <div class="mt-auto px-3 pt-2 pb-3 border-t border-slate-700/50">
+                {% set req_active = request.url.path == '/ui/_requests' %}
+                {% set wh_active = request.url.path == '/ui/_webhooks' %}
+                {% set reg_active = request.url.path == '/ui/_registrations' %}
+                <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Webhooks</p>
+                <a href="/ui/_registrations"
+                    class="flex items-center gap-1.5 px-2 py-1 rounded text-sm mb-0.5 transition-colors
+                           {% if reg_active %}bg-sky-800 text-sky-200{% else %}text-slate-400 hover:bg-slate-700 hover:text-slate-100{% endif %}">
+                    <span
+                        class="w-1.5 h-1.5 rounded-full shrink-0 {% if reg_active %}bg-sky-400{% else %}bg-slate-600{% endif %}"></span>
+                    Registrations
+                </a>
+                <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-3 mb-1">Logs</p>
+                <a href="/ui/_webhooks"
+                    class="flex items-center gap-1.5 px-2 py-1 rounded text-sm mb-0.5 transition-colors
+                           {% if wh_active %}bg-sky-800 text-sky-200{% else %}text-slate-400 hover:bg-slate-700 hover:text-slate-100{% endif %}">
+                    <span
+                        class="w-1.5 h-1.5 rounded-full shrink-0 {% if wh_active %}bg-sky-400{% else %}bg-slate-600{% endif %}"></span>
+                    Webhook Events
+                </a>
+                <a href="/ui/_requests"
+                    class="flex items-center gap-1.5 px-2 py-1 rounded text-sm mb-0.5 transition-colors
+                           {% if req_active %}bg-sky-800 text-sky-200{% else %}text-slate-400 hover:bg-slate-700 hover:text-slate-100{% endif %}">
+                    <span
+                        class="w-1.5 h-1.5 rounded-full shrink-0 {% if req_active %}bg-sky-400{% else %}bg-slate-600{% endif %}"></span>
+                    API Requests
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <main class="flex-1 overflow-auto p-5">
+            {% block content %}{% endblock %}
+        </main>
+
+    </div>
+
+    <!-- Theme cycle logic: light → dark → system (default) -->
+    <script>
+        function _applyTheme(mode) {
+            var html = document.documentElement;
+            var btn = document.getElementById('theme-toggle');
+            if (mode === 'light') {
+                html.classList.remove('dark');
+                if (btn) { btn.textContent = 'Light'; btn.title = 'Light mode (click for dark)'; }
+            } else if (mode === 'dark') {
+                html.classList.add('dark');
+                if (btn) { btn.textContent = 'Dark'; btn.title = 'Dark mode (click for auto)'; }
+            } else {
+                // system
+                var preferDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                if (preferDark) { html.classList.add('dark'); } else { html.classList.remove('dark'); }
+                if (btn) { btn.textContent = 'Auto'; btn.title = 'Follow system theme (click for light)'; }
+            }
+        }
+        function cycleTheme() {
+            var stored = localStorage.getItem('theme');
+            var next;
+            if (stored === 'light') { next = 'dark'; }
+            else if (stored === 'dark') { next = 'system'; localStorage.removeItem('theme'); }
+            else { next = 'light'; }
+            if (next !== 'system') localStorage.setItem('theme', next);
+            _applyTheme(next);
+        }
+        // Set initial icon from current state
+        (function () {
+            var stored = localStorage.getItem('theme');
+            _applyTheme(stored || 'system');
+        })();
+        // Follow OS preference changes when in system mode
+        if (window.matchMedia) {
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function (e) {
+                if (!localStorage.getItem('theme')) {
+                    var preferDark = e.matches;
+                    var html = document.documentElement;
+                    if (preferDark) { html.classList.add('dark'); } else { html.classList.remove('dark'); }
+                }
+            });
+        }
+    </script>
+
+    <!-- SSE client -->
+    <script>
+        {% if connectors is defined %}
+        window._connectorSystems = { {% for conn in connectors %} "{{ conn.name }}": "{{ conn.system }}"{% if not loop.last %}, {% endif %} {% endfor %} };
+        {% else %}
+        window._connectorSystems = {};
+        {% endif %}
+    </script>
+    <script>
+        (function () {
+            const statusEl = document.getElementById('sse-status');
+            const source = new EventSource('/events');
+            // Expose globally so page-specific scripts can attach listeners.
+            window._sseSource = source;
+
+            // Close the SSE connection immediately on navigation so the browser's
+            // 6-connection-per-origin limit (HTTP/1.1) is not exhausted by abandoned
+            // EventSource slots from previously visited pages.
+            window.addEventListener('pagehide', function () { source.close(); });
+            window.addEventListener('beforeunload', function () { source.close(); });
+
+            // Map of "connector-datatype" -> [{op, record_id, ts}, ...]
+            // Keeps the last 10 changes per datatype for banner/row display.
+            const recentChanges = {};
+
+            function _relativeTime(iso) {
+                const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+                if (secs < 60) return 'just now';
+                if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+                return Math.floor(secs / 3600) + 'h ago';
+            }
+
+            function _updateRecentUI(key, connector, datatype) {
+                const changes = recentChanges[key] || [];
+                // Dashboard card banner
+                const banner = document.getElementById('recent-' + key);
+                if (banner) {
+                    if (changes.length === 0) {
+                        banner.classList.add('hidden');
+                        banner.classList.remove('flex');
+                    } else {
+                        const latest = changes[changes.length - 1];
+                        const opLabel = latest.op === 'delete' ? 'deleted' : latest.op === 'create' ? 'created' : 'updated';
+                        // Count distinct records, not total mutations.
+                        const distinctIds = new Set(changes.map(c => c.record_id));
+                        const n = distinctIds.size;
+                        const noun = n === 1
+                            ? `<a href="/ui/${connector}/${datatype}/${latest.record_id}" class="underline hover:text-amber-200">${datatype}:${latest.record_id}</a> was ${opLabel}`
+                            : `${n} records with recent changes`;
+                        banner.innerHTML = `<span class="mr-1">⚡</span>${noun} &mdash; <span class="opacity-75">${_relativeTime(latest.ts)}</span>`;
+                        banner.classList.remove('hidden');
+                        banner.classList.add('flex');
+                    }
+                }
+            }
+
+            // Stamp "Xs ago" labels on table rows from their server-rendered data-ts attribute.
+            // This is purely computed from the row data — no SSE state needed.
+            function _stampRowLabels() {
+                document.querySelectorAll('[data-ts]').forEach(function (span) {
+                    span.textContent = _relativeTime(span.dataset.ts);
+                    span.className = 'ml-2 text-xs font-medium text-amber-400';
+                });
+            }
+
+            // Refresh dashboard banners every 5 seconds; also refresh row labels.
+            setInterval(function () {
+                Object.keys(recentChanges).forEach(function (key) {
+                    const parts = key.split('-');
+                    _updateRecentUI(key, parts[0], parts.slice(1).join('-'));
+                });
+                _stampRowLabels();
+            }, 5000);
+
+            // When HTMX finishes loading rows, stamp labels from data-ts immediately.
+            document.addEventListener('htmx:afterSwap', function (e) {
+                if (e.detail.target && e.detail.target.id === 'records-tbody') {
+                    _stampRowLabels();
+                }
+            });
+
+            source.onopen = () => {
+                // Expose the connection time so page scripts can distinguish
+                // replayed historical events from truly concurrent mutations.
+                window._sseConnectedAt = Date.now();
+                statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> live';
+            };
+            source.onerror = () => {
+                statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span> disconnected';
+            };
+
+            source.addEventListener('mutation', function (e) {
+                const d = JSON.parse(e.data);
+                const key = d.connector + '-' + d.datatype;
+                const ageMs = Date.now() - new Date(d.timestamp).getTime();
+                const isLive = ageMs < 5000;
+
+                // Track recent changes and update banners/row labels for ALL events,
+                // including replayed history, so labels appear immediately on page load.
+                if (!recentChanges[key]) recentChanges[key] = [];
+                // Avoid duplicate entries from SSE replay (same event_id isn't available, use ts+id).
+                const changeKey = d.record_id + '@' + d.timestamp;
+                if (!recentChanges[key].some(c => c.record_id + '@' + c.ts === changeKey)) {
+                    recentChanges[key].push({ op: d.operation, record_id: d.record_id, ts: d.timestamp });
+                    if (recentChanges[key].length > 10) recentChanges[key].shift();
+                }
+                _updateRecentUI(key, d.connector, d.datatype);
+
+                // Refresh the count badge (main content + sidebar both use the same id pattern).
+                const badge = document.getElementById('count-' + key);
+                if (badge) {
+                    fetch('/ui/' + d.connector + '/' + d.datatype + '/_count')
+                        .then(r => r.text()).then(n => {
+                            badge.textContent = n.trim();
+                            if (isLive) {
+                                badge.classList.add('ring-2', 'ring-sky-400');
+                                setTimeout(() => badge.classList.remove('ring-2', 'ring-sky-400'), 1200);
+                            }
+                        });
+                }
+                // Also refresh sidebar badge (may differ from main badge element)
+                document.querySelectorAll('[id="count-' + key + '"]').forEach(el => {
+                    fetch('/ui/' + d.connector + '/' + d.datatype + '/_count')
+                        .then(r => r.text()).then(n => { el.textContent = n.trim(); });
+                });
+
+                // Refresh the table rows if we're on the relevant listing page (live events only).
+                // After the swap completes, flash the affected row.
+                if (isLive) {
+                    const tbody = document.getElementById('records-tbody');
+                    if (tbody && tbody.getAttribute('hx-get')) {
+                        const _flashId = 'row-' + d.record_id;
+                        const _flashCls = d.operation === 'create' ? 'flash-create' : 'flash-update';
+                        // Register listener BEFORE triggering the request so it is always in place.
+                        document.addEventListener('htmx:afterSwap', function onSwap(e) {
+                            if (e.detail.target && e.detail.target.id === 'records-tbody') {
+                                document.removeEventListener('htmx:afterSwap', onSwap);
+                                const row = document.getElementById(_flashId);
+                                if (row) {
+                                    row.classList.remove('flash-create', 'flash-update');
+                                    void row.offsetWidth;
+                                    row.classList.add(_flashCls);
+                                }
+                            }
+                        });
+                        htmx.ajax('GET', tbody.getAttribute('hx-get'), { target: tbody, swap: 'innerHTML' });
+                    }
+                }
+
+                // Prepend to activity feed
+                const feed = document.getElementById('activity-feed');
+                if (feed) {
+                    const colours = { create: 'text-green-400', update: 'text-blue-400', delete: 'text-red-400' };
+                    const icons = { create: '＋', update: '✎', delete: '✕' };
+                    const src = d.source === 'ui' ? '🧑 User' : d.source === 'seed' ? '🌱 seed' : '⚙ API';
+                    const ts = new Date(d.timestamp).toLocaleTimeString();
+                    const sys = (window._connectorSystems && window._connectorSystems[d.connector]) ? window._connectorSystems[d.connector] : null;
+                    const label = sys
+                        ? `<span class="text-slate-500">${sys}/</span>${d.datatype}:${d.record_id}`
+                        : `${d.datatype}:${d.record_id}`;
+                    const li = document.createElement('li');
+                    li.className = 'activity-item flex items-start gap-2 py-1 border-b border-slate-700 text-sm';
+                    li.innerHTML = `
+            <span class="mt-0.5 font-mono font-bold ${colours[d.operation] || 'text-slate-400'}">${icons[d.operation] || '·'}</span>
+            <span class="flex-1">
+              <span class="font-medium">${src}</span>
+              <span class="text-slate-400"> ${d.operation}d </span>
+              <a href="/ui/${d.connector}/${d.datatype}/${d.record_id}"
+                 class="text-sky-400 hover:underline">${label}</a>
+            </span>
+            <span class="text-slate-500 text-xs whitespace-nowrap">${ts}</span>`;
+                    feed.prepend(li);
+                    while (feed.children.length > 30) feed.removeChild(feed.lastChild);
+                }
+
+                // Bubble as a DOM event so page-specific scripts can react.
+                document.dispatchEvent(new CustomEvent('simulator:mutation', { detail: d }));
+            });
+
+            source.addEventListener('request', function (e) {
+                const d = JSON.parse(e.data);
+                const reqFeed = document.getElementById('request-feed');
+                if (reqFeed) {
+                    const placeholder = document.getElementById('req-placeholder');
+                    if (placeholder) placeholder.remove();
+                    const ts = new Date(d.timestamp).toLocaleTimeString();
+                    const ok = d.status < 400;
+                    const statusCls = ok ? 'text-green-400' : 'text-red-400';
+                    const sys = (window._connectorSystems && window._connectorSystems[d.connector]) ? window._connectorSystems[d.connector] : d.connector;
+                    const li = document.createElement('li');
+                    li.className = 'py-0.5 text-xs font-mono border-b border-slate-800 flex items-baseline gap-1.5 min-w-0';
+                    li.innerHTML = `
+          <span class="${statusCls} shrink-0">${d.status}</span>
+          <span class="text-sky-300 shrink-0">${d.method}</span>
+          <span class="truncate flex-1 text-slate-400">${d.path}</span>
+          <span class="text-slate-500 shrink-0 tabular-nums">${d.duration_ms}ms</span>
+          <span class="text-slate-600 shrink-0">${ts}</span>`;
+                    reqFeed.prepend(li);
+                    while (reqFeed.children.length > 50) reqFeed.removeChild(reqFeed.lastChild);
+                }
+                // Bubble so dedicated log pages can receive it.
+                document.dispatchEvent(new CustomEvent('simulator:request', { detail: d }));
+            });
+
+            source.addEventListener('webhook', function (e) {
+                const d = JSON.parse(e.data);
+                const whFeed = document.getElementById('webhook-feed');
+                if (whFeed) {
+                    const placeholder = document.getElementById('webhook-placeholder');
+                    if (placeholder) placeholder.remove();
+                    const ts = new Date(d.timestamp).toLocaleTimeString();
+                    const ok = d.status >= 200 && d.status < 300;
+                    const failed = d.status === 0;
+                    const statusCls = failed ? 'text-red-400' : ok ? 'text-green-400' : 'text-amber-400';
+                    const statusText = failed ? 'ERR' : d.status;
+                    const opIcons = { create: '＋', update: '✎', delete: '✕' };
+                    const sys = (window._connectorSystems && window._connectorSystems[d.connector]) ? window._connectorSystems[d.connector] : d.connector;
+                    const li = document.createElement('li');
+                    li.className = 'py-0.5 text-xs font-mono border-b border-slate-800 flex items-baseline gap-1.5 min-w-0';
+                    li.innerHTML = `
+          <span class="${statusCls} shrink-0">${statusText}</span>
+          <span class="text-slate-400 shrink-0">${opIcons[d.operation] || '·'}</span>
+          <span class="text-sky-300 shrink-0 truncate max-w-[8rem]">${sys}/${d.datatype}</span>
+          <span class="text-slate-500 truncate flex-1">${d.webhook_url ? d.webhook_url.replace(/^https?:\/\/[^/]+/, '') : ''}</span>
+          <span class="text-slate-600 shrink-0">${ts}</span>`;
+                    whFeed.prepend(li);
+                    while (whFeed.children.length > 50) whFeed.removeChild(whFeed.lastChild);
+                }
+                // Bubble so dedicated log pages can receive it.
+                document.dispatchEvent(new CustomEvent('simulator:webhook', { detail: d }));
+            });
+        })();
+    </script>
+
+    {% block extra_scripts %}{% endblock %}
+</body>
+
+</html>

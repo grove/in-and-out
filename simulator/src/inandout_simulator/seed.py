@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from inandout.simulator.store import RecordStore
+from inandout_simulator.store import RecordStore
 
 
 def _pk_field(primary_key) -> str:
