@@ -9,6 +9,7 @@ FROM python:3.13-slim AS runtime
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY simulator/src/ src/
+COPY schemas/ /schemas/
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 6100
 CMD ["inandout-simulator", "--listen", "0.0.0.0:6100"]
