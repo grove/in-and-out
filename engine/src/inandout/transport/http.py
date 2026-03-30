@@ -90,13 +90,20 @@ class HttpTransportAdapter:
     async def __aenter__(self) -> "HttpTransportAdapter":
         conn = self._connector.connection
         timeout_cfg = conn.timeout
-        timeout = httpx.Timeout(
-            connect=float(timeout_cfg.connect.rstrip("s")) if timeout_cfg and timeout_cfg.connect else 10.0,
-            read=float(timeout_cfg.read.rstrip("s")) if timeout_cfg and timeout_cfg.read else 30.0,
-            write=float(timeout_cfg.write.rstrip("s")) if timeout_cfg and timeout_cfg.write else 30.0,
-        ) if timeout_cfg else httpx.Timeout(10.0, read=30.0)
+        if timeout_cfg:
+            connect_s = float(timeout_cfg.connect.rstrip("s")) if timeout_cfg.connect else 10.0
+            read_s = float(timeout_cfg.read.rstrip("s")) if timeout_cfg.read else 30.0
+            write_s = float(timeout_cfg.write.rstrip("s")) if timeout_cfg.write else 30.0
+            timeout = httpx.Timeout(connect_s, connect=connect_s, read=read_s, write=write_s, pool=connect_s)
+        else:
+            timeout = httpx.Timeout(10.0, read=30.0)
+        # Allow per-connector base_url override via env var:
+        # INOUT_<CONNECTOR_NAME_UPPER>_BASE_URL=http://simulator:6100/hubspot
+        import os
+        env_key = f"INOUT_{self._connector.name.upper()}_BASE_URL"
+        base_url = os.environ.get(env_key) or self._connector.connection.base_url
         self._client = httpx.AsyncClient(
-            base_url=self._connector.connection.base_url,
+            base_url=base_url,
             auth=self._auth,
             timeout=timeout,
         )
