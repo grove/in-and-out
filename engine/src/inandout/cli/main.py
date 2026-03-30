@@ -574,7 +574,10 @@ def writeback_dry_run(
             # Force dry_run mode and a small batch size
             object.__setattr__(wb_cfg, "dry_run", True)
             object.__setattr__(wb_cfg, "batch_size", limit)
-            delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
+            if wb_cfg.use_desired_state_table:
+                delta_table = f"inout_dst_{connector_cfg.name}_{dtype_name}"
+            else:
+                delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
             result = await engine.run_writeback_cycle(
                 connector_cfg, dtype_name, wb_cfg, delta_table
             )

@@ -387,7 +387,10 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                     for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
                         if dtype_cfg.writeback is None:
                             continue
-                        delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
+                        if dtype_cfg.writeback.use_desired_state_table:
+                            delta_table = f"inout_dst_{connector_cfg.name}_{dtype_name}"
+                        else:
+                            delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
                         if dtype_cfg.writeback.streaming:
                             tg.start_soon(
                                 _writeback_loop_streaming,
