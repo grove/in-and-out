@@ -44,7 +44,9 @@ def _build_registry() -> referencing.Registry:
 
 
 _REGISTRY = _build_registry()
-_CONNECTOR_SCHEMA = json.loads((_SCHEMAS_DIR / "connector.schema.json").read_text(encoding="utf-8"))
+_CONNECTOR_SCHEMA = json.loads(
+    (_SCHEMAS_DIR / "connector.schema.json").read_text(encoding="utf-8")
+)
 _VALIDATOR_CLS = jsonschema.validators.validator_for(_CONNECTOR_SCHEMA)
 
 
