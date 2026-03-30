@@ -2059,7 +2059,7 @@ The three onboarding plans each interact with record linkage differently:
 **Risk profile:**
 - ✗ Linkage errors affect the production pipeline immediately
 - ✗ A false-positive link (junk value bridging two clusters) changes the golden record for all systems before anyone reviews it
-- ✓ Extended shadow mode (§10) catches the symptoms — system-3-caused changes to systems 1 and 2 are held for review
+- ✓ [Extended shadow mode](PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md) catches the symptoms — system-3-caused changes to systems 1 and 2 are held for review
 - ✓ The `origin` attribution field (§10.5) identifies which changes were caused by system 3 joining, so the operator can trace suspicious changes back to their links
 
 **Linkage-specific consideration:** Shadow mode detects **the consequences** of bad linkage (incorrect deltas) but does not prevent the linkage itself. By the time the operator sees a `system3_caused` field update in the shadow comparison table, the `_id_{target}` view has already merged the clusters and the golden record has already changed. The actual identity error must be traced back from the delta to the cluster to the specific edge that caused the merge.
@@ -2082,7 +2082,7 @@ The three onboarding plans each interact with record linkage differently:
 
 **Key insight:** No onboarding approach directly reviews individual identity links. They all operate at a higher level — clusters, deltas, or pipeline-level diffs. This is the gap that human curation of links would fill.
 
-**Under-linking during onboarding is particularly dangerous.** When system 3 joins, its records should match with existing records in systems 1 and 2. If the identity rules fail to create these links (because of formatting differences, missing fields, or over-strict link groups), the pipeline treats system 3's records as new entities. The delta views for systems 1 and 2 then generate `insert` actions — pushing these "new" entities into systems that _already have them under a different cluster_. The result is duplicate records in systems 1 and 2 that grow with every sync cycle. Extended shadow mode catches these as `new_record` rows with `origin = system3_caused`, giving the operator a chance to investigate before the inserts execute — but only if the operator recognises that a `new_record` might be a missed match rather than a genuinely new entity.
+**Under-linking during onboarding is particularly dangerous.** When system 3 joins, its records should match with existing records in systems 1 and 2. If the identity rules fail to create these links (because of formatting differences, missing fields, or over-strict link groups), the pipeline treats system 3's records as new entities. The delta views for systems 1 and 2 then generate `insert` actions — pushing these "new" entities into systems that _already have them under a different cluster_. The result is duplicate records in systems 1 and 2 that grow with every sync cycle. [Extended shadow mode](PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md) catches these as `new_record` rows with `origin = system3_caused`, giving the operator a chance to investigate before the inserts execute — but only if the operator recognises that a `new_record` might be a missed match rather than a genuinely new entity.
 
 ---
 
@@ -2101,7 +2101,7 @@ Source data → Identity matching → Proposed links → HUMAN REVIEW → Accept
 **What would be curated:**
 1. **Conflict links** — two records that match on an identity field but disagree substantially on other fields (different names, different addresses). The identifier match alone is not enough context to know if this is a true match or a coincidental shared email.
 2. **High-fanout links** — a single identity value that would create more than N edges. These are the junk value candidates.
-3. **Cross-system inserts** — the `new_record` classification from PLAN_ONBOARDING_SHADOW_MODE.md §10.6. When system 3 causes a new record to appear in systems 1 and 2, a human should confirm this is a genuine new entity — not a duplicate caused by under-linking.
+3. **Cross-system inserts** — the `new_record` classification from [PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md](PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md) §5. When system 3 causes a new record to appear in systems 1 and 2, a human should confirm this is a genuine new entity — not a duplicate caused by under-linking.
 4. **Cluster re-merges** — when two previously separate clusters are bridged by a system 3 record. These are the highest-risk link decisions because they affect records that were already stable.
 5. **Suspected under-links (duplicate clusters)** — two or more clusters whose records are suspiciously similar (near-identical names, overlapping addresses, same phone number with different formatting) but were not matched by the identity rules. These need a human to decide: should they be linked (forced merge via override), or are they genuinely distinct entities? Left unreviewed, each cluster generates cross-system inserts that create duplicates in every writable system.
 6. **Dual-relationship candidates (§4.51)** — two records where all identity fields match but the records represent intentionally distinct business relationships (vendor AND customer; employee AND patient). These must be explicitly reviewed before the bootstrap because a post-writeback block requires manual unwinding across all systems. The review question is not "are these the same person?" but "should these records be managed as a unit?"
@@ -2241,7 +2241,7 @@ Also a natural fit. The blue pipeline is a safe environment for curation.
 4. Operator traces bad deltas back to links → creates `no_link` overrides
 5. Identity resolution re-runs → clusters split → corrected deltas flow
 
-This is reactive, not proactive. Curation happens after the damage (wrong golden record, wrong deltas to systems 1 and 2). Extended shadow mode (§10) mitigates this by holding system-3-caused changes, but the golden record itself is already wrong during the review window.
+This is reactive, not proactive. Curation happens after the damage (wrong golden record, wrong deltas to systems 1 and 2). [Extended shadow mode](PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md) mitigates this by holding system-3-caused changes, but the golden record itself is already wrong during the review window.
 
 **Extended shadow mode + curation (recommended workflow):**
 1. System 3 added to production identity resolution
@@ -2820,7 +2820,7 @@ Option 3 (external orchestration) is simplest and does not add requirements to p
 
 3. **Should curation apply to all data types or just contacts?** Companies, deals, and other entity types have the same linkage risks but typically lower volumes. The curation mechanism should be generic (per-target, not per-data-type), but the review priority should focus on the entity types with the highest writeback impact.
 
-4. **What is the minimum viable curation UI?** An MVP might be a read-only view of the curation queue table plus a form for submitting override decisions. A production system would need side-by-side record comparison, cluster graph visualisation, bulk accept/reject, and integration with the shadow mode dashboard from PLAN_ONBOARDING_SHADOW_MODE.md §10.11.
+4. **What is the minimum viable curation UI?** An MVP might be a read-only view of the curation queue table plus a form for submitting override decisions. A production system would need side-by-side record comparison, cluster graph visualisation, bulk accept/reject, and integration with the shadow mode dashboard from [PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md](PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md) §10.
 
 5. **How does curation interact with real-time writeback?** In steady state (post-onboarding), should new links always be auto-accepted, or should the curation queue remain active? If active, there must be a mechanism to hold writeback for clusters with pending curation decisions — essentially permanent shadow mode for uncertain links.
 

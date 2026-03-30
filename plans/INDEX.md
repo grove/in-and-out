@@ -13,6 +13,7 @@
 | [PLAN_ONBOARDING_PROPOSAL.md](PLAN_ONBOARDING_PROPOSAL.md) | pg-trickle mechanisms for MDM onboarding | 📋 Draft |
 | [PLAN_ONBOARDING_BLUE_GREEN.md](PLAN_ONBOARDING_BLUE_GREEN.md) | Blue/Green source table onboarding evaluation | 📋 Draft |
 | [PLAN_ONBOARDING_SHADOW_MODE.md](PLAN_ONBOARDING_SHADOW_MODE.md) | Shadow mode onboarding evaluation | 📋 Draft |
+| [PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md](PLAN_ONBOARDING_SHADOW_MODE_EXTENDED.md) | Extended shadow mode — protecting all systems during onboarding | 📋 Draft |
 | [PLAN_RECORD_LINKAGE.md](PLAN_RECORD_LINKAGE.md) | Record linkage in in-and-out + OSI-Mapping | 📋 Draft |
 | [PLAN_HOUSEKEEPING.md](PLAN_HOUSEKEEPING.md) | Repository housekeeping — Docker, Compose, docs consolidation | 📋 Draft |
 
