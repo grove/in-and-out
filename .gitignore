@@ -1,35 +1,28 @@
-# Python
+# Python bytecode
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.Python
 *.egg
 *.egg-info/
-dist/
-build/
-eggs/
-parts/
-var/
-sdist/
-develop-eggs/
-.installed.cfg
-lib/
-lib64/
 
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
+# Distribution / packaging (root-level only)
+/dist/
+/build/
+
+# Virtual environments (root-level only)
+/.venv/
+/venv/
+/env/
+/ENV/
 
 # uv
-.uv/
+/.uv/
 
 # pytest / coverage / hypothesis
 .pytest_cache/
 .coverage
-htmlcov/
+/htmlcov/
 .tox/
 .hypothesis/
 
@@ -51,24 +44,21 @@ htmlcov/
 .AppleDouble
 .LSOverride
 
-# Environment / secrets (never commit these)
+# Environment / secrets (never commit real credentials)
 .env
-.env.*
+.env.local
+.env.*.local
 *.env
-secrets/
-credentials/
-
-# Alembic (generated migration output, not scripts)
-# Keep migrations/versions/ tracked
+# Allow the conventional template file
+!.env.example
 
 # Connectors with real credentials (use connectors/*.example.yaml instead)
 connectors/*.yaml
 !connectors/*.example.yaml
-!connectors/.gitkeep
 
 # Logs
 *.log
-logs/
+/logs/
 
 # mdBook build output
-docs-build/
+/docs-build/
