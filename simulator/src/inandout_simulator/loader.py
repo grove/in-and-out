@@ -8,6 +8,7 @@ directly so callers can use plain dict access.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 import jsonschema
@@ -16,7 +17,10 @@ import referencing
 import referencing.jsonschema
 import yaml
 
-_SCHEMAS_DIR = pathlib.Path(__file__).parent.parent.parent.parent / "schemas"
+_SCHEMAS_DIR = pathlib.Path(
+    os.environ.get("INANDOUT_SCHEMAS_DIR")
+    or str(pathlib.Path(__file__).parent.parent.parent.parent / "schemas")
+)
 
 
 def _build_registry() -> referencing.Registry:

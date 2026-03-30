@@ -12,5 +12,6 @@ COPY --from=builder /app/.venv /app/.venv
 COPY simulator/src/ src/
 COPY schemas/ /schemas/
 ENV PATH="/app/.venv/bin:$PATH"
+ENV INANDOUT_SCHEMAS_DIR=/schemas
 EXPOSE 6100
 CMD ["inandout-simulator", "--listen", "0.0.0.0:6100"]
