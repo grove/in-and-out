@@ -119,7 +119,11 @@ def _build_openapi_extra(
                 }
             )
         if pagination is not None:
-            strategy = (pagination or {}).get("strategy") if isinstance(pagination, dict) else None
+            strategy = (
+                (pagination or {}).get("strategy")
+                if isinstance(pagination, dict)
+                else None
+            )
             if strategy == "cursor" and pagination.get("cursor", {}):
                 params.append(
                     {
@@ -147,9 +151,15 @@ def _build_openapi_extra(
                     )
             elif strategy == "offset":
                 off_cfg = pagination.get("offset", {}) or {}
-                off_p = off_cfg.get("param", "offset") if isinstance(off_cfg, dict) else "offset"
+                off_p = (
+                    off_cfg.get("param", "offset")
+                    if isinstance(off_cfg, dict)
+                    else "offset"
+                )
                 lim_p = (
-                    off_cfg.get("limit_param", "limit") if isinstance(off_cfg, dict) else "limit"
+                    off_cfg.get("limit_param", "limit")
+                    if isinstance(off_cfg, dict)
+                    else "limit"
                 )
                 params.append(
                     {
@@ -171,7 +181,11 @@ def _build_openapi_extra(
                 )
             elif strategy == "page_number":
                 pn_cfg = pagination.get("page_number", {}) or {}
-                page_p = pn_cfg.get("page_param", "page") if isinstance(pn_cfg, dict) else "page"
+                page_p = (
+                    pn_cfg.get("page_param", "page")
+                    if isinstance(pn_cfg, dict)
+                    else "page"
+                )
                 pp_p = (
                     pn_cfg.get("per_page_param", "per_page")
                     if isinstance(pn_cfg, dict)
@@ -211,7 +225,10 @@ def _build_openapi_extra(
                         "name": ks.get("page_size_param", "per_page"),
                         "in": "query",
                         "required": False,
-                        "schema": {"type": "integer", "default": ks.get("page_size", 20)},
+                        "schema": {
+                            "type": "integer",
+                            "default": ks.get("page_size", 20),
+                        },
                         "description": "Page size",
                     }
                 )
@@ -383,7 +400,9 @@ def build_connector_router(
             record_selector = (dt_cfg.get("ingestion") or {}).get("list", {}).get(
                 "record_selector"
             ) or "results"
-            pagination = (dt_cfg.get("ingestion") or {}).get("list", {}).get("pagination") or {}
+            pagination = (dt_cfg.get("ingestion") or {}).get("list", {}).get(
+                "pagination"
+            ) or {}
             strategy = pagination.get("strategy") if pagination else None
             cursor_field, filter_param, cursor_type = _get_incremental_params(
                 dt_cfg.get("ingestion")
@@ -424,7 +443,9 @@ def build_connector_router(
                     effective_page_size = default_page_size
 
                     if _strategy == "cursor":
-                        cursor_param = _pagination.get("cursor", {}).get("request_param")
+                        cursor_param = _pagination.get("cursor", {}).get(
+                            "request_param"
+                        )
                         raw_cursor = params.get(cursor_param) if cursor_param else None
                         if raw_cursor and raw_cursor.lstrip("-").isdigit():
                             offset = int(raw_cursor)
@@ -460,7 +481,9 @@ def build_connector_router(
                     elif _strategy == "page_number":
                         pn_cfg = _pagination.get("page_number", {}) or {}
                         page_p = (
-                            pn_cfg.get("page_param", "page") if isinstance(pn_cfg, dict) else "page"
+                            pn_cfg.get("page_param", "page")
+                            if isinstance(pn_cfg, dict)
+                            else "page"
                         )
                         pp_p = (
                             pn_cfg.get("per_page_param", "per_page")
@@ -475,9 +498,13 @@ def build_connector_router(
 
                     elif _strategy == "keyset":
                         ks = _pagination.get("keyset") or {}
-                        after = params.get(ks.get("request_param", "after")) if ks else None
+                        after = (
+                            params.get(ks.get("request_param", "after")) if ks else None
+                        )
                         effective_page_size = (
-                            ks.get("page_size", default_page_size) if ks else default_page_size
+                            ks.get("page_size", default_page_size)
+                            if ks
+                            else default_page_size
                         )
                         if after:
                             all_records = [
@@ -493,7 +520,10 @@ def build_connector_router(
                     has_more = next_offset < total
 
                     # Strip internal meta-keys before returning to the caller.
-                    page = [{k: v for k, v in r.items() if not k.startswith("__")} for r in page]
+                    page = [
+                        {k: v for k, v in r.items() if not k.startswith("__")}
+                        for r in page
+                    ]
 
                     # --- Build response body ---
                     body: dict = {_selector: page}
@@ -514,7 +544,9 @@ def build_connector_router(
 
                         elif _strategy == "page_number":
                             pn_cfg = _pagination.get("page_number", {}) or {}
-                            if isinstance(pn_cfg, dict) and pn_cfg.get("total_pages_path"):
+                            if isinstance(pn_cfg, dict) and pn_cfg.get(
+                                "total_pages_path"
+                            ):
                                 total_pages = (
                                     total + effective_page_size - 1
                                 ) // effective_page_size
@@ -523,9 +555,13 @@ def build_connector_router(
                         elif _strategy == "link_header":
                             lh_cfg = _pagination.get("link_header", {}) or {}
                             hdr = (
-                                lh_cfg.get("header", "Link") if isinstance(lh_cfg, dict) else "Link"
+                                lh_cfg.get("header", "Link")
+                                if isinstance(lh_cfg, dict)
+                                else "Link"
                             )
-                            next_url = f"/{connector_name}{_list_path}?after={next_offset}"
+                            next_url = (
+                                f"/{connector_name}{_list_path}?after={next_offset}"
+                            )
                             headers_out[hdr] = f'<{next_url}>; rel="next"'
 
                     ms = int((time.monotonic() - t0) * 1000)
@@ -564,11 +600,12 @@ def build_connector_router(
         if dt_cfg.get("writeback"):
             ops = (dt_cfg.get("writeback") or {}).get("operations", {})
             cursor_field_wb: str | None = None
-            if dt_cfg.get("ingestion") and (dt_cfg.get("ingestion") or {}).get("list", {}).get(
-                "incremental"
-            ):
+            if dt_cfg.get("ingestion") and (dt_cfg.get("ingestion") or {}).get(
+                "list", {}
+            ).get("incremental"):
                 cursor_field_wb = (
-                    (dt_cfg.get("ingestion") or {}).get("list", {}).get("incremental") or {}
+                    (dt_cfg.get("ingestion") or {}).get("list", {}).get("incremental")
+                    or {}
                 ).get("cursor_field")
 
             for action in ("lookup", "insert", "update", "delete", "archive", "upsert"):
@@ -602,8 +639,12 @@ def build_connector_router(
                                 connector_name, _dt_name, rid, source="engine"
                             )
                             if deleted:
-                                dispatcher.dispatch_nowait(connector, _dt_name, "delete", rid, None)
-                                ev = await store.recent_mutations(connector_name, _dt_name, 1)
+                                dispatcher.dispatch_nowait(
+                                    connector, _dt_name, "delete", rid, None
+                                )
+                                ev = await store.recent_mutations(
+                                    connector_name, _dt_name, 1
+                                )
                                 if ev:
                                     event_bus.publish_mutation(ev[0])
                             ms = int((time.monotonic() - t0) * 1000)
@@ -632,8 +673,12 @@ def build_connector_router(
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
                             if rec is None:
-                                return JSONResponse({"error": "not found"}, status_code=404)
-                            display = {k: v for k, v in rec.items() if not k.startswith("__")}
+                                return JSONResponse(
+                                    {"error": "not found"}, status_code=404
+                                )
+                            display = {
+                                k: v for k, v in rec.items() if not k.startswith("__")
+                            }
                             return JSONResponse(display)
 
                         if _action == "insert":
@@ -646,13 +691,19 @@ def build_connector_router(
 
                                 body[_cursor_field] = _dt.now(_tz.utc).isoformat()
                             record = await store.create(
-                                connector_name, _dt_name, body, pk_field=_pk, source="engine"
+                                connector_name,
+                                _dt_name,
+                                body,
+                                pk_field=_pk,
+                                source="engine",
                             )
                             new_id = str(record.get(_pk, ""))
                             dispatcher.dispatch_nowait(
                                 connector, _dt_name, "create", new_id, record
                             )
-                            evs = await store.recent_mutations(connector_name, _dt_name, 1)
+                            evs = await store.recent_mutations(
+                                connector_name, _dt_name, 1
+                            )
                             if evs:
                                 event_bus.publish_mutation(evs[0])
                             ms = int((time.monotonic() - t0) * 1000)
@@ -666,7 +717,11 @@ def build_connector_router(
                                 request_body_json=json.dumps(body),
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
-                            display = {k: v for k, v in record.items() if not k.startswith("__")}
+                            display = {
+                                k: v
+                                for k, v in record.items()
+                                if not k.startswith("__")
+                            }
                             return JSONResponse(display, status_code=201)
 
                         # update / archive / upsert
@@ -695,7 +750,9 @@ def build_connector_router(
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
                             return JSONResponse({"error": "not found"}, status_code=404)
-                        dispatcher.dispatch_nowait(connector, _dt_name, "update", rid, updated)
+                        dispatcher.dispatch_nowait(
+                            connector, _dt_name, "update", rid, updated
+                        )
                         evs = await store.recent_mutations(connector_name, _dt_name, 1)
                         if evs:
                             event_bus.publish_mutation(evs[0])
@@ -710,7 +767,9 @@ def build_connector_router(
                             request_body_json=json.dumps(body),
                             request_headers_json=json.dumps(dict(request.headers)),
                         )
-                        display = {k: v for k, v in updated.items() if not k.startswith("__")}
+                        display = {
+                            k: v for k, v in updated.items() if not k.startswith("__")
+                        }
                         return JSONResponse(display)
 
                     _extra = _build_openapi_extra(_action, _seed, _pk)
@@ -722,16 +781,24 @@ def build_connector_router(
                         "archive": "Archive",
                         "upsert": "Upsert",
                     }
-                    _summary = f"{_action_labels.get(_action, _action.title())} {_dt_name}"
+                    _summary = (
+                        f"{_action_labels.get(_action, _action.title())} {_dt_name}"
+                    )
 
                     if _has_id:
 
-                        async def _ep_with_id(request: Request, record_id: str) -> Response:
+                        async def _ep_with_id(
+                            request: Request, record_id: str
+                        ) -> Response:
                             return await write_endpoint(request, record_id)
 
                         _ep_with_id.__name__ = f"{_action}_{_dt_name}"
                         _add(
-                            _fa_path, [_method], _ep_with_id, openapi_extra=_extra, summary=_summary
+                            _fa_path,
+                            [_method],
+                            _ep_with_id,
+                            openapi_extra=_extra,
+                            summary=_summary,
                         )
                     else:
                         # No {record_id} in the path — register a wrapper WITHOUT the
@@ -741,7 +808,13 @@ def build_connector_router(
                             return await write_endpoint(request, None)
 
                         _ep_no_id.__name__ = f"{_action}_{_dt_name}"
-                        _add(_fa_path, [_method], _ep_no_id, openapi_extra=_extra, summary=_summary)
+                        _add(
+                            _fa_path,
+                            [_method],
+                            _ep_no_id,
+                            openapi_extra=_extra,
+                            summary=_summary,
+                        )
 
                 _make_write_handler()
 
@@ -752,7 +825,9 @@ def build_connector_router(
     # the connector's registration.register_path.  In the simulator that
     # path lives on *this* process, so we generate matching handlers here.
     # Subscriptions are kept in a simple in-memory dict scoped to the router.
-    if connector.get("webhooks") and (connector.get("webhooks") or {}).get("registration"):
+    if connector.get("webhooks") and (connector.get("webhooks") or {}).get(
+        "registration"
+    ):
         _add_webhook_registration_routes(
             connector,
             _add,
@@ -931,7 +1006,12 @@ def _add_webhook_registration_routes(
             _deregister.__name__ = f"webhook_deregister_{connector['name']}"
             return _deregister
 
-        _add(dereg_fa, ["DELETE"], _make_deregister(), summary="Deregister webhook subscription")
+        _add(
+            dereg_fa,
+            ["DELETE"],
+            _make_deregister(),
+            summary="Deregister webhook subscription",
+        )
 
     # ------------------------------------------------------------------
     # PUT {renew_path} — renew / heartbeat (no-op, always 200)
@@ -982,9 +1062,9 @@ def _add_webhook_registration_routes(
                             connector=connector["name"],
                             datatype="webhook_subscription",
                             method="GET",
-                            path=_wh_path_to_fa(reg.get("health_check_path", "/")).replace(
-                                "{webhook_id}", str(webhook_id)
-                            ),
+                            path=_wh_path_to_fa(
+                                reg.get("health_check_path", "/")
+                            ).replace("{webhook_id}", str(webhook_id)),
                             status=404,
                             duration_ms=int((time.monotonic() - t0) * 1000),
                         )
@@ -1014,4 +1094,9 @@ def _add_webhook_registration_routes(
             _health.__name__ = f"webhook_health_{connector['name']}"
             return _health
 
-        _add(health_fa, ["GET"], _make_health(), summary="Webhook subscription health check")
+        _add(
+            health_fa,
+            ["GET"],
+            _make_health(),
+            summary="Webhook subscription health check",
+        )
