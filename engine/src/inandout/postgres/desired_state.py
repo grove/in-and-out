@@ -76,11 +76,14 @@ def lwstate_table_ddl(connector: str, datatype: str, namespace: str = "public") 
     schema_prefix = f"CREATE SCHEMA IF NOT EXISTS {namespace};\n" if namespace and namespace != "public" else ""
     return f"""{schema_prefix}CREATE TABLE IF NOT EXISTS {table} (
     external_id     TEXT NOT NULL PRIMARY KEY,
+    cluster_id      TEXT,
     data            JSONB NOT NULL,
     _etag           TEXT,
     _written_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     _sync_run_id    UUID
-);""".strip()
+);
+CREATE INDEX IF NOT EXISTS {table.replace(".", "_")}_cluster_id_idx
+    ON {table} (cluster_id) WHERE cluster_id IS NOT NULL;""".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +129,12 @@ async def ensure_lwstate_table(
     table = lwstate_table_name(connector, datatype, namespace)
     await conn.execute(lwstate_table_ddl(connector, datatype, namespace))
     await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
-    # Ensure _etag column exists on tables created before this version
-    await conn.execute(
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _etag TEXT"
-    )
+    # Ensure columns added after initial DDL exist on older tables
+    for col_ddl in (
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _etag TEXT",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cluster_id TEXT",
+    ):
+        await conn.execute(col_ddl)
 
 
 async def upsert_desired_state(
@@ -171,6 +176,7 @@ async def upsert_lwstate(
     run_id: object = None,
     namespace: str = "public",
     etag: str | None = None,
+    cluster_id: str | None = None,
 ) -> None:
     """Record what was last successfully written for an external_id.
 
@@ -180,6 +186,10 @@ async def upsert_lwstate(
         Optional ETag / version identifier returned by the target API for this
         write.  Stored in the ``_etag`` column for use in subsequent
         conditional writes (T2 #9).
+    cluster_id:
+        OSI-Mapping cluster identifier for this record.  Stored so that
+        the lwstate table can be used directly as a ``written_state`` source
+        in OSI-Mapping (keyed by cluster_id → last-written field values).
     """
     import orjson
 
@@ -188,15 +198,16 @@ async def upsert_lwstate(
     run_id_val = str(run_id) if run_id is not None else None
     await conn.execute(
         f"""
-        INSERT INTO {table} (external_id, data, _etag, _written_at, _sync_run_id)
-        VALUES (%s, %s, %s, NOW(), %s)
+        INSERT INTO {table} (external_id, cluster_id, data, _etag, _written_at, _sync_run_id)
+        VALUES (%s, %s, %s, %s, NOW(), %s)
         ON CONFLICT (external_id) DO UPDATE
-        SET data = EXCLUDED.data,
+        SET cluster_id = COALESCE(EXCLUDED.cluster_id, {table}.cluster_id),
+            data = EXCLUDED.data,
             _etag = EXCLUDED._etag,
             _written_at = NOW(),
             _sync_run_id = EXCLUDED._sync_run_id
         """,
-        [external_id, data_json, etag, run_id_val],
+        [external_id, cluster_id, data_json, etag, run_id_val],
     )
 
 

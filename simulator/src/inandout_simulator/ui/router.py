@@ -6,7 +6,9 @@ import json
 from html import escape as html_escape
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -16,6 +18,14 @@ from inandout_simulator.ui.sse import sse_endpoint
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+
+def _cursor_field_from_cfg(dt_cfg: dict) -> str | None:
+    """Return the incremental cursor field name from a datatype config, or None."""
+    inc = ((dt_cfg.get("ingestion") or {}).get("list") or {}).get("incremental")
+    if inc and inc.get("enabled"):
+        return inc.get("cursor_field")
+    return None
 
 
 def _pretty_json(value: str) -> str:
@@ -188,6 +198,7 @@ def build_ui_router() -> APIRouter:
                 "records": records,
                 "live_count": live_count,
                 "counts": counts,
+                "cursor_field": _cursor_field_from_cfg(dt_cfg),
             },
         )
 
@@ -274,6 +285,13 @@ def build_ui_router() -> APIRouter:
             )
         full_link = f'<a href="/ui/{connector_name}/{datatype}/{record_id}" class="text-xs text-sky-400 hover:underline">Open full page ↗</a>'
         edit_disabled = 'style="opacity:.4;pointer-events:none"' if is_deleted else ""
+        panel_cursor_field = _cursor_field_from_cfg(connector["datatypes"][datatype])
+        auto_ts_checkbox = (
+            f'<label class="flex items-center gap-1 text-xs text-slate-400 cursor-pointer ml-1">'
+            f'<input type="checkbox" id="panel-auto-ts-{record_id}" checked class="accent-sky-500">'
+            f'Auto-ts ({panel_cursor_field})'
+            f'</label>'
+        ) if panel_cursor_field else ""
         html = f"""
 {deleted_html}
 <div class="flex flex-col gap-3 h-full" style="min-height:0">
@@ -297,13 +315,14 @@ def build_ui_router() -> APIRouter:
       class="flex-1 w-full bg-slate-900 text-slate-100 font-mono text-xs rounded-lg p-3
              border border-slate-600 focus:border-sky-500 focus:outline-none resize-none min-h-0"
       >{html_escape(record_json)}</textarea>
-    <div class="flex items-center gap-2 shrink-0">
+    <div class="flex items-center gap-2 shrink-0 flex-wrap">
       <button onclick="submitPanelEdit('{connector_name}','{datatype}','{record_id}')"
         class="bg-sky-600 hover:bg-sky-500 text-white text-xs px-3 py-1.5 rounded">Save</button>
       <button hx-delete="/admin/{connector_name}/{datatype}/{record_id}"
         hx-on::after-request="document.getElementById('record-panel').classList.add('hidden')"
         onclick="event.stopPropagation()"
         class="bg-red-700 hover:bg-red-600 text-white text-xs px-3 py-1.5 rounded">Delete</button>
+      {auto_ts_checkbox}
       <p id="panel-edit-status-{record_id}" class="text-xs hidden"></p>
     </div>
   </div>
@@ -323,7 +342,9 @@ def build_ui_router() -> APIRouter:
     const ta=document.getElementById('panel-edit-json-'+id);
     let body; try{{body=JSON.parse(ta.value);}}catch(e){{alert('Invalid JSON: '+e.message);return;}}
     const headers={{'Content-Type':'application/json','If-Match':_panelEtag}};
-    const r=await fetch('/admin/'+c+'/'+d+'/'+id,{{method:'PUT',headers,body:JSON.stringify(body)}});
+    const autoTs=document.getElementById('panel-auto-ts-'+id)?.checked??false;
+    const url='/admin/'+c+'/'+d+'/'+id+(autoTs?'':'?auto_ts=false');
+    const r=await fetch(url,{{method:'PUT',headers,body:JSON.stringify(body)}});
     const st=document.getElementById('panel-edit-status-'+id);
     if(r.status===412){{st.textContent='Conflict — reload panel.';st.className='text-xs text-amber-400';st.classList.remove('hidden');return;}}
     if(r.ok){{
@@ -410,6 +431,7 @@ def build_ui_router() -> APIRouter:
                 "counts": counts,
                 "record_json": json.dumps(display, indent=2),
                 "etag": record.get("__modified_at__", ""),
+                "cursor_field": _cursor_field_from_cfg(connector["datatypes"][datatype]),
             },
         )
 
@@ -433,7 +455,12 @@ def build_ui_router() -> APIRouter:
         return JSONResponse(display, headers={"ETag": etag})
 
     @router.post("/admin/{connector_name}/{datatype}", response_class=HTMLResponse)
-    async def admin_create(request: Request, connector_name: str, datatype: str):
+    async def admin_create(
+        request: Request,
+        connector_name: str,
+        datatype: str,
+        auto_ts: bool = Query(default=True),
+    ):
         connectors = request.app.state.connectors
         connector = next((c for c in connectors if c["name"] == connector_name), None)
         if connector is None or datatype not in connector["datatypes"]:
@@ -444,6 +471,10 @@ def build_ui_router() -> APIRouter:
         except Exception:
             body = {}
         dt_cfg = connector["datatypes"][datatype]
+        if auto_ts:
+            cursor_field = _cursor_field_from_cfg(dt_cfg)
+            if cursor_field:
+                body[cursor_field] = datetime.now(timezone.utc).isoformat()
         pk_field = _pk_from_cfg(dt_cfg)
         record = await store.create(connector_name, datatype, body, pk_field=pk_field, source="ui")
         evs = await store.recent_mutations(connector_name, datatype, 1)
@@ -457,7 +488,13 @@ def build_ui_router() -> APIRouter:
         )
 
     @router.put("/admin/{connector_name}/{datatype}/{record_id}", response_class=HTMLResponse)
-    async def admin_update(request: Request, connector_name: str, datatype: str, record_id: str):
+    async def admin_update(
+        request: Request,
+        connector_name: str,
+        datatype: str,
+        record_id: str,
+        auto_ts: bool = Query(default=True),
+    ):
         connectors = request.app.state.connectors
         connector = next((c for c in connectors if c["name"] == connector_name), None)
         if connector is None or datatype not in connector["datatypes"]:
@@ -477,14 +514,10 @@ def build_ui_router() -> APIRouter:
         except Exception:
             body = {}
         dt_cfg = connector["datatypes"][datatype]
-        cursor_field: str | None = None
-        inc = ((dt_cfg.get("ingestion") or {}).get("list") or {}).get("incremental")
-        if inc and inc.get("enabled"):
-            cursor_field = inc.get("cursor_field")
-        if cursor_field:
-            from datetime import datetime, timezone
-
-            body[cursor_field] = datetime.now(timezone.utc).isoformat()
+        if auto_ts:
+            cursor_field = _cursor_field_from_cfg(dt_cfg)
+            if cursor_field:
+                body[cursor_field] = datetime.now(timezone.utc).isoformat()
         updated = await store.update(connector_name, datatype, record_id, body, source="ui")
         if updated is None:
             return Response(status_code=404)

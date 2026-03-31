@@ -923,11 +923,13 @@ class WritebackEngine:
                         if not safe:
                             # Conflict detected — always update lwstate to current reality
                             _conflict_etag = preflight_resp.headers.get(writeback_cfg.etag_header) or None
+                            _row_cluster_id = row.get("cluster_id") or row.get("_cluster_id") or None
                             async with self._pool.connection() as lw_update_conn:
                                 await upsert_lwstate(
                                     lw_update_conn, connector.name, result.datatype,
                                     external_id, current_state,
                                     etag=_conflict_etag,
+                                    cluster_id=_row_cluster_id,
                                 )
                                 await lw_update_conn.commit()
 
@@ -1285,11 +1287,13 @@ class WritebackEngine:
                         # Store the actual payload (without synthetic _etag key) and pass
                         # the ETag separately so it lands in its own column.
                         lw_etag = _3way_etag or None
+                        _post_cluster_id = row.get("cluster_id") or row.get("_cluster_id") or None
                         async with self._pool.connection() as lw_post_conn:
                             await upsert_lwstate(
                                 lw_post_conn, connector.name, result.datatype,
                                 external_id, sent_payload,
                                 etag=lw_etag,
+                                cluster_id=_post_cluster_id,
                             )
                             await lw_post_conn.commit()
                     except Exception:

@@ -37,11 +37,17 @@
                 <textarea id="new-record-json" class="w-full bg-slate-900 text-slate-100 font-mono text-sm rounded-lg p-3
                              border border-slate-600 focus:border-sky-500 focus:outline-none h-28"
                     placeholder='{"id": "1234", "name": "Alice"}'></textarea>
-                <div class="flex gap-2">
+                <div class="flex items-center gap-2 flex-wrap">
                     <button onclick="submitNewRecord('{{ connector.name }}', '{{ datatype }}')"
                         class="bg-green-600 hover:bg-green-500 text-white text-sm px-3 py-1.5 rounded-lg">Create</button>
                     <button onclick="document.getElementById('new-record-form').classList.add('hidden')"
                         class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm px-3 py-1.5 rounded-lg">Cancel</button>
+                    {% if cursor_field %}
+                    <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer ml-1">
+                        <input type="checkbox" id="auto-ts-new" checked class="accent-sky-500">
+                        Auto-update <code class="text-slate-300">{{ cursor_field }}</code>
+                    </label>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -227,7 +233,9 @@
         var raw = document.getElementById('new-record-json').value;
         var body;
         try { body = JSON.parse(raw); } catch (e) { alert('Invalid JSON: ' + e.message); return; }
-        var resp = await fetch('/admin/' + connector + '/' + datatype, {
+        var autoTs = document.getElementById('auto-ts-new')?.checked ?? false;
+        var url = '/admin/' + connector + '/' + datatype + (autoTs ? '' : '?auto_ts=false');
+        var resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),

@@ -52,7 +52,7 @@
             <textarea id="edit-json"
                 class="w-full bg-slate-900 text-slate-100 font-mono text-sm rounded-lg p-3
                        border border-slate-600 focus:border-sky-500 focus:outline-none h-48">{{ record_json }}</textarea>
-            <div class="flex gap-2 mt-3">
+            <div class="flex gap-2 mt-3 items-center flex-wrap">
                 <button onclick="submitEdit('{{ connector.name }}', '{{ datatype }}', '{{ record_id }}')"
                     class="bg-sky-600 hover:bg-sky-500 text-white text-sm px-4 py-2 rounded-lg">
                     Save Changes
@@ -62,6 +62,12 @@
                     class="bg-red-700 hover:bg-red-600 text-white text-sm px-4 py-2 rounded-lg">
                     Delete Record
                 </button>
+                {% if cursor_field %}
+                <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer ml-1">
+                    <input type="checkbox" id="auto-ts-edit" checked class="accent-sky-500">
+                    Auto-update <code class="text-slate-300">{{ cursor_field }}</code>
+                </label>
+                {% endif %}
             </div>
             <p id="edit-status" class="text-sm mt-2 hidden"></p>
         </div>
@@ -135,7 +141,9 @@
         const status = document.getElementById('edit-status');
         const headers = { 'Content-Type': 'application/json' };
         if (_etag) headers['If-Match'] = _etag;
-        const resp = await fetch(`/admin/${connector}/${datatype}/${recordId}`, {
+        const autoTs = document.getElementById('auto-ts-edit')?.checked ?? false;
+        const url = `/admin/${connector}/${datatype}/${recordId}` + (autoTs ? '' : '?auto_ts=false');
+        const resp = await fetch(url, {
             method: 'PUT',
             headers,
             body: JSON.stringify(body),
