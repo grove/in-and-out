@@ -38,6 +38,7 @@ async def _health(request: Request) -> JSONResponse:
 # Module-level draining flag — set to True when SIGTERM/SIGINT received.
 _draining: bool = False
 _drain_event: asyncio.Event | None = None  # wakes sleeping loops immediately on drain
+_uvicorn_servers: list = []  # registered by startup; signalled on drain
 _alert_dispatcher: AlertDispatcher | None = None
 _federation_hb: FederationHeartbeat | None = None
 
@@ -51,6 +52,8 @@ def _trigger_drain() -> None:
             asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
         except RuntimeError:
             pass
+    for srv in _uvicorn_servers:
+        srv.should_exit = True
     logger.info("writeback_drain_control_command_received")
 
 
@@ -395,9 +398,11 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_health_app(pool=pool), host=host, port=int(port_str), log_level="warning"
+        _build_health_app(pool=pool), host=host, port=int(port_str), log_level="warning",
+        install_signal_handlers=False,
     )
     health_server = uvicorn.Server(health_server_config)
+    _uvicorn_servers.append(health_server)
 
     async def _run_health_server() -> None:
         await health_server.serve()
@@ -442,6 +447,8 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                 asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
             except RuntimeError:
                 pass
+        for srv in _uvicorn_servers:
+            srv.should_exit = True
         log.info("writeback_drain_signal_received", signal=sig)
 
     try:

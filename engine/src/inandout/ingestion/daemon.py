@@ -139,6 +139,7 @@ def _setup_credential_backend(config: IngestionToolConfig) -> None:
 # All polling loops check this at the top of each iteration and exit cleanly.
 _draining: bool = False
 _drain_event: asyncio.Event | None = None  # wakes sleeping loops immediately on drain
+_uvicorn_servers: list = []  # registered by startup; signalled on drain
 _alert_dispatcher: AlertDispatcher | None = None
 _federation_hb: FederationHeartbeat | None = None
 
@@ -152,6 +153,8 @@ def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
             asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
         except RuntimeError:
             pass
+    for srv in _uvicorn_servers:
+        srv.should_exit = True
     logger.info("ingestion_drain_signal_received", signal=sig)
 
 
@@ -909,8 +912,10 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         host=host,
         port=int(port_str),
         log_level="warning",
+        install_signal_handlers=False,
     )
     health_server = uvicorn.Server(health_server_config)
+    _uvicorn_servers.append(health_server)
 
     # Build webhook-only server if configured
     webhook_server_cfg = getattr(config, "webhook_server", None)
@@ -938,9 +943,11 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             host=webhook_host,
             port=int(webhook_port_str),
             log_level="warning",
+            install_signal_handlers=False,
             **webhook_uvicorn_kwargs,
         )
         webhook_server = uvicorn.Server(webhook_server_config)
+        _uvicorn_servers.append(webhook_server)
 
     async def _run_health_server() -> None:
         await health_server.serve()
