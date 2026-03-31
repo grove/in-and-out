@@ -7,11 +7,14 @@ from typing import Union
 
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from inandout_simulator.loader import load_connector
 from inandout_simulator.events import EventBus
+from inandout_simulator.metrics import REGISTRY
 from inandout_simulator.route_builder import build_connector_router
 from inandout_simulator.seed import seed_from_connector
 from inandout_simulator.store import RecordStore
@@ -225,6 +228,10 @@ def create_app(
         )
 
     from fastapi.responses import JSONResponse
+
+    @app.get("/metrics", include_in_schema=False)
+    async def _metrics() -> Response:
+        return Response(content=generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/health", include_in_schema=False)
     async def _health() -> JSONResponse:

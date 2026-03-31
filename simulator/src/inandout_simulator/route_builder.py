@@ -23,6 +23,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from inandout_simulator.events import EventBus
+from inandout_simulator.metrics import (
+    sim_api_requests_total,
+    sim_records_stored,
+    sim_webhooks_dispatched_total,
+)
 from inandout_simulator.store import RecordStore
 from inandout_simulator.webhooks import WebhookDispatcher
 
@@ -574,6 +579,9 @@ def build_connector_router(
                         ms,
                         request_headers_json=json.dumps(dict(request.headers)),
                     )
+                    sim_api_requests_total.labels(
+                        connector=connector_name, datatype=_dt_name, method="GET"
+                    ).inc()
                     return JSONResponse(body, headers=headers_out)
 
                 list_endpoint.__name__ = f"list_{dt_name}"
@@ -657,6 +665,13 @@ def build_connector_router(
                                 ms,
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
+                            if deleted:
+                                sim_api_requests_total.labels(
+                                    connector=connector_name, datatype=_dt_name, method="DELETE"
+                                ).inc()
+                                sim_records_stored.labels(
+                                    connector=connector_name, datatype=_dt_name
+                                ).set(await store.count(connector_name, _dt_name))
                             return Response(status_code=204 if deleted else 404)
 
                         if _action == "lookup":
@@ -676,6 +691,9 @@ def build_connector_router(
                                 return JSONResponse(
                                     {"error": "not found"}, status_code=404
                                 )
+                            sim_api_requests_total.labels(
+                                connector=connector_name, datatype=_dt_name, method="GET"
+                            ).inc()
                             display = {
                                 k: v for k, v in rec.items() if not k.startswith("__")
                             }
@@ -717,6 +735,12 @@ def build_connector_router(
                                 request_body_json=json.dumps(body),
                                 request_headers_json=json.dumps(dict(request.headers)),
                             )
+                            sim_api_requests_total.labels(
+                                connector=connector_name, datatype=_dt_name, method="POST"
+                            ).inc()
+                            sim_records_stored.labels(
+                                connector=connector_name, datatype=_dt_name
+                            ).set(await store.count(connector_name, _dt_name))
                             display = {
                                 k: v
                                 for k, v in record.items()
@@ -767,6 +791,9 @@ def build_connector_router(
                             request_body_json=json.dumps(body),
                             request_headers_json=json.dumps(dict(request.headers)),
                         )
+                        sim_api_requests_total.labels(
+                            connector=connector_name, datatype=_dt_name, method=_method
+                        ).inc()
                         display = {
                             k: v for k, v in updated.items() if not k.startswith("__")
                         }

@@ -115,6 +115,7 @@ class ComponentGate:
                 await self._conn.execute(
                     "SELECT pg_advisory_unlock_shared(%s)", (self._gate._lock_key,)
                 )
+                await self._conn.commit()
                 await self._gate._pool.putconn(self._conn)
                 self._conn = None
                 self.allowed = False
@@ -130,6 +131,13 @@ class ComponentGate:
                         "SELECT pg_advisory_unlock_shared(%s)", (self._gate._lock_key,)
                     )
                 finally:
+                    try:
+                        await self._conn.commit()
+                    except Exception:
+                        try:
+                            await self._conn.rollback()
+                        except Exception:
+                            pass
                     await self._gate._pool.putconn(self._conn)
                     self._conn = None
             return None  # don't suppress exceptions

@@ -157,6 +157,14 @@ http_request_duration_seconds: Histogram = _histogram(
 )
 
 
+# Federation heartbeat failures counter
+federation_heartbeat_failures_total: Counter = _counter(
+    "inout_federation_heartbeat_failures_total",
+    "Total federation heartbeat write failures",
+    [],
+)
+
+
 def configure_metrics() -> None:
     """No-op for now — metrics are registered at import time."""
     pass

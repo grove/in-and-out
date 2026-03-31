@@ -1102,7 +1102,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     # Initialise federation heartbeat
     global _federation_hb
-    _federation_hb = FederationHeartbeat(namespace=getattr(config.database, "schema", "public"))
+    _federation_hb = FederationHeartbeat(namespace="public")
 
     log.info("daemon_started")
 

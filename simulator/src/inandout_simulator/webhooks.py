@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from inandout_simulator.metrics import sim_webhook_errors_total, sim_webhooks_dispatched_total
+
 
 
 def _resolve_secret(credential_ref: str | None) -> str | None:
@@ -239,6 +241,16 @@ class WebhookDispatcher:
                 payload_json=result.get("payload_json", ""),
                 sent_headers_json=json.dumps(result.get("sent_headers", {})),
             )
+
+        _labels = {
+            "connector": result["connector"],
+            "datatype": result["datatype"],
+            "operation": result["operation"],
+        }
+        if result["status"] >= 200 and result["status"] < 300:
+            sim_webhooks_dispatched_total.labels(**_labels).inc()
+        else:
+            sim_webhook_errors_total.labels(**_labels).inc()
 
         return result
 

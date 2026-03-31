@@ -14,6 +14,8 @@ from typing import Any
 
 import structlog
 
+from inandout.observability.metrics import federation_heartbeat_failures_total
+
 logger = structlog.get_logger(__name__)
 
 # Stable per-process instance_id. Generated once at import time so that all
@@ -117,6 +119,7 @@ async def report_heartbeat(
     except Exception as exc:
         # Heartbeat failure must never crash the daemon
         logger.warning("federation_heartbeat_failed", error=str(exc))
+        federation_heartbeat_failures_total.inc()
 
     return written
 

@@ -8,6 +8,7 @@ from typing import Any
 import anyio
 import structlog
 import uvicorn
+from prometheus_client import make_asgi_app as prometheus_make_asgi_app
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -19,6 +20,7 @@ from inandout.config.loader import load_connector, load_writeback_tool_config
 from inandout.config.tool import WritebackToolConfig
 from inandout.engine.control import ControlDispatcher
 from inandout.federation.heartbeat import FederationHeartbeat, heartbeat_loop
+from inandout.observability.metrics import REGISTRY
 from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
 from inandout.postgres.version_check import SchemaVersionMismatch, check_schema_version
@@ -115,6 +117,7 @@ def _build_health_app(pool: Any = None) -> Starlette:
         Route("/ready", _ready),
         Route("/mode", _mode),
     ])
+    app.mount("/metrics", prometheus_make_asgi_app(registry=REGISTRY))
     app.state.pool = pool
     return app
 
@@ -445,7 +448,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     # Initialise federation heartbeat
     global _federation_hb
-    _federation_hb = FederationHeartbeat(namespace=getattr(config.database, "schema", "public"))
+    _federation_hb = FederationHeartbeat(namespace="public")
 
     log.info("daemon_started")
 
