@@ -144,6 +144,22 @@ _alert_dispatcher: AlertDispatcher | None = None
 _federation_hb: FederationHeartbeat | None = None
 
 
+class _NoSignalServer(uvicorn.Server):
+    """uvicorn.Server subclass that skips signal handler installation.
+
+    uvicorn.Server.capture_signals() replaces SIGTERM/SIGINT with its own
+    handler, overwriting the drain handler we install earlier.  By overriding
+    capture_signals() as a no-op we keep our handler, and _trigger_drain()
+    sets srv.should_exit = True directly to trigger a graceful uvicorn stop.
+    """
+
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager  # type: ignore[misc]
+    def capture_signals(self):
+        yield
+
+
 def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
     """Set the drain flag; polling loops will exit after their current iteration."""
     global _draining
@@ -912,9 +928,8 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         host=host,
         port=int(port_str),
         log_level="warning",
-        install_signal_handlers=False,
     )
-    health_server = uvicorn.Server(health_server_config)
+    health_server = _NoSignalServer(health_server_config)
     _uvicorn_servers.append(health_server)
 
     # Build webhook-only server if configured
@@ -943,10 +958,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             host=webhook_host,
             port=int(webhook_port_str),
             log_level="warning",
-            install_signal_handlers=False,
             **webhook_uvicorn_kwargs,
         )
-        webhook_server = uvicorn.Server(webhook_server_config)
+        webhook_server = _NoSignalServer(webhook_server_config)
         _uvicorn_servers.append(webhook_server)
 
     async def _run_health_server() -> None:

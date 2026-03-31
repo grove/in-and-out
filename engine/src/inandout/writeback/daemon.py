@@ -43,6 +43,22 @@ _alert_dispatcher: AlertDispatcher | None = None
 _federation_hb: FederationHeartbeat | None = None
 
 
+class _NoSignalServer(uvicorn.Server):
+    """uvicorn.Server subclass that skips signal handler installation.
+
+    uvicorn.Server.capture_signals() replaces SIGTERM/SIGINT with its own
+    handler, overwriting the drain handler we install earlier.  By overriding
+    capture_signals() as a no-op we keep our handler, and _trigger_drain()
+    sets srv.should_exit = True directly to trigger a graceful uvicorn stop.
+    """
+
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager  # type: ignore[misc]
+    def capture_signals(self):
+        yield
+
+
 def _trigger_drain() -> None:
     """Called by ControlDispatcher when a 'drain' control command is received."""
     global _draining
@@ -399,9 +415,8 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
         _build_health_app(pool=pool), host=host, port=int(port_str), log_level="warning",
-        install_signal_handlers=False,
     )
-    health_server = uvicorn.Server(health_server_config)
+    health_server = _NoSignalServer(health_server_config)
     _uvicorn_servers.append(health_server)
 
     async def _run_health_server() -> None:
