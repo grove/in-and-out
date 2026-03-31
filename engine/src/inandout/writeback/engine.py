@@ -113,25 +113,24 @@ def _validate_payload_schema(
 
 def _extract_writeback_payload(
     row: dict[str, Any],
-    use_desired_state_table: bool = False,
 ) -> dict[str, Any]:
     """Extract the HTTP writeback payload from a delta-table row.
 
-    When *use_desired_state_table* is True the business fields live inside the
-    ``data`` JSONB column (``inout_dst_*`` schema).  We expand that column and
-    strip internal ``_*`` keys so only the real business payload is sent.
-
-    For plain delta tables the business fields are top-level columns, so we
-    keep the existing behaviour of dropping underscore-prefixed columns.
+    Business fields are stored inside the ``data`` JSONB column in both
+    ``inout_dst_*`` and ``_delta_*`` table schemas.  When present, ``data``
+    is returned as-is (all keys, including ``_``-prefixed ones which are
+    legitimate business fields inside the JSONB payload).  Rows without a
+    ``data`` column (legacy flat schema) fall back to dropping ``_*`` keys
+    from the top-level columns, which are internal row-metadata columns.
     """
-    if use_desired_state_table and "data" in row:
+    if "data" in row:
         raw_data = row.get("data") or {}
         if isinstance(raw_data, (str, bytes)):
             try:
                 raw_data = orjson.loads(raw_data)
             except Exception:
                 raw_data = {}
-        return {k: v for k, v in raw_data.items() if not k.startswith("_")}
+        return dict(raw_data)
     return {k: v for k, v in row.items() if not k.startswith("_")}
 
 
@@ -704,9 +703,7 @@ class WritebackEngine:
                 if ops.insert is None:
                     result.skipped += 1
                     return
-                payload = _extract_writeback_payload(
-                    row, use_desired_state_table=writeback_cfg.use_desired_state_table
-                )
+                payload = _extract_writeback_payload(row)
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
                 # Apply writeback hooks (transform → filter)
                 try:
@@ -805,9 +802,7 @@ class WritebackEngine:
                 if ops.update is None:
                     result.skipped += 1
                     return
-                payload = _extract_writeback_payload(
-                    row, use_desired_state_table=writeback_cfg.use_desired_state_table
-                )
+                payload = _extract_writeback_payload(row)
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
                 # Apply writeback hooks (transform → filter)
                 try:
@@ -1351,9 +1346,7 @@ class WritebackEngine:
 
             elif action == "upsert":
                 # T2 #19: upsert — dedicated endpoint or PATCH→POST 404-fallback
-                payload = _extract_writeback_payload(
-                    row, use_desired_state_table=writeback_cfg.use_desired_state_table
-                )
+                payload = _extract_writeback_payload(row)
                 payload = _apply_writeback_transforms(payload, row, writeback_cfg)
                 # Apply writeback hooks (transform → filter)
                 try:
