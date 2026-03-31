@@ -345,6 +345,20 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
         await pool.close()
         raise SystemExit(1) from exc
 
+    # Schema contract: freeze mode — tables must pre-exist (created by schema-manager).
+    from inandout.postgres.schema import set_schema_contract
+    try:
+        async with pool.connection() as _gate_conn:
+            _has_gate = await (await _gate_conn.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'component_state'"
+            )).fetchone()
+        if _has_gate:
+            set_schema_contract("freeze")
+            log.info("schema_contract_freeze", reason="schema-manager detected")
+    except Exception:
+        pass  # component_state table doesn't exist — keep evolve mode
+
     engine = WritebackEngine(pool)
 
     paused_connectors: set[tuple[str, str]] = set()
