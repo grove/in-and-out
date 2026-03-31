@@ -163,6 +163,11 @@
           "default": "7d",
           "description": "How often to renew, e.g. '7d', '24h'."
         },
+        "health_check_interval": {
+          "type": "string",
+          "default": "5m",
+          "description": "How often to run the health check / detect dropped registrations and re-register, e.g. '5m', '15m'."
+        },
         "health_check_path": {
           "type": "string",
           "description": "Path to GET to verify a subscription is still active."

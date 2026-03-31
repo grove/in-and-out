@@ -87,15 +87,15 @@ class WebhookDispatcher:
             return None
 
         webhook_cfg = connector.get("webhooks", {})
-        fan_out = getattr(webhook_cfg, "fan_out", None)
+        fan_out = webhook_cfg.get("fan_out")
         if not fan_out:
             return None
 
         # Find the event_type string for this (datatype, operation) pair.
         event_type: str | None = None
-        for route in getattr(fan_out, "routes", []):
-            if getattr(route, "datatype", None) == datatype:
-                et = (getattr(route, "match", "") or "").lower()
+        for route in fan_out.get("routes", []):
+            if route.get("datatype") == datatype:
+                et = (route.get("match", "") or "").lower()
                 if operation == "create" and ("creation" in et or et.endswith(".create")):
                     event_type = route.get("match")
                     break
@@ -108,20 +108,20 @@ class WebhookDispatcher:
 
         if event_type is None:
             # Fall back to the first route matching the datatype.
-            for route in getattr(fan_out, "routes", []):
-                if getattr(route, "datatype", None) == datatype:
-                    event_type = getattr(route, "match", None)
+            for route in fan_out.get("routes", []):
+                if route.get("datatype") == datatype:
+                    event_type = route.get("match")
                     break
 
         if event_type is None:
             return None
 
-        path = getattr(webhook_cfg, "path", None)
+        path = webhook_cfg.get("path")
         if not path:
             return None
 
-        registration = getattr(webhook_cfg, "registration", None)
-        per_route = registration and getattr(registration, "per_route_registration", False)
+        registration = webhook_cfg.get("registration")
+        per_route = registration and registration.get("per_route_registration", False)
 
         # For registration-based connectors, skip dispatch until the engine has
         # registered at least one subscription (otherwise every UI mutation would
@@ -131,30 +131,36 @@ class WebhookDispatcher:
             if not active_subs:
                 return None
 
-        # For per_route connectors, resolve the callback URL from the registered
-        # subscription that matches this event_type.  Fall back to engine_url+path
-        # only if no matching subscription is found.
+        # For per_route connectors, collect ALL active subscriptions matching
+        # this event_type and dispatch to each of them (mirrors real Tripletex
+        # behaviour: every active subscription for an event receives the payload).
         if per_route and self._webhook_subscriptions is not None:
             active_subs = self._webhook_subscriptions.get(connector["name"], {})
             cb_param = (
-                getattr(registration, "callback_url_runtime_param", "callback_url")
+                registration.get("callback_url_runtime_param", "callback_url")
                 if registration
                 else "callback_url"
             )
-            url: str | None = None
+            # Collect unique URLs for all active subscriptions matching this
+            # event.  Real Tripletex deduplicates on the delivery side: multiple
+            # subscriptions pointing to the same targetUrl receive only one POST.
+            seen: set[str] = set()
+            target_urls: list[str] = []
             for sub in active_subs.values():
-                if sub.get("event") == event_type:
-                    url = sub.get(cb_param)
-                    break
-            if url is None:
-                # No matching subscription — use first available callback URL
+                u = sub.get(cb_param)
+                if sub.get("event") == event_type and u and u not in seen:
+                    seen.add(u)
+                    target_urls.append(u)
+            if not target_urls:
+                # No matching subscription — fall back to first available URL.
                 for sub in active_subs.values():
-                    url = sub.get(cb_param)
-                    break
-            if url is None:
-                url = f"{self._engine_url}{path}"
+                    if sub.get(cb_param):
+                        target_urls = [sub[cb_param]]
+                        break
+            if not target_urls:
+                target_urls = [f"{self._engine_url}{path}"]
         else:
-            url = f"{self._engine_url}{path}"
+            target_urls = [f"{self._engine_url}{path}"]
         headers: dict[str, str] = {"Content-Type": "application/json"}
 
         if per_route:
@@ -169,7 +175,7 @@ class WebhookDispatcher:
             }
         else:
             # Legacy HubSpot-style fan-out payload.
-            discriminator_field = getattr(fan_out, "discriminator", "eventType") or "eventType"
+            discriminator_field = fan_out.get("discriminator", "eventType") or "eventType"
             payload = {discriminator_field: event_type}
             if record:
                 payload.update(record)
@@ -178,79 +184,79 @@ class WebhookDispatcher:
         payload_json = json.dumps(payload)
         payload_bytes = payload_json.encode()
 
-        sig_cfg = getattr(webhook_cfg, "signature", None)
+        sig_cfg = webhook_cfg.get("signature")
         if sig_cfg:
-            secret = _resolve_secret(getattr(sig_cfg, "credential_ref", None))
+            secret = _resolve_secret(sig_cfg.get("credential_ref"))
             if secret:
-                sig_header = getattr(sig_cfg, "header", "X-Simulator-Signature")
-                algorithm = getattr(sig_cfg, "algorithm", "hmac-sha256")
-                encoding = getattr(sig_cfg, "encoding", "hex_prefix")
+                sig_header = sig_cfg.get("header", "X-Simulator-Signature")
+                algorithm = sig_cfg.get("algorithm", "hmac-sha256")
+                encoding = sig_cfg.get("encoding", "hex_prefix")
                 headers[sig_header] = _sign(payload_bytes, secret, algorithm, encoding)
-        elif getattr(webhook_cfg, "auth_header_name", None) and getattr(
-            webhook_cfg, "auth_header_credential_ref", None
-        ):
+        elif webhook_cfg.get("auth_header_name") and webhook_cfg.get("auth_header_credential_ref"):
             # FEAT-WH-03: custom header auth — forward the pre-configured value.
-            secret = _resolve_secret(webhook_cfg.auth_header_credential_ref)
+            secret = _resolve_secret(webhook_cfg.get("auth_header_credential_ref"))
             if secret:
-                headers[webhook_cfg.auth_header_name] = secret
+                headers[webhook_cfg.get("auth_header_name")] = secret
 
         # FEAT-WH-08: add the discriminator header if configured so the engine
         # can route by header without parsing the body.
-        discriminator_header = getattr(fan_out, "discriminator_header", None)
+        discriminator_header = fan_out.get("discriminator_header")
         if discriminator_header:
             headers[discriminator_header] = event_type
 
-        try:
-            t0 = time.monotonic()
-            resp = await self._client.post(url, content=payload_bytes, headers=headers)
-            duration_ms = int((time.monotonic() - t0) * 1000)
-            result = {
-                "url": url,
-                "status": resp.status_code,
-                "duration_ms": duration_ms,
-                "payload_json": payload_json,
-                "sent_headers": headers,
-                "connector": connector["name"],
-                "datatype": datatype,
-                "operation": operation,
-                "record_id": record_id,
-            }
-        except Exception as exc:
-            result = {
-                "url": url,
-                "status": 0,
-                "duration_ms": 0,
-                "payload_json": payload_json,
-                "sent_headers": headers,
-                "error": str(exc),
-                "connector": connector["name"],
-                "datatype": datatype,
-                "operation": operation,
-                "record_id": record_id,
-            }
+        result = None
+        for url in target_urls:
+            try:
+                t0 = time.monotonic()
+                resp = await self._client.post(url, content=payload_bytes, headers=headers)
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                result = {
+                    "url": url,
+                    "status": resp.status_code,
+                    "duration_ms": duration_ms,
+                    "payload_json": payload_json,
+                    "sent_headers": headers,
+                    "connector": connector["name"],
+                    "datatype": datatype,
+                    "operation": operation,
+                    "record_id": record_id,
+                }
+            except Exception as exc:
+                result = {
+                    "url": url,
+                    "status": 0,
+                    "duration_ms": 0,
+                    "payload_json": payload_json,
+                    "sent_headers": headers,
+                    "error": str(exc),
+                    "connector": connector["name"],
+                    "datatype": datatype,
+                    "operation": operation,
+                    "record_id": record_id,
+                }
 
-        if self._event_bus is not None:
-            self._event_bus.publish_webhook(
-                connector=result["connector"],
-                datatype=result["datatype"],
-                operation=result["operation"],
-                record_id=result["record_id"],
-                url=result["url"],
-                status=result["status"],
-                duration_ms=result["duration_ms"],
-                payload_json=result.get("payload_json", ""),
-                sent_headers_json=json.dumps(result.get("sent_headers", {})),
-            )
+            if self._event_bus is not None:
+                self._event_bus.publish_webhook(
+                    connector=result["connector"],
+                    datatype=result["datatype"],
+                    operation=result["operation"],
+                    record_id=result["record_id"],
+                    url=result["url"],
+                    status=result["status"],
+                    duration_ms=result["duration_ms"],
+                    payload_json=result.get("payload_json", ""),
+                    sent_headers_json=json.dumps(result.get("sent_headers", {})),
+                )
 
-        _labels = {
-            "connector": result["connector"],
-            "datatype": result["datatype"],
-            "operation": result["operation"],
-        }
-        if result["status"] >= 200 and result["status"] < 300:
-            sim_webhooks_dispatched_total.labels(**_labels).inc()
-        else:
-            sim_webhook_errors_total.labels(**_labels).inc()
+            _labels = {
+                "connector": result["connector"],
+                "datatype": result["datatype"],
+                "operation": result["operation"],
+            }
+            if result["status"] >= 200 and result["status"] < 300:
+                sim_webhooks_dispatched_total.labels(**_labels).inc()
+            else:
+                sim_webhook_errors_total.labels(**_labels).inc()
 
         return result
 

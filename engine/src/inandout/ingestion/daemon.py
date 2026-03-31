@@ -1,4 +1,5 @@
 """Ingestion daemon — long-lived process managing polling loops and webhook receiver."""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +24,7 @@ from inandout.engine.control import ControlDispatcher, is_paused
 from inandout.federation.heartbeat import FederationHeartbeat, heartbeat_loop
 from inandout.ingestion.engine import IngestionEngine
 from inandout.ingestion.webhooks import handle_webhook
+from inandout.ingestion.webhook_lifecycle import WebhookLifecycleManager
 from inandout.observability.metrics import REGISTRY
 from inandout.postgres.housekeeping import run_housekeeping
 from inandout.postgres.pool import create_pool
@@ -34,24 +36,24 @@ logger = structlog.get_logger(__name__)
 
 def _check_api_deprecations(connector_configs: list[Any], log: Any) -> None:
     """Check for API version deprecations and emit warnings (T1 #39).
-    
+
     Warns when api_version_deprecation_date is within api_version_warning_days days,
     or when api_deprecation_deadline has passed.
     """
     import datetime as _dt
-    
+
     now = _dt.datetime.now(_dt.timezone.utc).date()
-    
+
     for cfg in connector_configs:
         connector = cfg.connector
-        
+
         # Check api_version_deprecation_date
         if connector.api_version_deprecation_date:
             try:
                 deadline = _dt.date.fromisoformat(connector.api_version_deprecation_date)
                 days_until = (deadline - now).days
                 warning_days = connector.api_version_warning_days
-                
+
                 if days_until <= 0:
                     log.error(
                         "api_version_deprecated",
@@ -75,13 +77,13 @@ def _check_api_deprecations(connector_configs: list[Any], log: Any) -> None:
                     connector=connector.name,
                     date=connector.api_version_deprecation_date,
                 )
-        
+
         # Check legacy api_deprecation_deadline field
         if connector.api_deprecation_deadline:
             try:
                 deadline = _dt.date.fromisoformat(connector.api_deprecation_deadline)
                 days_until = (deadline - now).days
-                
+
                 if days_until <= 0:
                     log.error(
                         "api_deprecated",
@@ -188,6 +190,7 @@ async def _sleep_or_drain(secs: float) -> None:
 # Health / readiness endpoints
 # ---------------------------------------------------------------------------
 
+
 async def _health(request: Request) -> JSONResponse:
     """Liveness probe - returns 200 if process is alive."""
     return JSONResponse({"status": "ok"})
@@ -195,6 +198,7 @@ async def _health(request: Request) -> JSONResponse:
 
 def _make_ready_handler(pool: Any, connector_configs: list) -> Any:
     """Build /ready handler with access to pool and connector configs."""
+
     async def _ready(request: Request) -> JSONResponse:
         """
         Readiness probe - returns connector status details.
@@ -203,6 +207,7 @@ def _make_ready_handler(pool: Any, connector_configs: list) -> Any:
         """
         # Schema-manager component gate check
         from inandout.postgres.component_gate import get_desired_state
+
         desired = await get_desired_state(pool, "ingest") if pool else None
         if desired == "stopped" or _draining:
             return JSONResponse(
@@ -211,7 +216,7 @@ def _make_ready_handler(pool: Any, connector_configs: list) -> Any:
             )
 
         connectors: dict[str, dict] = {}
-        
+
         if pool:
             try:
                 async with pool.connection() as conn:
@@ -220,58 +225,60 @@ def _make_ready_handler(pool: Any, connector_configs: list) -> Any:
                         "SELECT connector, datatype, status, reason FROM inout_ops_connector_health"
                     )
                     health_rows = await rows.fetchall()
-                    
+
                     # Check paused connectors
                     pause_rows_cursor = await conn.execute(
                         "SELECT connector, datatype FROM inout_ops_control WHERE command = 'pause'"
                     )
                     pause_rows = await pause_rows_cursor.fetchall()
-                    
+
                     # Build status map
                     for row in health_rows:
                         conn_name = row[0]
                         dt = row[1]
                         status = row[2]
                         reason = row[3]
-                        
+
                         if conn_name not in connectors:
                             connectors[conn_name] = {"status": "active", "datatypes": {}}
-                        
+
                         connectors[conn_name]["datatypes"][dt] = {
                             "status": status,
                             "reason": reason,
                         }
-                        
+
                         if status == "unavailable":
                             connectors[conn_name]["status"] = "circuit_broken"
-                    
+
                     # Mark paused
                     for row in pause_rows:
                         conn_name = row[0]
                         dt = row[1]
-                        
+
                         if conn_name not in connectors:
                             connectors[conn_name] = {"status": "paused", "datatypes": {}}
                         else:
                             connectors[conn_name]["status"] = "paused"
-                        
+
                         if dt:
                             connectors[conn_name]["datatypes"][dt] = {"status": "paused"}
-                    
+
             except Exception as exc:
                 logger.warning("ready_check_failed", error=str(exc))
-        
+
         # Add configured connectors not in status map (active by default)
         for cfg in connector_configs:
             conn_name = cfg.connector.name
             if conn_name not in connectors:
                 connectors[conn_name] = {"status": "active", "datatypes": {}}
-        
-        return JSONResponse({
-            "status": "ready",
-            "connectors": connectors,
-        })
-    
+
+        return JSONResponse(
+            {
+                "status": "ready",
+                "connectors": connectors,
+            }
+        )
+
     return _ready
 
 
@@ -289,16 +296,19 @@ def _build_app(
 
     for connector_file_cfg in connector_configs:
         connector_cfg = connector_file_cfg.connector
-        webhook_cfg = getattr(connector_cfg, "webhook", None)
+        webhook_cfg = connector_cfg.webhooks
         if webhook_cfg is None:
             continue
 
         def _make_handler(c_cfg: Any, w_cfg: Any) -> Any:
             async def _webhook_handler(request: Request) -> Any:
                 return await handle_webhook(request, c_cfg, w_cfg, engine)
+
             return _webhook_handler
 
-        app.add_api_route(webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"])
+        app.add_api_route(
+            webhook_cfg.path, _make_handler(connector_cfg, webhook_cfg), methods=["POST"]
+        )
 
     # Include management API router directly on the root app
     api_router = build_api_router(pool=pool)
@@ -312,12 +322,14 @@ def _build_app(
 # Cron scheduling helper
 # ---------------------------------------------------------------------------
 
+
 def _next_interval_secs(schedule: Any, default_interval_secs: float) -> float:
     """Return seconds to sleep before the next poll tick."""
     if schedule.cron:
         try:
             import datetime
             from croniter import croniter
+
             now = datetime.datetime.now(datetime.timezone.utc)
             cron = croniter(schedule.cron, now)
             next_run = cron.get_next(datetime.datetime)
@@ -331,6 +343,7 @@ def _next_interval_secs(schedule: Any, default_interval_secs: float) -> float:
 # ---------------------------------------------------------------------------
 # Connector health persistence helpers
 # ---------------------------------------------------------------------------
+
 
 async def _mark_connector_unavailable(
     pool: Any,
@@ -430,6 +443,7 @@ async def _mark_connector_healthy(
 # Polling loop for one connector/datatype
 # ---------------------------------------------------------------------------
 
+
 async def _polling_loop(
     engine: IngestionEngine,
     connector_cfg: Any,
@@ -443,13 +457,16 @@ async def _polling_loop(
 
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     schedule = ingestion_cfg.schedule
-    interval_secs = default_interval_secs if not schedule.interval else parse_duration(schedule.interval)
+    interval_secs = (
+        default_interval_secs if not schedule.interval else parse_duration(schedule.interval)
+    )
     log.info("polling_loop_started", interval_secs=interval_secs, cron=schedule.cron)
     cb = get_circuit_breaker(connector_cfg.name, datatype)
 
     # Schema-manager component gate — wraps each work cycle with an advisory
     # lock so the schema-manager can safely apply DDL between cycles.
     from inandout.postgres.component_gate import ComponentGate
+
     gate = ComponentGate(engine._pool, "ingest")
 
     while True:
@@ -480,7 +497,9 @@ async def _polling_loop(
                 continue
 
             try:
-                result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg, dtype_cfg=dtype_cfg)
+                result = await engine.run_sync(
+                    connector_cfg, datatype, ingestion_cfg, dtype_cfg=dtype_cfg
+                )
                 if result.status in ("completed", "skipped"):
                     cb.record_success()
                     if cb.state == CircuitState.closed:
@@ -489,15 +508,25 @@ async def _polling_loop(
                     cb.record_failure()
                     if cb.state == CircuitState.open:
                         await _mark_connector_unavailable(
-                            engine._pool, connector_cfg.name, datatype,
-                            reason=result.error_message or "consecutive failures exceeded threshold",
+                            engine._pool,
+                            connector_cfg.name,
+                            datatype,
+                            reason=result.error_message
+                            or "consecutive failures exceeded threshold",
                         )
                 log.info("poll_complete", status=result.status)
-                # Update federation heartbeat after each sync
+                # Update federation heartbeat and Prometheus health score after each sync
+                import datetime
+                from inandout.observability.health_score import compute_health_score
+                from inandout.observability.metrics import connector_health_score as _hs_gauge
+
+                _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
+                _hs_gauge.labels(
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    namespace=engine._namespace,
+                ).set(_hs)
                 if _federation_hb is not None:
-                    import datetime
-                    from inandout.observability.health_score import compute_health_score
-                    _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                     _federation_hb.update(
                         connector=connector_cfg.name,
                         datatype=datatype,
@@ -510,11 +539,23 @@ async def _polling_loop(
                 log.error("poll_error", error=str(exc))
                 if cb.state == CircuitState.open:
                     await _mark_connector_unavailable(
-                        engine._pool, connector_cfg.name, datatype,
+                        engine._pool,
+                        connector_cfg.name,
+                        datatype,
                         reason=str(exc),
                     )
+                from inandout.observability.health_score import compute_health_score
+                from inandout.observability.metrics import connector_health_score as _hs_gauge_exc
+
+                _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
+                _hs_gauge_exc.labels(
+                    connector=connector_cfg.name,
+                    datatype=datatype,
+                    namespace=engine._namespace,
+                ).set(_hs_exc)
                 if _federation_hb is not None:
                     from inandout.observability.health_score import compute_health_score
+
                     _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                     _federation_hb.update(
                         connector=connector_cfg.name,
@@ -530,6 +571,7 @@ async def _polling_loop(
 # ---------------------------------------------------------------------------
 # Control table poller
 # ---------------------------------------------------------------------------
+
 
 async def _control_table_poller(
     dispatcher: ControlDispatcher,
@@ -556,6 +598,7 @@ async def _control_table_poller(
 # ---------------------------------------------------------------------------
 # Housekeeping loop
 # ---------------------------------------------------------------------------
+
 
 async def _housekeeping_loop(
     pool: Any,
@@ -606,6 +649,7 @@ async def _sla_check_loop(
 # ---------------------------------------------------------------------------
 # Webhook dedup TTL cleanup
 # ---------------------------------------------------------------------------
+
 
 async def _webhook_dedup_cleanup_loop(
     pool: Any,
@@ -668,6 +712,7 @@ async def _webhook_dedup_cleanup_loop(
 # ---------------------------------------------------------------------------
 # SIGHUP hot-reload support
 # ---------------------------------------------------------------------------
+
 
 def _check_api_version_deprecations(connector_configs: list) -> None:
     """A6: Check api_version_deprecation_date for all connectors and log warnings/errors."""
@@ -737,6 +782,7 @@ async def _run_connector_tasks(
             for account in accounts:
                 # Build account-scoped connector config
                 import copy
+
                 account_connector_cfg = copy.deepcopy(connector_cfg)
                 # Override credential_ref and base_url if provided
                 if account.base_url is not None:
@@ -791,6 +837,7 @@ async def _run_connector_tasks(
 # Main daemon entrypoint
 # ---------------------------------------------------------------------------
 
+
 async def run_ingestion_daemon(config_path: str | Path) -> None:
     from inandout.observability import configure_logging, configure_metrics, configure_tracing
 
@@ -802,10 +849,13 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     global _alert_dispatcher
     if config.alerting and config.alerting.enabled:
         from inandout.alerting.dispatcher import AlertDispatcher as _AlertDispatcher
+
         _alert_dispatcher = _AlertDispatcher(config.alerting)
         logger.info("alert_dispatcher_initialised")
 
-    configure_logging(format=config.observability.logging.format, level=config.observability.logging.level)
+    configure_logging(
+        format=config.observability.logging.format, level=config.observability.logging.level
+    )
     configure_metrics()
     configure_tracing(
         enabled=config.observability.tracing.enabled,
@@ -831,12 +881,14 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # Falls back to 'evolve' (auto-create) if component_state table doesn't exist yet,
     # meaning the schema-manager hasn't been deployed.
     from inandout.postgres.schema import set_schema_contract
+
     try:
         async with pool.connection() as _gate_conn:
-            _has_gate = await (await _gate_conn.execute(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_name = 'component_state'"
-            )).fetchone()
+            _has_gate = await (
+                await _gate_conn.execute(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = 'component_state'"
+                )
+            ).fetchone()
         if _has_gate:
             set_schema_contract("freeze")
             log.info("schema_contract_freeze", reason="schema-manager detected")
@@ -845,6 +897,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     # Create read pool if configured
     from inandout.postgres.pool import create_read_pool
+
     read_pool = await create_read_pool(config.database)
 
     engine = IngestionEngine(pool, read_pool=read_pool)
@@ -896,7 +949,8 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # Create control dispatcher with connector map
     paused_connectors: set[tuple[str, str]] = set()
     dispatcher = ControlDispatcher(
-        pool, paused_connectors,
+        pool,
+        paused_connectors,
         target_tool="ingestion",
         drain_callback=_trigger_drain,
         reload_callback=reload_flag.set,
@@ -906,6 +960,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # Apply topological sort so connectors with dependencies run after their dependencies
     try:
         from inandout.config.dependency_graph import topological_sort
+
         connector_configs = topological_sort(connector_configs)
         log.info(
             "connector_start_order",
@@ -1035,18 +1090,28 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                     try:
                         cfg = load_connector(p)
                         new_configs.append(cfg)
-                        log.info("connector_reloaded_from_file", path=str(p), connector=cfg.connector.name)
+                        log.info(
+                            "connector_reloaded_from_file",
+                            path=str(p),
+                            connector=cfg.connector.name,
+                        )
                     except Exception as exc:
                         log.error("connector_reload_failed", path=str(p), error=str(exc))
                 # For files that weren't changed, keep existing configs
                 changed_connector_names = {c.connector.name for c in new_configs}
-                unchanged = [c for c in connector_configs if c.connector.name not in changed_connector_names]
+                unchanged = [
+                    c for c in connector_configs if c.connector.name not in changed_connector_names
+                ]
                 merged = unchanged + new_configs
-                await _apply_connector_changes(outer_tg, changed_paths=changed_paths, new_configs=merged)
+                await _apply_connector_changes(
+                    outer_tg, changed_paths=changed_paths, new_configs=merged
+                )
 
             connectors_path = Path(config.connectors_dir)
             if connectors_path.exists():
-                await hot_reload_loop(connectors_path, _on_file_change, should_stop=lambda: _draining)
+                await hot_reload_loop(
+                    connectors_path, _on_file_change, should_stop=lambda: _draining
+                )
                 return
         except ImportError:
             pass
@@ -1072,7 +1137,9 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     # When writeback detects a conflict with resolution=re_ingest_and_recompute,
     # it publishes this event so that a co-located ingestion daemon can react
     # immediately without waiting for the next DB control-table poll.
-    async def _on_reingest_signal(connector: str, datatype: str, external_id: str, **kwargs: Any) -> None:
+    async def _on_reingest_signal(
+        connector: str, datatype: str, external_id: str, **kwargs: Any
+    ) -> None:
         _log = logger.bind(connector=connector, datatype=datatype, external_id=external_id)
         _log.info("reingest_signal_received", reason=kwargs.get("reason", "unknown"))
         connector_cfg_obj = None
@@ -1098,6 +1165,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             _log.error("reingest_signal_failed", error=str(exc))
 
     from inandout.events import EventType, get_event_bus
+
     get_event_bus().subscribe(EventType.REINGEST_SIGNAL, _on_reingest_signal)
 
     # Initialise federation heartbeat
@@ -1132,10 +1200,33 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             ):
                 tg.start_soon(_webhook_dedup_cleanup_loop, pool, connector_configs)
             tg.start_soon(
-                heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining,
-                None, _drain_event,
+                heartbeat_loop,
+                pool,
+                _federation_hb,
+                30.0,
+                lambda: _draining,
+                None,
+                _drain_event,
             )
-            await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
+            # Start webhook lifecycle loops for connectors that require active registration.
+            for cfg in connector_configs:
+                wh_cfg = cfg.connector.webhooks
+                if wh_cfg is not None and wh_cfg.registration is not None:
+                    if config.webhook_callback_base_url:
+                        callback_url = (
+                            f"{config.webhook_callback_base_url.rstrip('/')}{wh_cfg.path}"
+                        )
+                        mgr = WebhookLifecycleManager(pool, cfg.connector, wh_cfg, engine)
+                        tg.start_soon(mgr.run_lifecycle_loop, callback_url, tg)
+                    else:
+                        log.warning(
+                            "webhook_lifecycle_skipped_no_callback_url",
+                            connector=cfg.connector.name,
+                            hint="Set webhook_callback_base_url in ingestion config",
+                        )
+            await _run_connector_tasks(
+                tg, engine, connector_configs, default_interval_secs, paused_connectors
+            )
     finally:
         log.info("daemon_stopping")
         await pool.close()

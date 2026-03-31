@@ -52,6 +52,9 @@
         },
         "cron": {
           "type": "string"
+        },
+        "max_lag_seconds": {
+          "type": "integer"
         }
       },
       "anyOf": [

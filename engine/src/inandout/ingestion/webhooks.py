@@ -27,6 +27,7 @@ from inandout.ingestion.engine import (
     _upsert_record,
     _compute_raw_hash,
 )
+from inandout.observability.metrics import webhook_received_total
 from inandout.postgres.schema import source_table_name, ensure_source_table
 from inandout.transport.auth import resolve_credential
 
@@ -56,6 +57,15 @@ async def _log_webhook(
             await conn.commit()
     except Exception:
         pass  # Audit log failure must never mask the original error
+    # Always increment Prometheus counter, even if the DB write failed.
+    try:
+        webhook_received_total.labels(
+            connector=connector,
+            datatype=datatype or "",
+            status=status,
+        ).inc()
+    except Exception:
+        pass
 
 
 # Max clock skew tolerated between sender and receiver (seconds).

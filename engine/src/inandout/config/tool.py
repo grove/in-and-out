@@ -219,6 +219,7 @@ class IngestionToolConfig(BaseModel):
     credential_backend_config: dict[str, Any] = Field(default_factory=dict)
     schema_registry_dir: str | None = None
     drain_timeout_secs: float = 30.0  # B8: max time to drain in-flight ops on SIGTERM
+    webhook_callback_base_url: str | None = None  # base URL the engine is reachable at for webhook registration
 
 
 class _WritebackHealthServerConfig(BaseModel):

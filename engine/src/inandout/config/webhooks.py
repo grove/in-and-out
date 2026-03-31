@@ -79,6 +79,7 @@ class WebhookRegistrationConfig(BaseModel):
     deregister_path: str | None = None  # DELETE to remove, ${webhook_id} interpolated
     renew_path: str | None = None  # PUT/PATCH to renew
     renew_interval: str = "7d"  # how often to renew
+    health_check_interval: str = "5m"  # how often to run health checks / detect dropped registrations
     health_check_path: str | None = None  # GET to verify still active
     # When set, the health_check response body is parsed as JSON and the value
     # at this dot-notation path is compared against health_check_active_value.

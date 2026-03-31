@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from inandout.config._duration import parse_duration
 from inandout.config.connector import ConnectorConfig
 from inandout.config.webhooks import FanOutRoute, WebhookConfig, WebhookRegistrationConfig
+from inandout.observability.metrics import webhook_subscriptions_active
 from inandout.transport.auth import resolve_credential
 from inandout.transport.http import HttpTransportAdapter
 
@@ -252,6 +253,26 @@ class WebhookLifecycleManager:
             )
             await conn.commit()
 
+        try:
+            stored_datatype = None
+            if row is not None:
+                # row[0] is callback_url; look up datatype via webhook_id
+                async with self._pool.connection() as _c:
+                    _r = await (
+                        await _c.execute(
+                            "SELECT datatype FROM inout_ops_webhook_subscriptions WHERE connector = %s AND webhook_id = %s",
+                            [self._connector.name, webhook_id],
+                        )
+                    ).fetchone()
+                    stored_datatype = _r[0] if _r else None
+            webhook_subscriptions_active.labels(
+                connector=self._connector.name,
+                datatype=stored_datatype or "",
+                sub_status="active",
+            ).dec()
+        except Exception:
+            pass
+
         logger.info("webhook_deregistered", connector=self._connector.name, webhook_id=webhook_id)
 
     async def health_check(self, webhook_id: str) -> bool:
@@ -315,7 +336,7 @@ class WebhookLifecycleManager:
         assert reg is not None
 
         renew_interval_secs = parse_duration(reg.renew_interval)
-        health_check_interval_secs = min(renew_interval_secs / 4, 3600.0)
+        health_check_interval_secs = parse_duration(reg.health_check_interval)
 
         log = logger.bind(connector=self._connector.name)
 
@@ -400,3 +421,11 @@ class WebhookLifecycleManager:
                 [self._connector.name, datatype, webhook_id, callback_url, status],
             )
             await conn.commit()
+        try:
+            webhook_subscriptions_active.labels(
+                connector=self._connector.name,
+                datatype=datatype or "",
+                sub_status=status,
+            ).inc()
+        except Exception:
+            pass

@@ -107,6 +107,21 @@ replication_slot_lag_bytes: Gauge = _gauge(
 )
 
 
+# Webhook received events counter
+webhook_received_total: Counter = _counter(
+    "inout_webhook_received_total",
+    "Total webhook events received, by connector, datatype and processing status",
+    ["connector", "datatype", "status"],
+)
+
+# Active webhook subscriptions gauge
+webhook_subscriptions_active: Gauge = _gauge(
+    "inout_webhook_subscriptions_active",
+    "Current webhook subscriptions by connector, datatype and subscription status",
+    ["connector", "datatype", "sub_status"],
+)
+
+
 # Soft-delete resurrection counter (A6/T1 #41)
 records_resurrected_total: Counter = _counter(
     "inout_records_resurrected_total",

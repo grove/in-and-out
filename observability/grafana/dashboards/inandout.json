@@ -677,6 +677,347 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 26,
+      "type": "row",
+      "title": "Webhooks",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Webhook Received Rate (by connector + datatype + status)",
+      "description": "Rate of incoming webhook events. Use the Connector/Datatype dropdowns to drill down.",
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "rate(inout_webhook_received_total{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\"}[5m])",
+          "legendFormat": "{{connector}} / {{datatype}} ({{status}})",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Webhook Subscriptions Active (by connector + datatype)",
+      "description": "Cumulative webhook subscription operations recorded by the lifecycle manager. Use the Connector/Datatype dropdowns to drill down.",
+      "gridPos": {
+        "x": 12,
+        "y": 71,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "inout_webhook_subscriptions_active{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\"}",
+          "legendFormat": "{{connector}} / {{datatype}} ({{sub_status}})",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Webhook Error Rate (failed status)",
+      "description": "Rate of webhooks that returned status=failed. Spikes indicate signature failures, processing errors, or upstream issues.",
+      "gridPos": {
+        "x": 0,
+        "y": 79,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "rate(inout_webhook_received_total{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\", status=\"failed\"}[5m])",
+          "legendFormat": "{{connector}} / {{datatype}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "Total Webhooks Received",
+      "description": "Cumulative webhook events across all connectors/datatypes for the selected time range.",
+      "gridPos": {
+        "x": 12,
+        "y": 79,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(inout_webhook_received_total{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\"}[$__range]))",
+          "legendFormat": "Total",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Webhook Failure Rate",
+      "description": "Fraction of webhook events that resulted in status=failed.",
+      "gridPos": {
+        "x": 18,
+        "y": 79,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(inout_webhook_received_total{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\", status=\"failed\"}[5m])) / clamp_min(sum(rate(inout_webhook_received_total{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\"}[5m])), 1)",
+          "legendFormat": "Failure Rate",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 32,
+      "type": "table",
+      "title": "Webhook Subscription State",
+      "description": "Current subscriptions grouped by connector, datatype, and subscription status.",
+      "gridPos": {
+        "x": 12,
+        "y": 83,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "inout_webhook_subscriptions_active{connector=~\"$wh_connector\", datatype=~\"$wh_datatype\"}",
+          "legendFormat": "{{connector}} / {{datatype}} / {{sub_status}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "connector"
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     }
-  ]
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "definition": "label_values(inout_webhook_received_total, connector)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "wh_connector",
+        "options": [],
+        "query": {
+          "query": "label_values(inout_webhook_received_total, connector)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query",
+        "label": "Connector"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Prometheus"
+        },
+        "definition": "label_values(inout_webhook_received_total{connector=~\"$wh_connector\"}, datatype)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "wh_datatype",
+        "options": [],
+        "query": {
+          "query": "label_values(inout_webhook_received_total{connector=~\"$wh_connector\"}, datatype)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query",
+        "label": "Datatype"
+      }
+    ]
+  }
 }
