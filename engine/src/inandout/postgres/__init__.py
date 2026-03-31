@@ -8,6 +8,8 @@ from inandout.postgres.schema import (
     ensure_source_history_table,
     dead_letter_table_name,
     OPERATIONAL_TABLES_DDL,
+    set_schema_contract,
+    get_schema_contract,
 )
 from inandout.postgres.watermark import get_watermark, set_watermark
 
@@ -22,4 +24,6 @@ __all__ = [
     "OPERATIONAL_TABLES_DDL",
     "get_watermark",
     "set_watermark",
+    "set_schema_contract",
+    "get_schema_contract",
 ]

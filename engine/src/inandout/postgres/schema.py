@@ -6,6 +6,25 @@ import psycopg
 # Current migration count (migrations 001–020); checked at startup (B7)
 SCHEMA_VERSION: int = 22
 
+# Schema contract mode: 'evolve' (default, create tables) or 'freeze' (assert only)
+_schema_contract: str = "evolve"
+
+
+def set_schema_contract(mode: str) -> None:
+    """Set schema contract mode: 'evolve' or 'freeze'.
+
+    In 'freeze' mode, ensure_source_table and friends will raise RuntimeError
+    if the table does not already exist, rather than creating it.
+    """
+    global _schema_contract
+    if mode not in ("evolve", "freeze"):
+        raise ValueError(f"Invalid schema_contract: {mode!r}")
+    _schema_contract = mode
+
+
+def get_schema_contract() -> str:
+    return _schema_contract
+
 
 # Table naming convention per GOAL.md
 def source_table_name(
@@ -105,6 +124,9 @@ async def ensure_dead_letter_table(
     datatype: str,
     namespace: str = "public",
 ) -> None:
+    if _schema_contract == "freeze":
+        await _assert_table_exists(conn, dead_letter_table_name(tool, connector, datatype, namespace))
+        return
     await conn.execute(dead_letter_table_ddl(tool, connector, datatype, namespace))
 
 
@@ -114,8 +136,14 @@ async def ensure_source_table(
     datatype: str,
     namespace: str = "public",
 ) -> None:
-    """Create the source table for a connector/datatype pair if it doesn't exist."""
+    """Create the source table for a connector/datatype pair if it doesn't exist.
+
+    In 'freeze' mode, asserts the table exists and raises RuntimeError if not.
+    """
     table = source_table_name(connector, datatype, namespace)
+    if _schema_contract == "freeze":
+        await _assert_table_exists(conn, table)
+        return
     await conn.execute(source_table_ddl(connector, datatype, namespace))
     # Ensure _lineage column exists on older tables (ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
     await conn.execute(
@@ -129,6 +157,9 @@ async def ensure_source_history_table(
     datatype: str,
     namespace: str = "public",
 ) -> None:
+    if _schema_contract == "freeze":
+        await _assert_table_exists(conn, source_history_table_name(connector, datatype, namespace))
+        return
     await conn.execute(source_history_table_ddl(connector, datatype, namespace))
 
 
@@ -178,3 +209,22 @@ CREATE TABLE IF NOT EXISTS inout_ops_control (
     CONSTRAINT valid_status CHECK (status IN ('pending', 'acknowledged', 'completed', 'failed'))
 );
 """.strip()
+
+
+async def _assert_table_exists(conn: psycopg.AsyncConnection, table: str) -> None:
+    """Raise RuntimeError if the table does not exist (freeze mode)."""
+    # Handle schema-qualified names
+    if "." in table:
+        schema, name = table.split(".", 1)
+    else:
+        schema, name = "public", table
+    result = await (await conn.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_name = %s",
+        [schema, name],
+    )).fetchone()
+    if result is None:
+        raise RuntimeError(
+            f"Table '{table}' does not exist and schema_contract='freeze'. "
+            "The schema-manager must create it before ingest can run."
+        )
