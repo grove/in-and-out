@@ -1,6 +1,7 @@
 """Writeback daemon — long-lived process polling delta tables and dispatching HTTP writes."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ async def _health(request: Request) -> JSONResponse:
 
 # Module-level draining flag — set to True when SIGTERM/SIGINT received.
 _draining: bool = False
+_drain_event: asyncio.Event | None = None  # wakes sleeping loops immediately on drain
 _alert_dispatcher: AlertDispatcher | None = None
 _federation_hb: FederationHeartbeat | None = None
 
@@ -44,7 +46,22 @@ def _trigger_drain() -> None:
     """Called by ControlDispatcher when a 'drain' control command is received."""
     global _draining
     _draining = True
+    if _drain_event is not None:
+        try:
+            asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
+        except RuntimeError:
+            pass
     logger.info("writeback_drain_control_command_received")
+
+
+async def _sleep_or_drain(secs: float) -> None:
+    """Sleep for *secs* but return immediately when the drain event fires."""
+    if _draining or _drain_event is None:
+        return
+    try:
+        await asyncio.wait_for(_drain_event.wait(), timeout=secs)
+    except asyncio.TimeoutError:
+        pass
 
 
 async def _ready(request: Request) -> JSONResponse:
@@ -124,7 +141,7 @@ async def _writeback_polling_loop(
         async with gate.work_cycle() as cycle:
             if not cycle.allowed:
                 log.debug("writeback_schema_manager_paused", state=cycle.state)
-                await anyio.sleep(5)
+                await _sleep_or_drain(5)
                 continue
 
             # If schema-manager set desired='shadow', skip actual API writes.
@@ -201,7 +218,7 @@ async def _writeback_polling_loop(
         # T2 #33: clamp sleep to batch_max_age_secs when set (close batch if oldest row exceeds age limit)
         _bma = getattr(writeback_cfg, "batch_max_age_secs", None)
         _effective_sleep = min(interval_secs, float(_bma)) if _bma is not None else interval_secs
-        await anyio.sleep(_effective_sleep)
+        await _sleep_or_drain(_effective_sleep)
         if _draining:
             log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
             break
@@ -263,7 +280,7 @@ async def _housekeeping_loop(
         if _draining:
             log.info("writeback_housekeeping_loop_draining")
             break
-        await anyio.sleep(interval_secs)
+        await _sleep_or_drain(interval_secs)
         if _draining:  # re-check after sleep
             break
         try:
@@ -292,7 +309,7 @@ async def _control_table_poller(
                 log.info("control_commands_dispatched", count=count)
         except Exception as exc:
             log.error("control_table_poll_error", error=str(exc))
-        await anyio.sleep(poll_secs)
+        await _sleep_or_drain(poll_secs)
         if _draining:
             break
 
@@ -414,9 +431,17 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     import signal as _signal
 
+    global _drain_event
+    _drain_event = asyncio.Event()
+
     def _set_draining(sig: int, frame: Any) -> None:
         global _draining
         _draining = True
+        if _drain_event is not None:
+            try:
+                asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
+            except RuntimeError:
+                pass
         log.info("writeback_drain_signal_received", signal=sig)
 
     try:

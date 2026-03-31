@@ -1,6 +1,7 @@
 """Ingestion daemon — long-lived process managing polling loops and webhook receiver."""
 from __future__ import annotations
 
+import asyncio
 import signal
 import threading
 from pathlib import Path
@@ -137,6 +138,7 @@ def _setup_credential_backend(config: IngestionToolConfig) -> None:
 # Drain flag — set by SIGTERM/SIGINT or a 'drain' control command.
 # All polling loops check this at the top of each iteration and exit cleanly.
 _draining: bool = False
+_drain_event: asyncio.Event | None = None  # wakes sleeping loops immediately on drain
 _alert_dispatcher: AlertDispatcher | None = None
 _federation_hb: FederationHeartbeat | None = None
 
@@ -145,7 +147,22 @@ def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
     """Set the drain flag; polling loops will exit after their current iteration."""
     global _draining
     _draining = True
+    if _drain_event is not None:
+        try:
+            asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
+        except RuntimeError:
+            pass
     logger.info("ingestion_drain_signal_received", signal=sig)
+
+
+async def _sleep_or_drain(secs: float) -> None:
+    """Sleep for *secs* but return immediately when the drain event fires."""
+    if _draining or _drain_event is None:
+        return
+    try:
+        await asyncio.wait_for(_drain_event.wait(), timeout=secs)
+    except asyncio.TimeoutError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -428,19 +445,19 @@ async def _polling_loop(
         async with gate.work_cycle() as cycle:
             if not cycle.allowed:
                 log.debug("polling_loop_schema_manager_paused", state=cycle.state)
-                await anyio.sleep(5)
+                await _sleep_or_drain(5)
                 continue
 
             # Pause check
             if is_paused(paused_connectors, connector_cfg.name, datatype):
                 log.info("polling_loop_paused")
-                await anyio.sleep(interval_secs)
+                await _sleep_or_drain(interval_secs)
                 continue
 
             # Circuit breaker check
             if not cb.allow_request():
                 log.warning("poll_skipped_circuit_open", state=cb.state)
-                await anyio.sleep(interval_secs)
+                await _sleep_or_drain(interval_secs)
                 continue
 
             try:
@@ -488,7 +505,7 @@ async def _polling_loop(
                     )
 
         sleep_secs = _next_interval_secs(schedule, interval_secs)
-        await anyio.sleep(sleep_secs)
+        await _sleep_or_drain(sleep_secs)
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +529,7 @@ async def _control_table_poller(
                 log.info("control_commands_dispatched", count=count)
         except Exception as exc:
             log.error("control_table_poll_error", error=str(exc))
-        await anyio.sleep(poll_secs)
+        await _sleep_or_drain(poll_secs)
         if _draining:
             break
 
@@ -532,7 +549,7 @@ async def _housekeeping_loop(
         if _draining:
             log.info("housekeeping_loop_draining")
             break
-        await anyio.sleep(interval_secs)
+        await _sleep_or_drain(interval_secs)
         if _draining:  # re-check after sleep so we don't run after drain
             break
         try:
@@ -555,7 +572,7 @@ async def _sla_check_loop(
         if _draining:
             log.info("sla_check_loop_draining")
             break
-        await anyio.sleep(interval_secs)
+        await _sleep_or_drain(interval_secs)
         if _draining:
             break
         try:
@@ -590,7 +607,7 @@ async def _webhook_dedup_cleanup_loop(
         if _draining:
             log.info("webhook_dedup_cleanup_loop_draining")
             break
-        await anyio.sleep(interval_secs)
+        await _sleep_or_drain(interval_secs)
         if _draining:
             break
         for connector_file_cfg in connector_configs:
@@ -820,6 +837,8 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
     housekeeping_interval_secs = parse_duration(config.housekeeping.interval)
 
     # Install SIGTERM/SIGINT handler for graceful drain (polls loops exit after current iteration)
+    global _drain_event
+    _drain_event = asyncio.Event()
     try:
         signal.signal(signal.SIGTERM, _trigger_drain)
         signal.signal(signal.SIGINT, _trigger_drain)
@@ -1015,7 +1034,7 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
         while True:
             if _draining:
                 break
-            await anyio.sleep(1.0)
+            await _sleep_or_drain(1.0)
             if _draining:
                 break
             if not reload_flag.is_set():
