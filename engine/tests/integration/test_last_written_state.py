@@ -206,7 +206,7 @@ async def test_upsert_lwstate_with_etag_stored(pool, run_migrations):
     lw_table = lwstate_table_name(_CONNECTOR, _DATATYPE)
     async with pool.connection() as conn:
         row = await (await conn.execute(
-            f"SELECT _etag FROM {lw_table} WHERE external_id = 'account-lw-3'"
+            f"SELECT _etag FROM {lw_table} WHERE _lw_external_id = 'account-lw-3'"
         )).fetchone()
 
     assert row is not None, "lwstate row must exist"

@@ -90,7 +90,7 @@ async def purge_by_external_id(
             # 3. Delete lwstate rows
             try:
                 cur = await conn.execute(
-                    f"DELETE FROM {lwstate_table} WHERE external_id = %s",
+                    f"DELETE FROM {lwstate_table} WHERE _lw_external_id = %s",
                     [external_id],
                 )
                 result.tables_purged["lwstate"] = cur.rowcount or 0

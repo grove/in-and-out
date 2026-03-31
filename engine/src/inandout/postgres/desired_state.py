@@ -75,9 +75,10 @@ def lwstate_table_ddl(connector: str, datatype: str, namespace: str = "public") 
     table = lwstate_table_name(connector, datatype, namespace)
     schema_prefix = f"CREATE SCHEMA IF NOT EXISTS {namespace};\n" if namespace and namespace != "public" else ""
     return f"""{schema_prefix}CREATE TABLE IF NOT EXISTS {table} (
-    external_id     TEXT NOT NULL PRIMARY KEY,
+    _lw_external_id TEXT NOT NULL PRIMARY KEY,
     cluster_id      TEXT,
-    data            JSONB NOT NULL,
+    _written        JSONB NOT NULL,
+    _written_ts     JSONB,
     _etag           TEXT,
     _written_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     _sync_run_id    UUID
@@ -127,14 +128,32 @@ async def ensure_lwstate_table(
     Also sets REPLICA IDENTITY FULL (T2 #22).
     """
     table = lwstate_table_name(connector, datatype, namespace)
+    bare_table = table.split(".")[-1]
+    schema = namespace if namespace and namespace != "public" else "public"
     await conn.execute(lwstate_table_ddl(connector, datatype, namespace))
     await conn.execute(f"ALTER TABLE {table} REPLICA IDENTITY FULL")
     # Ensure columns added after initial DDL exist on older tables
     for col_ddl in (
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _etag TEXT",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cluster_id TEXT",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS _written_ts JSONB",
     ):
         await conn.execute(col_ddl)
+    # Rename legacy column names that clash with source table columns.
+    for old_col, new_col in (("external_id", "_lw_external_id"), ("data", "_written")):
+        await conn.execute(f"""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = '{schema}'
+                      AND table_name   = '{bare_table}'
+                      AND column_name  = '{old_col}'
+                ) THEN
+                    ALTER TABLE {table} RENAME COLUMN {old_col} TO {new_col};
+                END IF;
+            END $$
+        """)
 
 
 async def upsert_desired_state(
@@ -198,11 +217,11 @@ async def upsert_lwstate(
     run_id_val = str(run_id) if run_id is not None else None
     await conn.execute(
         f"""
-        INSERT INTO {table} (external_id, cluster_id, data, _etag, _written_at, _sync_run_id)
+        INSERT INTO {table} (_lw_external_id, cluster_id, _written, _etag, _written_at, _sync_run_id)
         VALUES (%s, %s, %s, %s, NOW(), %s)
-        ON CONFLICT (external_id) DO UPDATE
+        ON CONFLICT (_lw_external_id) DO UPDATE
         SET cluster_id = COALESCE(EXCLUDED.cluster_id, {table}.cluster_id),
-            data = EXCLUDED.data,
+            _written = EXCLUDED._written,
             _etag = EXCLUDED._etag,
             _written_at = NOW(),
             _sync_run_id = EXCLUDED._sync_run_id
@@ -254,7 +273,7 @@ async def get_lwstate(
     table = lwstate_table_name(connector, datatype, namespace)
     try:
         row = await (await conn.execute(
-            f"SELECT data FROM {table} WHERE external_id = %s",
+            f"SELECT _written FROM {table} WHERE _lw_external_id = %s",
             [external_id],
         )).fetchone()
     except Exception:

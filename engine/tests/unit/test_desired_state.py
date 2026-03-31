@@ -56,11 +56,11 @@ def test_desired_state_table_ddl_has_valid_action_check():
 
 
 def test_lwstate_table_ddl_has_required_columns():
-    """lwstate_table_ddl should include external_id, data, _written_at."""
+    """lwstate_table_ddl should include _lw_external_id, _written, _written_at."""
     from inandout.postgres.desired_state import lwstate_table_ddl
 
     ddl = lwstate_table_ddl("myconn", "contacts")
-    for col in ("external_id", "data", "_written_at"):
+    for col in ("_lw_external_id", "_written", "_written_at"):
         assert col in ddl, f"Missing column: {col}"
 
 
