@@ -15,9 +15,9 @@
         },
         "seed_count": {
             "type": "integer",
-            "minimum": 1,
+            "minimum": 0,
             "default": 1,
-            "description": "When seed_data contains exactly one template record, auto-expand it to this many records with unique primary-key values."
+            "description": "When seed_data contains exactly one template record, auto-expand it to this many records with unique primary-key values. Use 0 to start with an empty store."
         }
     }
 }

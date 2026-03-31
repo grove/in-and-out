@@ -74,6 +74,9 @@ async def seed_from_connector(
 
         records = seed_data
         seed_count = sim.get("seed_count", 1) if isinstance(sim, dict) else 1
+        # seed_count: 0 means "keep the template for reference but load nothing"
+        if seed_count == 0:
+            continue
         # Auto-expand when there is exactly one template record and seed_count > 1
         if len(records) == 1 and seed_count > 1:
             records = _expand_seed(records[0], pk_field, seed_count)

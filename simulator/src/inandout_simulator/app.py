@@ -123,7 +123,7 @@ def create_app(
 
     # Build a summary for the parent app description.
     connector_list = "\n".join(
-        f"- **[{c['system']}](/{c['name']}/docs)** — `/{c['name']}`" for c in connector_configs
+        f"- **[{c['system']}](/connectors/{c['name']}/docs)** — `/connectors/{c['name']}`" for c in connector_configs
     )
 
     app = FastAPI(
@@ -158,7 +158,7 @@ def create_app(
             redoc_url="/redoc",
             servers=[
                 {
-                    "url": f"/{connector['name']}",
+                    "url": f"/connectors/{connector['name']}",
                     "description": "Simulator",
                 },
             ],
@@ -179,7 +179,7 @@ def create_app(
             webhook_subscriptions_store=webhook_subscriptions,
         )
         sub.include_router(api_router)
-        app.mount(f"/{connector['name']}", sub)
+        app.mount(f"/connectors/{connector['name']}", sub)
 
     # Mount the web UI + admin CRUD + SSE routes.
     from inandout_simulator.ui.router import build_ui_router
@@ -193,10 +193,10 @@ def create_app(
         connector_rows = "".join(
             f'<li class="mb-3">'
             f'<span class="font-semibold text-slate-200">{c["system"]}</span>'
-            f'<span class="text-slate-500 font-mono text-sm ml-2">/{c["name"]}</span>'
+            f'<span class="text-slate-500 font-mono text-sm ml-2">/connectors/{c["name"]}</span>'
             f'<div class="flex gap-4 mt-1 text-sm">'
-            f'<a href="/{c["name"]}/docs" class="text-sky-400 hover:underline">Swagger UI</a>'
-            f'<a href="/{c["name"]}/redoc" class="text-sky-400 hover:underline">ReDoc</a>'
+            f'<a href="/connectors/{c["name"]}/docs" class="text-sky-400 hover:underline">Swagger UI</a>'
+            f'<a href="/connectors/{c["name"]}/redoc" class="text-sky-400 hover:underline">ReDoc</a>'
             f"</div>"
             f"</li>"
             for c in request.app.state.connectors
@@ -223,6 +223,12 @@ def create_app(
 </div>
 </body></html>"""
         )
+
+    from fastapi.responses import JSONResponse
+
+    @app.get("/health", include_in_schema=False)
+    async def _health() -> JSONResponse:
+        return JSONResponse({"status": "ok"})
 
     @app.on_event("startup")
     async def _seed() -> None:
