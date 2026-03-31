@@ -1131,7 +1131,10 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
                 for cfg in connector_configs
             ):
                 tg.start_soon(_webhook_dedup_cleanup_loop, pool, connector_configs)
-            tg.start_soon(heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining)
+            tg.start_soon(
+                heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining,
+                None, _drain_event,
+            )
             await _run_connector_tasks(tg, engine, connector_configs, default_interval_secs, paused_connectors)
     finally:
         log.info("daemon_stopping")

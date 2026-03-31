@@ -485,7 +485,10 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
             )
             if config.replication_slot.slot_name:
                 tg.start_soon(_slot_monitor_loop)
-            tg.start_soon(heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining)
+            tg.start_soon(
+                heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining,
+                None, _drain_event,
+            )
 
             # B2: only start polling loops when scheduling is enabled
             if scheduling_enabled:

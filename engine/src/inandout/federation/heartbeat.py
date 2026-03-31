@@ -127,6 +127,7 @@ async def heartbeat_loop(
     interval_secs: float = 30.0,
     should_stop: Any = None,
     instance_id: str | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> None:
     """Background coroutine: call report_heartbeat every interval_secs.
 
@@ -142,6 +143,9 @@ async def heartbeat_loop(
         Optional callable() → bool; when True the loop exits cleanly.
     instance_id:
         Override the process-level instance_id (useful in tests).
+    stop_event:
+        Optional asyncio.Event; when set the sleep wakes immediately so the
+        loop exits without waiting for the full interval_secs.
     """
     log = logger.bind(instance_id=instance_id or _INSTANCE_ID)
     log.info("federation_heartbeat_loop_started", interval_secs=interval_secs)
@@ -149,7 +153,13 @@ async def heartbeat_loop(
         if should_stop and should_stop():
             log.info("federation_heartbeat_loop_stopping")
             break
-        await asyncio.sleep(interval_secs)
+        try:
+            if stop_event is not None:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_secs)
+            else:
+                await asyncio.sleep(interval_secs)
+        except asyncio.TimeoutError:
+            pass
         if should_stop and should_stop():
             break
         await report_heartbeat(pool, heartbeat, instance_id=instance_id)
