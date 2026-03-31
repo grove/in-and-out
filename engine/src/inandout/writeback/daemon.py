@@ -50,14 +50,37 @@ def _trigger_drain() -> None:
 async def _ready(request: Request) -> JSONResponse:
     if _draining:
         return JSONResponse({"status": "draining"}, status_code=503)
+    # Schema-manager component gate check
+    from inandout.postgres.component_gate import get_desired_state
+    pool = request.app.state.pool if hasattr(request.app.state, "pool") else None
+    if pool:
+        desired = await get_desired_state(pool, "writeback")
+        if desired == "stopped":
+            return JSONResponse({"status": "stopped"}, status_code=503)
     return JSONResponse({"status": "ready", "connectors": []})
 
 
-def _build_health_app() -> Starlette:
-    return Starlette(routes=[
+async def _mode(request: Request) -> JSONResponse:
+    """Report the current schema-manager desired state for observability."""
+    from inandout.postgres.component_gate import get_desired_state
+    pool = request.app.state.pool if hasattr(request.app.state, "pool") else None
+    state = "unknown"
+    if _draining:
+        state = "draining"
+    elif pool:
+        desired = await get_desired_state(pool, "writeback")
+        state = desired or "waiting"  # waiting = schema-manager hasn't started yet
+    return JSONResponse({"mode": state})
+
+
+def _build_health_app(pool: Any = None) -> Starlette:
+    app = Starlette(routes=[
         Route("/health", _health),
         Route("/ready", _ready),
+        Route("/mode", _mode),
     ])
+    app.state.pool = pool
+    return app
 
 
 # ---------------------------------------------------------------------------
@@ -84,74 +107,97 @@ async def _writeback_polling_loop(
         failure_threshold=int(_cb_cfg.get("failure_threshold", 5) if isinstance(_cb_cfg, dict) else 5),
         recovery_timeout=float(_cb_cfg.get("recovery_timeout", 60.0) if isinstance(_cb_cfg, dict) else 60.0),
     )
+
+    # Schema-manager component gate — wraps each work cycle with an advisory
+    # lock so the schema-manager can safely apply DDL between cycles.
+    from inandout.postgres.component_gate import ComponentGate
+    gate = ComponentGate(engine._pool, "writeback")
+
     while True:
         # Check draining flag at the TOP of each iteration (after completing current cycle)
         if _draining:
             log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
             break
-        try:
-            result = await engine.run_writeback_cycle(
-                connector_cfg, datatype, writeback_cfg, delta_table,
-                max_concurrent_writes_override=max_concurrent_writes_override,
-            )
-            log.info(
-                "writeback_poll_complete",
-                processed=result.processed,
-                skipped=result.skipped,
-                failed=result.failed,
-            )
-            # Track circuit breaker: failures increment; success resets it
-            if result.failed > 0:
+
+        # Schema-manager component gate check — pause when desired='stopped',
+        # and acquire shared advisory lock for the duration of the work cycle.
+        async with gate.work_cycle() as cycle:
+            if not cycle.allowed:
+                log.debug("writeback_schema_manager_paused", state=cycle.state)
+                await anyio.sleep(5)
+                continue
+
+            # If schema-manager set desired='shadow', skip actual API writes.
+            # The engine itself handles this when cycle.state == 'shadow'
+            # (writeback writes to shadow_log instead of calling APIs).
+            _shadow_mode = cycle.state == "shadow"
+
+            try:
+                result = await engine.run_writeback_cycle(
+                    connector_cfg, datatype, writeback_cfg, delta_table,
+                    max_concurrent_writes_override=max_concurrent_writes_override,
+                    shadow_mode=_shadow_mode,
+                )
+                log.info(
+                    "writeback_poll_complete",
+                    processed=result.processed,
+                    skipped=result.skipped,
+                    failed=result.failed,
+                    shadow=_shadow_mode,
+                )
+                # Track circuit breaker: failures increment; success resets it
+                if result.failed > 0:
+                    _cb.record_failure()
+                    if _cb.state == CircuitState.open and _alert_dispatcher:
+                        await _alert_dispatcher.dispatch(
+                            AlertEventType.circuit_breaker_open,
+                            connector=connector_cfg.name,
+                            datatype=datatype,
+                            message=f"{result.failed} write(s) failed — circuit breaker opened",
+                            detail={"failed": result.failed},
+                        )
+                else:
+                    prev_state = _cb.state
+                    _cb.record_success()
+                    if prev_state == CircuitState.open and _cb.state == CircuitState.closed and _alert_dispatcher:
+                        await _alert_dispatcher.dispatch(
+                            AlertEventType.circuit_breaker_closed,
+                            connector=connector_cfg.name,
+                            datatype=datatype,
+                            message="circuit breaker closed — writes recovering",
+                        )
+                # Update federation heartbeat after each writeback cycle
+                if _federation_hb is not None:
+                    import datetime
+                    from inandout.observability.health_score import compute_health_score
+                    _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
+                    _federation_hb.update(
+                        connector=connector_cfg.name,
+                        datatype=datatype,
+                        health_score=_hs,
+                        last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
+                        circuit_breaker_state=_cb.state.value,
+                    )
+            except Exception as exc:
+                log.error("writeback_poll_error", error=str(exc))
                 _cb.record_failure()
                 if _cb.state == CircuitState.open and _alert_dispatcher:
                     await _alert_dispatcher.dispatch(
-                        AlertEventType.circuit_breaker_open,
+                        AlertEventType.connector_unavailable,
                         connector=connector_cfg.name,
                         datatype=datatype,
-                        message=f"{result.failed} write(s) failed — circuit breaker opened",
-                        detail={"failed": result.failed},
+                        message=str(exc),
                     )
-            else:
-                prev_state = _cb.state
-                _cb.record_success()
-                if prev_state == CircuitState.open and _cb.state == CircuitState.closed and _alert_dispatcher:
-                    await _alert_dispatcher.dispatch(
-                        AlertEventType.circuit_breaker_closed,
+                if _federation_hb is not None:
+                    from inandout.observability.health_score import compute_health_score
+                    _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
+                    _federation_hb.update(
                         connector=connector_cfg.name,
                         datatype=datatype,
-                        message="circuit breaker closed — writes recovering",
+                        health_score=_hs_exc,
+                        circuit_breaker_state=_cb.state.value,
                     )
-            # Update federation heartbeat after each writeback cycle
-            if _federation_hb is not None:
-                import datetime
-                from inandout.observability.health_score import compute_health_score
-                _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
-                _federation_hb.update(
-                    connector=connector_cfg.name,
-                    datatype=datatype,
-                    health_score=_hs,
-                    last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
-                    circuit_breaker_state=_cb.state.value,
-                )
-        except Exception as exc:
-            log.error("writeback_poll_error", error=str(exc))
-            _cb.record_failure()
-            if _cb.state == CircuitState.open and _alert_dispatcher:
-                await _alert_dispatcher.dispatch(
-                    AlertEventType.connector_unavailable,
-                    connector=connector_cfg.name,
-                    datatype=datatype,
-                    message=str(exc),
-                )
-            if _federation_hb is not None:
-                from inandout.observability.health_score import compute_health_score
-                _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
-                _federation_hb.update(
-                    connector=connector_cfg.name,
-                    datatype=datatype,
-                    health_score=_hs_exc,
-                    circuit_breaker_state=_cb.state.value,
-                )
+
         # T2 #33: clamp sleep to batch_max_age_secs when set (close batch if oldest row exceeds age limit)
         _bma = getattr(writeback_cfg, "batch_max_age_secs", None)
         _effective_sleep = min(interval_secs, float(_bma)) if _bma is not None else interval_secs
@@ -318,7 +364,7 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_health_app(), host=host, port=int(port_str), log_level="warning"
+        _build_health_app(pool=pool), host=host, port=int(port_str), log_level="warning"
     )
     health_server = uvicorn.Server(health_server_config)
 

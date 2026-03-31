@@ -163,7 +163,17 @@ def _make_ready_handler(pool: Any, connector_configs: list) -> Any:
         """
         Readiness probe - returns connector status details.
         Per GOAL.md: includes which connectors are active, paused, or circuit-broken.
+        Returns 503 when schema-manager has paused this component or when draining.
         """
+        # Schema-manager component gate check
+        from inandout.postgres.component_gate import get_desired_state
+        desired = await get_desired_state(pool, "ingest") if pool else None
+        if desired == "stopped" or _draining:
+            return JSONResponse(
+                {"status": "stopped" if desired == "stopped" else "draining"},
+                status_code=503,
+            )
+
         connectors: dict[str, dict] = {}
         
         if pool:
@@ -401,67 +411,81 @@ async def _polling_loop(
     log.info("polling_loop_started", interval_secs=interval_secs, cron=schedule.cron)
     cb = get_circuit_breaker(connector_cfg.name, datatype)
 
+    # Schema-manager component gate — wraps each work cycle with an advisory
+    # lock so the schema-manager can safely apply DDL between cycles.
+    from inandout.postgres.component_gate import ComponentGate
+    gate = ComponentGate(engine._pool, "ingest")
+
     while True:
         # Drain check — exit cleanly when SIGTERM received or 'drain' command issued
         if _draining:
             log.info("polling_loop_draining")
             break
 
-        # Pause check
-        if is_paused(paused_connectors, connector_cfg.name, datatype):
-            log.info("polling_loop_paused")
-            await anyio.sleep(interval_secs)
-            continue
+        # Schema-manager component gate check — pause when desired='stopped'.
+        # The gate also acquires a shared advisory lock for the duration of
+        # the work cycle, preventing DDL while we're mid-batch.
+        async with gate.work_cycle() as cycle:
+            if not cycle.allowed:
+                log.debug("polling_loop_schema_manager_paused", state=cycle.state)
+                await anyio.sleep(5)
+                continue
 
-        # Circuit breaker check
-        if not cb.allow_request():
-            log.warning("poll_skipped_circuit_open", state=cb.state)
-            await anyio.sleep(interval_secs)
-            continue
+            # Pause check
+            if is_paused(paused_connectors, connector_cfg.name, datatype):
+                log.info("polling_loop_paused")
+                await anyio.sleep(interval_secs)
+                continue
 
-        try:
-            result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg, dtype_cfg=dtype_cfg)
-            if result.status in ("completed", "skipped"):
-                cb.record_success()
-                if cb.state == CircuitState.closed:
-                    await _mark_connector_healthy(engine._pool, connector_cfg.name, datatype)
-            elif result.status == "failed":
+            # Circuit breaker check
+            if not cb.allow_request():
+                log.warning("poll_skipped_circuit_open", state=cb.state)
+                await anyio.sleep(interval_secs)
+                continue
+
+            try:
+                result = await engine.run_sync(connector_cfg, datatype, ingestion_cfg, dtype_cfg=dtype_cfg)
+                if result.status in ("completed", "skipped"):
+                    cb.record_success()
+                    if cb.state == CircuitState.closed:
+                        await _mark_connector_healthy(engine._pool, connector_cfg.name, datatype)
+                elif result.status == "failed":
+                    cb.record_failure()
+                    if cb.state == CircuitState.open:
+                        await _mark_connector_unavailable(
+                            engine._pool, connector_cfg.name, datatype,
+                            reason=result.error_message or "consecutive failures exceeded threshold",
+                        )
+                log.info("poll_complete", status=result.status)
+                # Update federation heartbeat after each sync
+                if _federation_hb is not None:
+                    import datetime
+                    from inandout.observability.health_score import compute_health_score
+                    _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
+                    _federation_hb.update(
+                        connector=connector_cfg.name,
+                        datatype=datatype,
+                        health_score=_hs,
+                        last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
+                        circuit_breaker_state=cb.state.value,
+                    )
+            except Exception as exc:
                 cb.record_failure()
+                log.error("poll_error", error=str(exc))
                 if cb.state == CircuitState.open:
                     await _mark_connector_unavailable(
                         engine._pool, connector_cfg.name, datatype,
-                        reason=result.error_message or "consecutive failures exceeded threshold",
+                        reason=str(exc),
                     )
-            log.info("poll_complete", status=result.status)
-            # Update federation heartbeat after each sync
-            if _federation_hb is not None:
-                import datetime
-                from inandout.observability.health_score import compute_health_score
-                _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
-                _federation_hb.update(
-                    connector=connector_cfg.name,
-                    datatype=datatype,
-                    health_score=_hs,
-                    last_sync_at=datetime.datetime.now(datetime.UTC).isoformat(),
-                    circuit_breaker_state=cb.state.value,
-                )
-        except Exception as exc:
-            cb.record_failure()
-            log.error("poll_error", error=str(exc))
-            if cb.state == CircuitState.open:
-                await _mark_connector_unavailable(
-                    engine._pool, connector_cfg.name, datatype,
-                    reason=str(exc),
-                )
-            if _federation_hb is not None:
-                from inandout.observability.health_score import compute_health_score
-                _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
-                _federation_hb.update(
-                    connector=connector_cfg.name,
-                    datatype=datatype,
-                    health_score=_hs_exc,
-                    circuit_breaker_state=cb.state.value,
-                )
+                if _federation_hb is not None:
+                    from inandout.observability.health_score import compute_health_score
+                    _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
+                    _federation_hb.update(
+                        connector=connector_cfg.name,
+                        datatype=datatype,
+                        health_score=_hs_exc,
+                        circuit_breaker_state=cb.state.value,
+                    )
 
         sleep_secs = _next_interval_secs(schedule, interval_secs)
         await anyio.sleep(sleep_secs)

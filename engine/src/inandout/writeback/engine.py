@@ -244,14 +244,17 @@ class WritebackEngine:
         writeback_cfg: WritebackConfig,
         delta_table: str,
         max_concurrent_writes_override: int | None = None,
+        shadow_mode: bool = False,
     ) -> WritebackResult:
         with _tracer.start_as_current_span("writeback.run_cycle") as span:
             span.set_attribute("connector", connector.name)
             span.set_attribute("datatype", datatype)
             span.set_attribute("delta_table", delta_table)
+            span.set_attribute("shadow_mode", shadow_mode)
             return await self._run_writeback_cycle_inner(
                 connector, datatype, writeback_cfg, delta_table, span,
                 max_concurrent_writes_override=max_concurrent_writes_override,
+                shadow_mode=shadow_mode,
             )
 
     async def _run_writeback_cycle_inner(
@@ -262,6 +265,7 @@ class WritebackEngine:
         delta_table: str,
         span: Any,
         max_concurrent_writes_override: int | None = None,
+        shadow_mode: bool = False,
     ) -> WritebackResult:
         log = logger.bind(connector=connector.name, datatype=datatype, delta_table=delta_table)
         result = WritebackResult(
@@ -322,6 +326,29 @@ class WritebackEngine:
                         result.failed += 1
 
                 semaphore = anyio.Semaphore(effective_max_writes)
+
+                # Shadow mode: log diffs to shadow_log instead of dispatching
+                # HTTP writes. Does NOT update sync_state, so the same diff is
+                # recomputed on every cycle until promoted.
+                if shadow_mode and rows:
+                    import json as _json
+                    for row_data in rows:
+                        action = row_data.get("_action", "upsert")
+                        external_id = row_data.get("external_id") or row_data.get("_cluster_id", "")
+                        await conn.execute(
+                            "INSERT INTO shadow_log (target, operation, external_id, payload) "
+                            "VALUES (%s, %s, %s, %s)",
+                            [f"{connector.name}_{datatype}", action, external_id,
+                             _json.dumps(row_data, default=str)],
+                        )
+                        result.processed += 1
+                    await conn.commit()
+                    log.info("shadow_mode_logged", count=len(rows))
+                    # Skip HTTP dispatch, feedback, and desired-state updates in shadow mode.
+                    # Release the advisory lock and return.
+                    await conn.execute("SELECT pg_advisory_unlock(%s)", [lock_key])
+                    await conn.commit()
+                    return result
 
                 # T2 #31: delete safety guard — abort deletes when batch exceeds limit
                 max_deletes = getattr(writeback_cfg, "max_deletes_per_batch", None)
