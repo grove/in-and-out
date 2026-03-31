@@ -641,6 +641,10 @@ def build_connector_router(
                                 body = await request.json()
                             except Exception:
                                 body = {}
+                            if _cursor_field:
+                                from datetime import datetime as _dt, timezone as _tz
+
+                                body[_cursor_field] = _dt.now(_tz.utc).isoformat()
                             record = await store.create(
                                 connector_name, _dt_name, body, pk_field=_pk, source="engine"
                             )
