@@ -1180,6 +1180,13 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
 
     try:
         async with anyio.create_task_group() as tg:
+            async def _drain_timeout_watchdog() -> None:
+                await _drain_event.wait()
+                await anyio.sleep(config.drain_timeout_secs)
+                logger.warning("drain_timeout_exceeded", timeout_secs=config.drain_timeout_secs)
+                tg.cancel_scope.cancel()
+
+            tg.start_soon(_drain_timeout_watchdog)
             tg.start_soon(_run_health_server)
             if webhook_server is not None:
                 tg.start_soon(_run_webhook_server)
