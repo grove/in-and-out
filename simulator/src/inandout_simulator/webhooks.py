@@ -92,25 +92,24 @@ class WebhookDispatcher:
             return None
 
         # Find the event_type string for this (datatype, operation) pair.
+        # For deletes: pick the first route with is_delete=true for this datatype.
+        # For create/update: pick the first route for this datatype that is NOT
+        # a delete route — it doesn't matter whether it's "contact.creation" or
+        # "contact.propertyChange"; the engine routes by the discriminator value.
         event_type: str | None = None
+        matched_route: dict | None = None
         for route in fan_out.get("routes", []):
-            if route.get("datatype") == datatype:
-                et = (route.get("match", "") or "").lower()
-                if operation == "create" and ("creation" in et or et.endswith(".create")):
+            if route.get("datatype") != datatype:
+                continue
+            if operation == "delete":
+                if route.get("is_delete"):
                     event_type = route.get("match")
+                    matched_route = route
                     break
-                if operation == "update" and ("change" in et or et.endswith(".update")):
+            else:
+                if not route.get("is_delete"):
                     event_type = route.get("match")
-                    break
-                if operation == "delete" and ("delet" in et or et.endswith(".delete")):
-                    event_type = route.get("match")
-                    break
-
-        if event_type is None:
-            # Fall back to the first route matching the datatype.
-            for route in fan_out.get("routes", []):
-                if route.get("datatype") == datatype:
-                    event_type = route.get("match")
+                    matched_route = route
                     break
 
         if event_type is None:
@@ -179,6 +178,16 @@ class WebhookDispatcher:
             payload = {discriminator_field: event_type}
             if record:
                 payload.update(record)
+            # For notification-only routes the engine looks up the record by the
+            # notification_external_id_field (e.g. "objectId" for HubSpot).  If
+            # that field isn't present in the stored record data, the engine falls
+            # back to a full sync which can take >500ms and trip the client read
+            # timeout.  Inject it explicitly so the engine can do a fast single-
+            # record fetch instead.
+            if matched_route and matched_route.get("notification_only"):
+                ext_id_field = matched_route.get("notification_external_id_field", "id")
+                if ext_id_field not in payload:
+                    payload[ext_id_field] = _coerce_id(record_id)
             payload["_simulator_ts"] = datetime.now(timezone.utc).isoformat()
 
         payload_json = json.dumps(payload)
