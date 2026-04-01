@@ -67,9 +67,15 @@
                             </details>
                             {% endif %}
                             {% if ev.request_body_json %}
-                            <div><span class="text-slate-500 mr-1">body</span>
+                            <div><span class="text-slate-500 mr-1">request body</span>
                                 <pre
                                     class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">{{ ev.request_body_json | pretty_json }}</pre>
+                            </div>
+                            {% endif %}
+                            {% if ev.response_body_json %}
+                            <div><span class="text-slate-500 mr-1">response body</span>
+                                <pre
+                                    class="text-emerald-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">{{ ev.response_body_json | pretty_json }}</pre>
                             </div>
                             {% endif %}
                             <div class="text-slate-600">{{ ev.timestamp }}</div>
@@ -138,6 +144,11 @@
             try { prettyReqBody = JSON.stringify(JSON.parse(d.request_body_json), null, 2); }
             catch (_) { prettyReqBody = d.request_body_json; }
         }
+        let prettyRespBody = '';
+        if (d.response_body_json) {
+            try { prettyRespBody = JSON.stringify(JSON.parse(d.response_body_json), null, 2); }
+            catch (_) { prettyRespBody = d.response_body_json; }
+        }
         const detailRow = document.createElement('tr');
         detailRow.id = detailId;
         detailRow.className = 'hidden border-b border-slate-700';
@@ -146,7 +157,8 @@
                     <div class="break-all"><span class="text-slate-500 mr-1">path</span><span class="text-slate-200">${d.path}</span></div>
                     ${d.connector ? `<div><span class="text-slate-500 mr-1">connector</span><span class="text-slate-200">${d.connector}</span>${d.datatype ? ` · <span class="text-slate-500 mr-1">datatype</span><span class="text-slate-200">${d.datatype}</span>` : ''}</div>` : ''}
                     ${prettyReqHeaders ? `<details><summary class="text-slate-500 cursor-pointer select-none">request headers</summary><pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-48 mt-1">${prettyReqHeaders.replace(/</g, '&lt;')}</pre></details>` : ''}
-                    ${prettyReqBody ? `<div><span class="text-slate-500 mr-1">body</span><pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">${prettyReqBody.replace(/</g, '&lt;')}</pre></div>` : ''}
+                    ${prettyReqBody ? `<div><span class="text-slate-500 mr-1">request body</span><pre class="text-slate-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">${prettyReqBody.replace(/</g, '&lt;')}</pre></div>` : ''}
+                    ${prettyRespBody ? `<div><span class="text-slate-500 mr-1">response body</span><pre class="text-emerald-300 whitespace-pre-wrap break-all bg-slate-950 rounded p-3 overflow-auto max-h-80 mt-1">${prettyRespBody.replace(/</g, '&lt;')}</pre></div>` : ''}
                     <div class="text-slate-600">${d.timestamp || ''}</div>
                 </td>`;
         body.insertBefore(detailRow, body.firstChild);

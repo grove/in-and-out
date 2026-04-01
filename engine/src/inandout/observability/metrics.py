@@ -91,6 +91,13 @@ conflicts_detected_total: Counter = _counter(
     ["connector", "datatype", "resolution", "namespace"],
 )
 
+# Lwstate write failures — surfaces silent errors that break noop detection
+lwstate_write_errors_total: Counter = _counter(
+    "inout_lwstate_write_errors_total",
+    "Total failures writing to lwstate tables after successful writeback",
+    ["connector", "datatype", "action"],
+)
+
 
 # Intra-sync deduplication counter
 intra_sync_duplicates_total: Counter = _counter(

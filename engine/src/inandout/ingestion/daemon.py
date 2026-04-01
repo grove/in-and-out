@@ -163,7 +163,13 @@ class _NoSignalServer(uvicorn.Server):
 
 
 def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
-    """Set the drain flag; polling loops will exit after their current iteration."""
+    """Set the drain flag; polling loops will exit after their current iteration.
+
+    Intentionally does NOT stop the health server — it stays alive so that
+    Kubernetes liveness probes continue to pass throughout the drain period.
+    The health server is stopped by the outer task group once all business
+    tasks have finished draining.
+    """
     global _draining
     _draining = True
     if _drain_event is not None:
@@ -171,8 +177,6 @@ def _trigger_drain(sig: int = 0, frame: object = None) -> None:  # noqa: ARG001
             asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
         except RuntimeError:
             pass
-    for srv in _uvicorn_servers:
-        srv.should_exit = True
     logger.info("ingestion_drain_signal_received", signal=sig)
 
 
@@ -1179,61 +1183,77 @@ async def run_ingestion_daemon(config_path: str | Path) -> None:
             await webhook_server.serve()
 
     try:
-        async with anyio.create_task_group() as tg:
-            async def _drain_timeout_watchdog() -> None:
-                await _drain_event.wait()
-                await anyio.sleep(config.drain_timeout_secs)
-                logger.warning("drain_timeout_exceeded", timeout_secs=config.drain_timeout_secs)
-                tg.cancel_scope.cancel()
+        # Two-level task-group structure:
+        #   outer_tg — health server only; stays alive through the entire drain
+        #               so liveness probes keep passing while business tasks wind down.
+        #   tg        — all business tasks; exited (or cancelled on timeout) when drained.
+        # After the inner group exits, _business_and_shutdown signals uvicorn to stop,
+        # which causes the outer group to exit and the process terminates cleanly.
+        async with anyio.create_task_group() as outer_tg:
+            outer_tg.start_soon(_run_health_server)
 
-            tg.start_soon(_drain_timeout_watchdog)
-            tg.start_soon(_run_health_server)
-            if webhook_server is not None:
-                tg.start_soon(_run_webhook_server)
-            tg.start_soon(_control_table_poller, dispatcher, engine, control_poll_secs)
-            tg.start_soon(_hot_reload_watcher, tg)
-            tg.start_soon(
-                _housekeeping_loop,
-                pool,
-                config,
-                connector_datatypes,
-                housekeeping_interval_secs,
-            )
-            tg.start_soon(_sla_check_loop, pool, connector_configs)
-            if any(
-                cfg.connector.webhooks is not None
-                and cfg.connector.webhooks.event_id_field is not None
-                for cfg in connector_configs
-            ):
-                tg.start_soon(_webhook_dedup_cleanup_loop, pool, connector_configs)
-            tg.start_soon(
-                heartbeat_loop,
-                pool,
-                _federation_hb,
-                30.0,
-                lambda: _draining,
-                None,
-                _drain_event,
-            )
-            # Start webhook lifecycle loops for connectors that require active registration.
-            for cfg in connector_configs:
-                wh_cfg = cfg.connector.webhooks
-                if wh_cfg is not None and wh_cfg.registration is not None:
-                    if config.webhook_callback_base_url:
-                        callback_url = (
-                            f"{config.webhook_callback_base_url.rstrip('/')}{wh_cfg.path}"
+            async def _business_and_shutdown() -> None:
+                async with anyio.create_task_group() as tg:
+                    if webhook_server is not None:
+                        tg.start_soon(_run_webhook_server)
+                    tg.start_soon(_control_table_poller, dispatcher, engine, control_poll_secs)
+                    tg.start_soon(_hot_reload_watcher, tg)
+                    tg.start_soon(
+                        _housekeeping_loop,
+                        pool,
+                        config,
+                        connector_datatypes,
+                        housekeeping_interval_secs,
+                    )
+                    tg.start_soon(_sla_check_loop, pool, connector_configs)
+                    if any(
+                        cfg.connector.webhooks is not None
+                        and cfg.connector.webhooks.event_id_field is not None
+                        for cfg in connector_configs
+                    ):
+                        tg.start_soon(_webhook_dedup_cleanup_loop, pool, connector_configs)
+                    tg.start_soon(
+                        heartbeat_loop,
+                        pool,
+                        _federation_hb,
+                        30.0,
+                        lambda: _draining,
+                        None,
+                        _drain_event,
+                    )
+                    # Start webhook lifecycle loops for connectors that require active registration.
+                    for cfg in connector_configs:
+                        wh_cfg = cfg.connector.webhooks
+                        if wh_cfg is not None and wh_cfg.registration is not None:
+                            if config.webhook_callback_base_url:
+                                callback_url = (
+                                    f"{config.webhook_callback_base_url.rstrip('/')}{wh_cfg.path}"
+                                )
+                                mgr = WebhookLifecycleManager(pool, cfg.connector, wh_cfg, engine)
+                                tg.start_soon(mgr.run_lifecycle_loop, callback_url, tg)
+                            else:
+                                log.warning(
+                                    "webhook_lifecycle_skipped_no_callback_url",
+                                    connector=cfg.connector.name,
+                                    hint="Set webhook_callback_base_url in ingestion config",
+                                )
+                    await _run_connector_tasks(
+                        tg, engine, connector_configs, default_interval_secs, paused_connectors
+                    )
+                    # Host task: block until SIGTERM, then arm a hard deadline so tasks
+                    # that are mid-work still get cancelled after drain_timeout_secs.
+                    # Tasks that exit cleanly before the deadline let the group exit early.
+                    await _drain_event.wait()
+                    tg.cancel_scope.deadline = anyio.current_time() + config.drain_timeout_secs
+                    if tg.cancel_scope.cancelled_caught:
+                        logger.warning(
+                            "drain_timeout_exceeded", timeout_secs=config.drain_timeout_secs
                         )
-                        mgr = WebhookLifecycleManager(pool, cfg.connector, wh_cfg, engine)
-                        tg.start_soon(mgr.run_lifecycle_loop, callback_url, tg)
-                    else:
-                        log.warning(
-                            "webhook_lifecycle_skipped_no_callback_url",
-                            connector=cfg.connector.name,
-                            hint="Set webhook_callback_base_url in ingestion config",
-                        )
-            await _run_connector_tasks(
-                tg, engine, connector_configs, default_interval_secs, paused_connectors
-            )
+                # All business tasks have drained — stop the health server gracefully.
+                for srv in _uvicorn_servers:
+                    srv.should_exit = True
+
+            outer_tg.start_soon(_business_and_shutdown)
     finally:
         log.info("daemon_stopping")
         await pool.close()

@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from inandout.config.connector import ConnectorConfig
 from inandout.config.writeback import ConflictResolution, ProtectionLevel, WritebackConfig
-from inandout.observability.metrics import conflicts_detected_total
+from inandout.observability.metrics import conflicts_detected_total, lwstate_write_errors_total
 from inandout.postgres.desired_state import get_lwstate, update_desired_state_status, upsert_lwstate
 from inandout.transport.http import HttpTransportAdapter
 
@@ -820,6 +820,48 @@ class WritebackEngine:
                         action, external_id, payload, result,
                     )
 
+                # Write lwstate after a successful insert.  This MUST succeed:
+                # if it fails we cannot suppress the next cycle from re-inserting
+                # the same record, producing an endless duplicate-create loop.
+                # Treat an lwstate failure as a hard write failure so the circuit
+                # breaker trips and blocks further inserts until the issue is fixed.
+                if external_id:
+                    try:
+                        _ins_cluster_id = row.get("cluster_id") or row.get("_cluster_id") or None
+                        async with self._pool.connection() as lw_ins_conn:
+                            await upsert_lwstate(
+                                lw_ins_conn, connector.name, result.datatype,
+                                external_id, payload,
+                                etag=None,
+                                cluster_id=_ins_cluster_id,
+                            )
+                            await lw_ins_conn.commit()
+                    except Exception as _lw_exc:
+                        logger.error(
+                            "lwstate_write_failed",
+                            connector=connector.name,
+                            datatype=result.datatype,
+                            external_id=external_id,
+                            action="insert",
+                            error=str(_lw_exc),
+                        )
+                        try:
+                            lwstate_write_errors_total.labels(
+                                connector=connector.name,
+                                datatype=result.datatype,
+                                action="insert",
+                            ).inc()
+                        except Exception:
+                            pass
+                        # Count as a failure so the circuit breaker trips.
+                        _cb.record_failure()
+                        result.failed += 1
+                        result._failed_external_ids.add(external_id)
+                        result._failed_entries.append(
+                            (external_id, action, f"lwstate_write_failed:{_lw_exc}")
+                        )
+                        return
+
                 _http_write_ok = True
                 result.processed += 1
                 # T2 #29: parse batch response to detect per-record failure
@@ -1276,16 +1318,11 @@ class WritebackEngine:
                     except Exception:
                         pass  # Non-critical: don't fail writeback over _last_written update
 
-                # After successful write: update lwstate with payload + ETag from response
-                if (
-                    writeback_cfg.use_desired_state_table
-                    and ops.lookup is not None
-                    and external_id
-                    and sent_payload is not None
-                ):
+                # After successful write: update lwstate unconditionally so the
+                # delta view's target-centric noop branch suppresses redundant
+                # re-writes on the next cycle (regardless of use_desired_state_table).
+                if external_id and sent_payload is not None:
                     try:
-                        # Store the actual payload (without synthetic _etag key) and pass
-                        # the ETag separately so it lands in its own column.
                         lw_etag = _3way_etag or None
                         _post_cluster_id = row.get("cluster_id") or row.get("_cluster_id") or None
                         async with self._pool.connection() as lw_post_conn:
@@ -1296,8 +1333,23 @@ class WritebackEngine:
                                 cluster_id=_post_cluster_id,
                             )
                             await lw_post_conn.commit()
-                    except Exception:
-                        pass  # Non-critical
+                    except Exception as _lw_exc:
+                        logger.error(
+                            "lwstate_write_failed",
+                            connector=connector.name,
+                            datatype=result.datatype,
+                            external_id=external_id,
+                            action="update",
+                            error=str(_lw_exc),
+                        )
+                        try:
+                            lwstate_write_errors_total.labels(
+                                connector=connector.name,
+                                datatype=result.datatype,
+                                action="update",
+                            ).inc()
+                        except Exception:
+                            pass
 
                 _eff_pl_upd = writeback_cfg.protection_level.value if writeback_cfg.protection_level else "none"
                 result._audit_entries.append((external_id, action, sent_payload, sent_diff, _eff_pl_upd))

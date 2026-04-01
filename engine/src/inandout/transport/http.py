@@ -1,4 +1,5 @@
 """HTTP transport adapter — drives the pagination loop for ingestion."""
+
 from __future__ import annotations
 
 import re
@@ -66,7 +67,7 @@ class HttpTransportAdapter:
         if connector.connection.pre_request is not None:
             self._auth: httpx.Auth = PreRequestAuthProvider(connector.connection.pre_request)
         else:
-            self._auth = build_auth_provider(connector.auth)
+            self._auth = build_auth_provider(connector.auth, connector.name)
         self._limiter: AsyncLimiter | None = None
         self._token_bucket: TokenBucket | None = None
         self._max_retries = max_retries
@@ -79,7 +80,9 @@ class HttpTransportAdapter:
                 max_rate=rate_limit.requests_per_second,
                 time_period=1.0,
             )
-            burst = float(rate_limit.burst) if rate_limit.burst else rate_limit.requests_per_second * 2
+            burst = (
+                float(rate_limit.burst) if rate_limit.burst else rate_limit.requests_per_second * 2
+            )
             self._token_bucket = get_rate_limiter(
                 connector.name,
                 rate_per_second=rate_limit.requests_per_second,
@@ -94,12 +97,15 @@ class HttpTransportAdapter:
             connect_s = float(timeout_cfg.connect.rstrip("s")) if timeout_cfg.connect else 10.0
             read_s = float(timeout_cfg.read.rstrip("s")) if timeout_cfg.read else 30.0
             write_s = float(timeout_cfg.write.rstrip("s")) if timeout_cfg.write else 30.0
-            timeout = httpx.Timeout(connect_s, connect=connect_s, read=read_s, write=write_s, pool=connect_s)
+            timeout = httpx.Timeout(
+                connect_s, connect=connect_s, read=read_s, write=write_s, pool=connect_s
+            )
         else:
             timeout = httpx.Timeout(10.0, read=30.0)
         # Allow per-connector base_url override via env var:
         # INOUT_<CONNECTOR_NAME_UPPER>_BASE_URL=http://simulator:6100/hubspot
         import os
+
         env_key = f"INOUT_{self._connector.name.upper()}_BASE_URL"
         base_url = os.environ.get(env_key) or self._connector.connection.base_url
         self._client = httpx.AsyncClient(
@@ -172,12 +178,12 @@ class HttpTransportAdapter:
                     )
 
             exc = httpx.HTTPStatusError("429", request=resp.request, response=resp)
-            wait = _retry_after_secs(exc) or (2 ** attempt)
-            
+            wait = _retry_after_secs(exc) or (2**attempt)
+
             # T1 #18: Adaptive rate limiting — apply backoff to token bucket
             if self._token_bucket is not None and wait is not None:
                 self._token_bucket.apply_backoff(wait)
-            
+
             await anyio.sleep(min(wait, 300.0))
 
         return resp  # all retries exhausted — return final response to caller
@@ -246,7 +252,7 @@ class HttpTransportAdapter:
                             raise RetryBudgetExhaustedError(
                                 f"Retry budget exhausted for connector {self._connector.name!r}"
                             )
-                    wait = min(2 ** attempt, 60.0)
+                    wait = min(2**attempt, 60.0)
                     await anyio.sleep(wait)
                     attempt += 1
                     last_exc = exc
@@ -262,7 +268,7 @@ class HttpTransportAdapter:
                             raise RetryBudgetExhaustedError(
                                 f"Retry budget exhausted for connector {self._connector.name!r}"
                             )
-                    wait = min(2 ** attempt, 60.0)
+                    wait = min(2**attempt, 60.0)
                     await anyio.sleep(wait)
                     attempt += 1
                     last_exc = exc
@@ -287,7 +293,7 @@ class HttpTransportAdapter:
             async for page in self._fetch_streaming_pages(list_config, watermark):
                 yield page
             return
-        
+
         # GraphQL mode: detect by presence of graphql_query
         graphql_query = getattr(list_config, "graphql_query", None)
         if graphql_query is not None:
@@ -332,6 +338,7 @@ class HttpTransportAdapter:
                 properties_params = [(props_param, prop) for prop in list_config.properties]
             elif props_format == "json_array":
                 import json
+
                 base_params[props_param] = json.dumps(list_config.properties)
 
         def _build_params(extra_params: dict[str, str]) -> list[tuple[str, str]] | dict[str, str]:
@@ -345,7 +352,7 @@ class HttpTransportAdapter:
             return {**base_params, **extra_params}
 
         termination = set(pagination.termination or [])
-        
+
         # A2: snapshot extraction from first page response
         snapshot_response_path = getattr(list_config, "snapshot_response_path", None)
         extracted_snapshot: str | None = None
@@ -355,7 +362,10 @@ class HttpTransportAdapter:
             cursor_value: str | None = None
             page_num = 0
             # If page_size is configured, include it as a constant param on every request
-            if pagination.cursor.page_size is not None and pagination.cursor.page_size_param is not None:
+            if (
+                pagination.cursor.page_size is not None
+                and pagination.cursor.page_size_param is not None
+            ):
                 base_params[pagination.cursor.page_size_param] = str(pagination.cursor.page_size)
             while True:
                 page_num += 1
@@ -510,18 +520,18 @@ class HttpTransportAdapter:
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
         """
         Fetch streaming responses (NDJSON, SSE, chunked JSON arrays).
-        
+
         Supports:
         - NDJSON: newline-delimited JSON objects
         - SSE: Server-Sent Events with data: lines
         - json_array: streaming JSON array with incremental parsing
         """
         import orjson
-        
+
         streaming_format = getattr(list_config, "streaming_format", "ndjson")
         method = list_config.method.upper()
         path = list_config.path
-        
+
         # Build params (for incremental watermark if configured)
         params: dict[str, str] = {}
         incremental = list_config.incremental
@@ -532,11 +542,11 @@ class HttpTransportAdapter:
                 param_name = str(extra.get("param", "since"))
                 param_value = _substitute(str(extra.get("value", "${watermark}")), watermark)
                 params[param_name] = param_value
-        
+
         # Make streaming request
         async with self._client.stream(method, path, params=params) as response:
             response.raise_for_status()
-            
+
             if streaming_format == "ndjson":
                 # NDJSON: each line is a complete JSON object
                 buffer = b""
@@ -551,7 +561,7 @@ class HttpTransportAdapter:
                                 yield [record]  # Yield one record at a time
                             except Exception:
                                 pass  # Skip malformed lines
-                
+
                 # Process remaining buffer
                 if buffer.strip():
                     try:
@@ -559,7 +569,7 @@ class HttpTransportAdapter:
                         yield [record]
                     except Exception:
                         pass
-            
+
             elif streaming_format == "sse":
                 # Server-Sent Events: data: lines
                 buffer = b""
@@ -576,7 +586,7 @@ class HttpTransportAdapter:
                                         yield [record]
                                     except Exception:
                                         pass
-            
+
             elif streaming_format == "json_array":
                 # Streaming JSON array - accumulate and yield in batches
                 # This is a simplified implementation; full streaming JSON parsing
@@ -584,7 +594,7 @@ class HttpTransportAdapter:
                 content = b""
                 async for chunk in response.aiter_bytes():
                     content += chunk
-                
+
                 # Parse the complete array
                 try:
                     records = orjson.loads(content)
@@ -592,7 +602,7 @@ class HttpTransportAdapter:
                         # Yield in batches of 100
                         batch_size = 100
                         for i in range(0, len(records), batch_size):
-                            yield records[i:i+batch_size]
+                            yield records[i : i + batch_size]
                     else:
                         yield [records]
                 except Exception:
@@ -614,9 +624,7 @@ class HttpTransportAdapter:
 
         cursor_value: str | None = None
         while True:
-            body = build_graphql_request_body(
-                graphql_query, graphql_variables, cursor=cursor_value
-            )
+            body = build_graphql_request_body(graphql_query, graphql_variables, cursor=cursor_value)
             resp = await self._request("POST", path, json=body)
             data = orjson.loads(resp.content)
 

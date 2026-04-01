@@ -219,6 +219,62 @@ def test_half_open_failure_reopens_cb():
 
 
 # ---------------------------------------------------------------------------
+# lwstate write failure → CB records failure (regression: was silently swallowed)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_lwstate_failure_trips_circuit_breaker():
+    """When upsert_lwstate raises after a successful insert, the circuit breaker
+    must record a failure so it trips at the threshold.  This is the regression
+    test for the bug where the lwstate exception was caught internally and
+    returned early without calling _cb.record_failure()."""
+    from inandout.writeback.engine import WritebackEngine, WritebackResult
+    from inandout.transport.circuit_breaker import get_circuit_breaker
+
+    pool = MagicMock()
+    engine = WritebackEngine(pool)
+
+    # threshold=1 so a single lwstate failure should trip the CB immediately
+    connector = _make_connector(failure_threshold=1, recovery_timeout=9999)
+    writeback_cfg = _make_writeback_cfg()
+    result = WritebackResult(connector="testconn", datatype="items", delta_table="t")
+
+    cb = get_circuit_breaker("testconn", "items", failure_threshold=1, recovery_timeout=9999)
+    assert cb.state == CircuitState.closed
+
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.content = b""
+    mock_response.raise_for_status = MagicMock()
+
+    mock_transport = AsyncMock()
+    mock_transport._raw_request = AsyncMock(return_value=mock_response)
+
+    with patch("inandout.writeback.engine.upsert_lwstate", side_effect=Exception("db down")):
+        await engine._dispatch_row(
+            mock_transport, connector, writeback_cfg,
+            "insert", "ext-1", {"name": "Bob"}, MagicMock(), result,
+        )
+
+    # The insert HTTP call succeeded, but lwstate write failed.
+    # The circuit breaker MUST have been tripped.
+    assert cb.state == CircuitState.open, (
+        "CB should be OPEN after lwstate write failure — inserts must stop"
+    )
+    assert result.failed == 1
+    assert result.processed == 0
+
+    # A subsequent dispatch must be skipped (CB is open)
+    result2 = WritebackResult(connector="testconn", datatype="items", delta_table="t")
+    await engine._dispatch_row(
+        mock_transport, connector, writeback_cfg,
+        "insert", "ext-2", {"name": "Carol"}, MagicMock(), result2,
+    )
+    assert result2.skipped == 1
+    assert mock_transport._raw_request.call_count == 1  # no second HTTP call made
+
+
+# ---------------------------------------------------------------------------
 # Control dispatcher: reset-circuit-breaker
 # ---------------------------------------------------------------------------
 

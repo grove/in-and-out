@@ -1,4 +1,5 @@
 """Writeback daemon — long-lived process polling delta tables and dispatching HTTP writes."""
+
 from __future__ import annotations
 
 import asyncio
@@ -33,6 +34,7 @@ logger = structlog.get_logger(__name__)
 # Health / readiness endpoints
 # ---------------------------------------------------------------------------
 
+
 async def _health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
@@ -62,7 +64,13 @@ class _NoSignalServer(uvicorn.Server):
 
 
 def _trigger_drain() -> None:
-    """Called by ControlDispatcher when a 'drain' control command is received."""
+    """Called by ControlDispatcher when a 'drain' control command is received.
+
+    Intentionally does NOT stop the health server — it stays alive so that
+    Kubernetes liveness probes continue to pass throughout the drain period.
+    The health server is stopped by the outer task group once all business
+    tasks have finished draining.
+    """
     global _draining
     _draining = True
     if _drain_event is not None:
@@ -70,8 +78,6 @@ def _trigger_drain() -> None:
             asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
         except RuntimeError:
             pass
-    for srv in _uvicorn_servers:
-        srv.should_exit = True
     logger.info("writeback_drain_control_command_received")
 
 
@@ -90,6 +96,7 @@ async def _ready(request: Request) -> JSONResponse:
         return JSONResponse({"status": "draining"}, status_code=503)
     # Schema-manager component gate check
     from inandout.postgres.component_gate import get_desired_state
+
     pool = request.app.state.pool if hasattr(request.app.state, "pool") else None
     if pool:
         desired = await get_desired_state(pool, "writeback")
@@ -101,6 +108,7 @@ async def _ready(request: Request) -> JSONResponse:
 async def _mode(request: Request) -> JSONResponse:
     """Report the current schema-manager desired state for observability."""
     from inandout.postgres.component_gate import get_desired_state
+
     pool = request.app.state.pool if hasattr(request.app.state, "pool") else None
     state = "unknown"
     if _draining:
@@ -112,11 +120,13 @@ async def _mode(request: Request) -> JSONResponse:
 
 
 def _build_health_app(pool: Any = None) -> Starlette:
-    app = Starlette(routes=[
-        Route("/health", _health),
-        Route("/ready", _ready),
-        Route("/mode", _mode),
-    ])
+    app = Starlette(
+        routes=[
+            Route("/health", _health),
+            Route("/ready", _ready),
+            Route("/mode", _mode),
+        ]
+    )
     app.mount("/metrics", prometheus_make_asgi_app(registry=REGISTRY))
     app.state.pool = pool
     return app
@@ -125,6 +135,7 @@ def _build_health_app(pool: Any = None) -> Starlette:
 # ---------------------------------------------------------------------------
 # Writeback polling loop for one connector/datatype
 # ---------------------------------------------------------------------------
+
 
 async def _writeback_polling_loop(
     engine: WritebackEngine,
@@ -139,23 +150,31 @@ async def _writeback_polling_loop(
     log = logger.bind(connector=connector_cfg.name, datatype=datatype)
     log.info("writeback_polling_loop_started", interval_secs=interval_secs, delta_table=delta_table)
     from inandout.transport.circuit_breaker import CircuitState, get_circuit_breaker
+
     _cb_cfg = getattr(connector_cfg, "circuit_breaker", None) or {}
     _cb = get_circuit_breaker(
         connector_cfg.name,
         datatype,
-        failure_threshold=int(_cb_cfg.get("failure_threshold", 5) if isinstance(_cb_cfg, dict) else 5),
-        recovery_timeout=float(_cb_cfg.get("recovery_timeout", 60.0) if isinstance(_cb_cfg, dict) else 60.0),
+        failure_threshold=int(
+            _cb_cfg.get("failure_threshold", 5) if isinstance(_cb_cfg, dict) else 5
+        ),
+        recovery_timeout=float(
+            _cb_cfg.get("recovery_timeout", 60.0) if isinstance(_cb_cfg, dict) else 60.0
+        ),
     )
 
     # Schema-manager component gate — wraps each work cycle with an advisory
     # lock so the schema-manager can safely apply DDL between cycles.
     from inandout.postgres.component_gate import ComponentGate
+
     gate = ComponentGate(engine._pool, "writeback")
 
     while True:
         # Check draining flag at the TOP of each iteration (after completing current cycle)
         if _draining:
-            log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
+            log.info(
+                "writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype
+            )
             break
 
         # Schema-manager component gate check — pause when desired='stopped',
@@ -173,7 +192,10 @@ async def _writeback_polling_loop(
 
             try:
                 result = await engine.run_writeback_cycle(
-                    connector_cfg, datatype, writeback_cfg, delta_table,
+                    connector_cfg,
+                    datatype,
+                    writeback_cfg,
+                    delta_table,
                     max_concurrent_writes_override=max_concurrent_writes_override,
                     shadow_mode=_shadow_mode,
                 )
@@ -198,7 +220,11 @@ async def _writeback_polling_loop(
                 else:
                     prev_state = _cb.state
                     _cb.record_success()
-                    if prev_state == CircuitState.open and _cb.state == CircuitState.closed and _alert_dispatcher:
+                    if (
+                        prev_state == CircuitState.open
+                        and _cb.state == CircuitState.closed
+                        and _alert_dispatcher
+                    ):
                         await _alert_dispatcher.dispatch(
                             AlertEventType.circuit_breaker_closed,
                             connector=connector_cfg.name,
@@ -209,6 +235,7 @@ async def _writeback_polling_loop(
                 if _federation_hb is not None:
                     import datetime
                     from inandout.observability.health_score import compute_health_score
+
                     _hs = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                     _federation_hb.update(
                         connector=connector_cfg.name,
@@ -229,6 +256,7 @@ async def _writeback_polling_loop(
                     )
                 if _federation_hb is not None:
                     from inandout.observability.health_score import compute_health_score
+
                     _hs_exc = await compute_health_score(engine._pool, connector_cfg.name, datatype)
                     _federation_hb.update(
                         connector=connector_cfg.name,
@@ -242,7 +270,9 @@ async def _writeback_polling_loop(
         _effective_sleep = min(interval_secs, float(_bma)) if _bma is not None else interval_secs
         await _sleep_or_drain(_effective_sleep)
         if _draining:
-            log.info("writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype)
+            log.info(
+                "writeback_draining_exiting_loop", connector=connector_cfg.name, datatype=datatype
+            )
             break
 
 
@@ -290,6 +320,7 @@ async def _writeback_loop_streaming(
 # Housekeeping loop
 # ---------------------------------------------------------------------------
 
+
 async def _housekeeping_loop(
     pool: Any,
     config: WritebackToolConfig,
@@ -314,6 +345,7 @@ async def _housekeeping_loop(
 # ---------------------------------------------------------------------------
 # Control table poller
 # ---------------------------------------------------------------------------
+
 
 async def _control_table_poller(
     dispatcher: ControlDispatcher,
@@ -340,6 +372,7 @@ async def _control_table_poller(
 # Main daemon entrypoint
 # ---------------------------------------------------------------------------
 
+
 async def run_writeback_daemon(config_path: str | Path) -> None:
     from inandout.observability import configure_logging, configure_metrics, configure_tracing
 
@@ -351,7 +384,9 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
         _alert_dispatcher = AlertDispatcher(config.alerting)
         logger.info("writeback_alert_dispatcher_initialised")
 
-    configure_logging(format=config.observability.logging.format, level=config.observability.logging.level)
+    configure_logging(
+        format=config.observability.logging.format, level=config.observability.logging.level
+    )
     configure_metrics()
     configure_tracing(
         enabled=config.observability.tracing.enabled,
@@ -386,12 +421,14 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     # Schema contract: freeze mode — tables must pre-exist (created by schema-manager).
     from inandout.postgres.schema import set_schema_contract
+
     try:
         async with pool.connection() as _gate_conn:
-            _has_gate = await (await _gate_conn.execute(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_name = 'component_state'"
-            )).fetchone()
+            _has_gate = await (
+                await _gate_conn.execute(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = 'component_state'"
+                )
+            ).fetchone()
         if _has_gate:
             set_schema_contract("freeze")
             log.info("schema_contract_freeze", reason="schema-manager detected")
@@ -401,7 +438,9 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
     engine = WritebackEngine(pool)
 
     paused_connectors: set[tuple[str, str]] = set()
-    dispatcher = ControlDispatcher(pool, paused_connectors, target_tool="writeback", drain_callback=_trigger_drain)
+    dispatcher = ControlDispatcher(
+        pool, paused_connectors, target_tool="writeback", drain_callback=_trigger_drain
+    )
 
     control_poll_secs = parse_duration(config.control_table.poll_interval)
     batch_wait = config.defaults.batch.max_wait if config.defaults.batch else "5s"
@@ -417,7 +456,10 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     host, port_str = config.health_server.listen.rsplit(":", 1)
     health_server_config = uvicorn.Config(
-        _build_health_app(pool=pool), host=host, port=int(port_str), log_level="warning",
+        _build_health_app(pool=pool),
+        host=host,
+        port=int(port_str),
+        log_level="warning",
     )
     health_server = _NoSignalServer(health_server_config)
     _uvicorn_servers.append(health_server)
@@ -434,10 +476,13 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
 
     async def _slot_monitor_loop() -> None:
         from inandout.writeback.slot_monitor import monitor_replication_slot
+
         if not config.replication_slot.slot_name:
             return
         await monitor_replication_slot(
-            pool, config.replication_slot, _on_slot_fallback,
+            pool,
+            config.replication_slot,
+            _on_slot_fallback,
             should_stop=lambda: _draining,
         )
 
@@ -465,8 +510,6 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
                 asyncio.get_event_loop().call_soon_threadsafe(_drain_event.set)
             except RuntimeError:
                 pass
-        for srv in _uvicorn_servers:
-            srv.should_exit = True
         log.info("writeback_drain_signal_received", signal=sig)
 
     try:
@@ -476,66 +519,95 @@ async def run_writeback_daemon(config_path: str | Path) -> None:
         pass  # Windows or restricted environment
 
     try:
-        async with anyio.create_task_group() as tg:
-            async def _drain_timeout_watchdog() -> None:
-                await _drain_event.wait()
-                await anyio.sleep(config.drain_timeout_secs)
-                log.warning("drain_timeout_exceeded", timeout_secs=config.drain_timeout_secs)
-                tg.cancel_scope.cancel()
+        # Two-level task-group structure:
+        #   outer_tg — health server only; stays alive through the entire drain
+        #               so liveness probes keep passing while business tasks wind down.
+        #   tg        — all business tasks; exited (or cancelled on timeout) when drained.
+        # After the inner group exits, _business_and_shutdown signals uvicorn to stop,
+        # which causes the outer group to exit and the process terminates cleanly.
+        async with anyio.create_task_group() as outer_tg:
+            outer_tg.start_soon(_run_health_server)
 
-            tg.start_soon(_drain_timeout_watchdog)
-            tg.start_soon(_run_health_server)
-            tg.start_soon(_control_table_poller, dispatcher, control_poll_secs)
-            tg.start_soon(
-                _housekeeping_loop,
-                pool,
-                config,
-                connector_datatypes,
-                housekeeping_interval_secs,
-            )
-            if config.replication_slot.slot_name:
-                tg.start_soon(_slot_monitor_loop)
-            tg.start_soon(
-                heartbeat_loop, pool, _federation_hb, 30.0, lambda: _draining,
-                None, _drain_event,
-            )
+            async def _business_and_shutdown() -> None:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(_control_table_poller, dispatcher, control_poll_secs)
+                    tg.start_soon(
+                        _housekeeping_loop,
+                        pool,
+                        config,
+                        connector_datatypes,
+                        housekeeping_interval_secs,
+                    )
+                    if config.replication_slot.slot_name:
+                        tg.start_soon(_slot_monitor_loop)
+                    tg.start_soon(
+                        heartbeat_loop,
+                        pool,
+                        _federation_hb,
+                        30.0,
+                        lambda: _draining,
+                        None,
+                        _drain_event,
+                    )
 
-            # B2: only start polling loops when scheduling is enabled
-            if scheduling_enabled:
-                for connector_file_cfg in connector_configs:
-                    connector_cfg = connector_file_cfg.connector
-                    for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
-                        if dtype_cfg.writeback is None:
-                            continue
-                        if dtype_cfg.writeback.use_desired_state_table:
-                            delta_table = f"inout_dst_{connector_cfg.name}_{dtype_name}"
-                        else:
-                            delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
-                        if dtype_cfg.writeback.streaming:
-                            tg.start_soon(
-                                _writeback_loop_streaming,
-                                engine,
-                                pool,
-                                connector_cfg,
-                                dtype_name,
-                                dtype_cfg.writeback,
-                                delta_table,
-                            )
-                        else:
-                            dtype_max_writes = getattr(dtype_cfg, "max_concurrent_writes", None)
-                            # T2 #35: use per-datatype poll_interval when configured
-                            _dtype_interval = getattr(dtype_cfg.writeback, "poll_interval", None)
-                            _loop_interval = float(_dtype_interval) if _dtype_interval else default_interval_secs
-                            tg.start_soon(
-                                _writeback_polling_loop,
-                                engine,
-                                connector_cfg,
-                                dtype_name,
-                                dtype_cfg.writeback,
-                                delta_table,
-                                _loop_interval,
-                                dtype_max_writes,
-                            )
+                    # B2: only start polling loops when scheduling is enabled
+                    if scheduling_enabled:
+                        for connector_file_cfg in connector_configs:
+                            connector_cfg = connector_file_cfg.connector
+                            for dtype_name, dtype_cfg in connector_cfg.datatypes.items():
+                                if dtype_cfg.writeback is None:
+                                    continue
+                                if dtype_cfg.writeback.use_desired_state_table:
+                                    delta_table = f"inout_dst_{connector_cfg.name}_{dtype_name}"
+                                else:
+                                    delta_table = f"_delta_{connector_cfg.name}_{dtype_name}"
+                                if dtype_cfg.writeback.streaming:
+                                    tg.start_soon(
+                                        _writeback_loop_streaming,
+                                        engine,
+                                        pool,
+                                        connector_cfg,
+                                        dtype_name,
+                                        dtype_cfg.writeback,
+                                        delta_table,
+                                    )
+                                else:
+                                    dtype_max_writes = getattr(
+                                        dtype_cfg, "max_concurrent_writes", None
+                                    )
+                                    # T2 #35: use per-datatype poll_interval when configured
+                                    _dtype_interval = getattr(
+                                        dtype_cfg.writeback, "poll_interval", None
+                                    )
+                                    _loop_interval = (
+                                        float(_dtype_interval)
+                                        if _dtype_interval
+                                        else default_interval_secs
+                                    )
+                                    tg.start_soon(
+                                        _writeback_polling_loop,
+                                        engine,
+                                        connector_cfg,
+                                        dtype_name,
+                                        dtype_cfg.writeback,
+                                        delta_table,
+                                        _loop_interval,
+                                        dtype_max_writes,
+                                    )
+                    # Host task: block until SIGTERM, then arm a hard deadline so tasks
+                    # that are mid-work still get cancelled after drain_timeout_secs.
+                    # Tasks that exit cleanly before the deadline let the group exit early.
+                    await _drain_event.wait()
+                    tg.cancel_scope.deadline = anyio.current_time() + config.drain_timeout_secs
+                    if tg.cancel_scope.cancelled_caught:
+                        log.warning(
+                            "drain_timeout_exceeded", timeout_secs=config.drain_timeout_secs
+                        )
+                # All business tasks have drained — stop the health server gracefully.
+                for srv in _uvicorn_servers:
+                    srv.should_exit = True
+
+            outer_tg.start_soon(_business_and_shutdown)
     finally:
         log.info("writeback_drained")
         log.info("daemon_stopping")

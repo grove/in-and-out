@@ -121,12 +121,35 @@
       }
     },
     {
+      "id": 33,
+      "type": "timeseries",
+      "title": "lwstate Write Errors (rate by connector + datatype + action)",
+      "description": "Rate of failed last-written-state DB writes. A non-zero value means circuit breaker trips are imminent.",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "rate(inout_lwstate_write_errors_total[5m])",
+          "legendFormat": "{{connector}} / {{datatype}} ({{action}})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 6,
       "type": "row",
       "title": "Simulator",
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 30,
         "w": 24,
         "h": 1
       },
@@ -138,7 +161,7 @@
       "title": "Simulator API Requests (rate by connector + datatype + method)",
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 31,
         "w": 12,
         "h": 8
       },
@@ -160,7 +183,7 @@
       "title": "Simulator Webhook Dispatches (rate by connector + operation)",
       "gridPos": {
         "x": 12,
-        "y": 23,
+        "y": 31,
         "w": 12,
         "h": 8
       },
@@ -187,7 +210,7 @@
       "title": "Records Stored in Simulator (by connector + datatype)",
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 39,
         "w": 24,
         "h": 6
       },
@@ -209,7 +232,7 @@
       "title": "Schema Manager",
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 45,
         "w": 24,
         "h": 1
       },
@@ -221,7 +244,7 @@
       "title": "Reconcile Cycles",
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 46,
         "w": 6,
         "h": 4
       },
@@ -253,7 +276,7 @@
       "title": "Stream Tables Managed",
       "gridPos": {
         "x": 6,
-        "y": 38,
+        "y": 46,
         "w": 6,
         "h": 4
       },
@@ -275,7 +298,7 @@
       "title": "Leader",
       "gridPos": {
         "x": 12,
-        "y": 38,
+        "y": 46,
         "w": 6,
         "h": 4
       },
@@ -297,7 +320,7 @@
       "title": "Validation Errors (total)",
       "gridPos": {
         "x": 18,
-        "y": 38,
+        "y": 46,
         "w": 6,
         "h": 4
       },
@@ -319,7 +342,7 @@
       "title": "Reconcile Duration (seconds)",
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -346,7 +369,7 @@
       "title": "DDL Operations (rate by type)",
       "gridPos": {
         "x": 12,
-        "y": 42,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -368,7 +391,7 @@
       "title": "Component State Changes (rate by component + state)",
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 58,
         "w": 24,
         "h": 6
       },
@@ -393,7 +416,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 56
       },
       "panels": []
     },
@@ -419,7 +442,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 57
       },
       "options": {
         "tooltip": {
@@ -476,7 +499,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 57
       },
       "options": {
         "reduceOptions": {
@@ -504,7 +527,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 65,
         "w": 24,
         "h": 1
       },
@@ -516,7 +539,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 66,
         "w": 12,
         "h": 8
       },
@@ -549,7 +572,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 58,
+        "y": 66,
         "w": 12,
         "h": 8
       },
@@ -582,7 +605,7 @@
       "type": "stat",
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 74,
         "w": 6,
         "h": 4
       },
@@ -648,7 +671,7 @@
       "type": "stat",
       "gridPos": {
         "x": 6,
-        "y": 66,
+        "y": 74,
         "w": 6,
         "h": 4
       },
@@ -685,7 +708,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 70,
+        "y": 78,
         "w": 24,
         "h": 1
       },
@@ -698,7 +721,7 @@
       "description": "Rate of incoming webhook events. Use the Connector/Datatype dropdowns to drill down.",
       "gridPos": {
         "x": 0,
-        "y": 71,
+        "y": 79,
         "w": 12,
         "h": 8
       },
@@ -739,7 +762,7 @@
       "description": "Cumulative webhook subscription operations recorded by the lifecycle manager. Use the Connector/Datatype dropdowns to drill down.",
       "gridPos": {
         "x": 12,
-        "y": 71,
+        "y": 79,
         "w": 12,
         "h": 8
       },
@@ -780,7 +803,7 @@
       "description": "Rate of webhooks that returned status=failed. Spikes indicate signature failures, processing errors, or upstream issues.",
       "gridPos": {
         "x": 0,
-        "y": 79,
+        "y": 87,
         "w": 12,
         "h": 8
       },
@@ -825,7 +848,7 @@
       "description": "Cumulative webhook events across all connectors/datatypes for the selected time range.",
       "gridPos": {
         "x": 12,
-        "y": 79,
+        "y": 87,
         "w": 6,
         "h": 4
       },
@@ -880,7 +903,7 @@
       "description": "Fraction of webhook events that resulted in status=failed.",
       "gridPos": {
         "x": 18,
-        "y": 79,
+        "y": 87,
         "w": 6,
         "h": 4
       },
@@ -943,7 +966,7 @@
       "description": "Current subscriptions grouped by connector, datatype, and subscription status.",
       "gridPos": {
         "x": 12,
-        "y": 83,
+        "y": 91,
         "w": 12,
         "h": 4
       },

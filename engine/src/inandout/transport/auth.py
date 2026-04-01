@@ -1,10 +1,12 @@
 """httpx.Auth implementations for each auth scheme."""
+
 from __future__ import annotations
 
 import asyncio
 import os
 import time
 from typing import Any, Generator
+from urllib.parse import urlparse
 
 import httpx
 import structlog
@@ -14,10 +16,42 @@ from inandout.config.auth import AuthConfig, OAuth2Auth, ApiKeyAuth, JwtAuth, Cu
 logger = structlog.get_logger(__name__)
 
 
+def _resolve_oauth_url(url: str, connector_name: str | None) -> str:
+    """Resolve OAuth endpoint URL with connector-specific env overrides.
+
+    Priority:
+    1) INOUT_<CONNECTOR>_TOKEN_URL
+    2) If INOUT_<CONNECTOR>_BASE_URL is set, reuse its origin/path and append
+       the configured OAuth endpoint path.
+    3) Connector-configured URL as-is.
+    """
+    if not connector_name:
+        return url
+
+    connector_key = connector_name.upper()
+    explicit_token_url = os.environ.get(f"INOUT_{connector_key}_TOKEN_URL")
+    if explicit_token_url:
+        return explicit_token_url
+
+    base_url = os.environ.get(f"INOUT_{connector_key}_BASE_URL")
+    if not base_url:
+        return url
+
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        suffix = parsed.path or ""
+        if parsed.query:
+            suffix = f"{suffix}?{parsed.query}"
+        return f"{base_url.rstrip('/')}{suffix}"
+
+    return f"{base_url.rstrip('/')}/{url.lstrip('/')}"
+
+
 def resolve_credential(credential_ref: str) -> str:
     # Try custom credential providers first
     try:
         from inandout.secrets.provider import resolve_via_providers
+
         provider_value = resolve_via_providers(credential_ref)
         if provider_value is not None:
             return provider_value
@@ -73,11 +107,23 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
     _cache: dict[tuple[str, str], dict] = {}
     _locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    def __init__(self, config: OAuth2Auth) -> None:
+    def __init__(self, config: OAuth2Auth, connector_name: str | None = None) -> None:
         self._config = config
-        self._cache_key = (config.credential_ref, config.oauth2.token_url)
+        self._connector_name = connector_name
+        self._token_url = _resolve_oauth_url(config.oauth2.token_url, connector_name)
+        self._cache_key = (config.credential_ref, self._token_url)
         if self._cache_key not in self.__class__._locks:
             self.__class__._locks[self._cache_key] = asyncio.Lock()
+
+    def _is_simulator_static_token_mode(self) -> bool:
+        if not self._connector_name:
+            return False
+        connector_key = self._connector_name.upper()
+        # Explicit token endpoint always wins.
+        if os.environ.get(f"INOUT_{connector_key}_TOKEN_URL"):
+            return False
+        # If base URL is overridden (typically to simulator), skip OAuth exchange.
+        return bool(os.environ.get(f"INOUT_{connector_key}_BASE_URL"))
 
     # ------------------------------------------------------------------
     # httpx.Auth sync generator — delegates to async helpers via requires_response_body
@@ -123,6 +169,14 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
         cfg = self._config.oauth2
         credential = resolve_credential(self._config.credential_ref)
 
+        if self._is_simulator_static_token_mode():
+            logger.info(
+                "oauth2_token_fetch_bypassed",
+                connector=self._connector_name,
+                reason="base_url_override_without_token_url",
+            )
+            return credential
+
         # credential_ref is expected to be "client_id:client_secret"
         if ":" in credential:
             client_id, client_secret = credential.split(":", 1)
@@ -139,7 +193,7 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
 
         try:
             with httpx.Client() as client:
-                resp = client.post(cfg.token_url, data=data, timeout=15)
+                resp = client.post(self._token_url, data=data, timeout=15)
                 resp.raise_for_status()
                 body = resp.json()
 
@@ -154,7 +208,7 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
         except Exception as exc:
             logger.error(
                 "oauth2_token_fetch_failed",
-                token_url=cfg.token_url,
+                token_url=self._token_url,
                 error=str(exc),
             )
             return None
@@ -179,9 +233,15 @@ class OAuth2RefreshTokenAuth(httpx.Auth):
     _cache: dict[tuple[str, str], dict] = {}
     _locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    def __init__(self, config: OAuth2Auth) -> None:
+    def __init__(self, config: OAuth2Auth, connector_name: str | None = None) -> None:
         self._config = config
-        self._cache_key = (config.credential_ref, config.oauth2.token_url)
+        self._token_url = _resolve_oauth_url(config.oauth2.token_url, connector_name)
+        self._refresh_url = (
+            _resolve_oauth_url(config.oauth2.refresh_url, connector_name)
+            if config.oauth2.refresh_url
+            else None
+        )
+        self._cache_key = (config.credential_ref, self._refresh_url or self._token_url)
         if self._cache_key not in self.__class__._locks:
             self.__class__._locks[self._cache_key] = asyncio.Lock()
 
@@ -233,7 +293,7 @@ class OAuth2RefreshTokenAuth(httpx.Auth):
         if entry and entry.get("refresh_token"):
             refresh_token = entry["refresh_token"]
 
-        token_url = cfg.refresh_url or cfg.token_url
+        token_url = self._refresh_url or self._token_url
         data: dict[str, str] = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -374,7 +434,9 @@ class CustomAuthProvider(httpx.Auth):
                 except Exception as exc:
                     logger.error(
                         "custom_auth_step_failed",
-                        url=url, method=method, error=str(exc),
+                        url=url,
+                        method=method,
+                        error=str(exc),
                     )
                     return ""
 
@@ -383,7 +445,8 @@ class CustomAuthProvider(httpx.Auth):
                 if not token:
                     logger.error(
                         "custom_auth_token_field_missing",
-                        url=url, token_field=token_field,
+                        url=url,
+                        token_field=token_field,
                     )
                     return ""
 
@@ -421,15 +484,15 @@ def invalidate_credential_cache(credential_ref: str) -> int:
     return invalidated
 
 
-def build_auth_provider(config: AuthConfig) -> httpx.Auth:
+def build_auth_provider(config: AuthConfig, connector_name: str | None = None) -> httpx.Auth:
     """Build an httpx.Auth instance from a connector auth config."""
     if isinstance(config, ApiKeyAuth):
         return ApiKeyAuthProvider(config)
     if isinstance(config, OAuth2Auth):
         if config.oauth2.grant_type == "client_credentials":
-            return OAuth2ClientCredentialsAuth(config)
+            return OAuth2ClientCredentialsAuth(config, connector_name)
         # authorization_code: use refresh_token flow for automatic token renewal
-        return OAuth2RefreshTokenAuth(config)
+        return OAuth2RefreshTokenAuth(config, connector_name)
     if isinstance(config, JwtAuth):
         token = resolve_credential(config.credential_ref)
         return BearerTokenAuth(token)

@@ -664,10 +664,17 @@ def build_connector_router(
                                 204 if deleted else 404,
                                 ms,
                                 request_headers_json=json.dumps(dict(request.headers)),
+                                response_body_json=json.dumps(
+                                    {"deleted": True, _pk: rid}
+                                )
+                                if deleted
+                                else json.dumps({"error": "not found"}),
                             )
                             if deleted:
                                 sim_api_requests_total.labels(
-                                    connector=connector_name, datatype=_dt_name, method="DELETE"
+                                    connector=connector_name,
+                                    datatype=_dt_name,
+                                    method="DELETE",
                                 ).inc()
                                 sim_records_stored.labels(
                                     connector=connector_name, datatype=_dt_name
@@ -692,7 +699,9 @@ def build_connector_router(
                                     {"error": "not found"}, status_code=404
                                 )
                             sim_api_requests_total.labels(
-                                connector=connector_name, datatype=_dt_name, method="GET"
+                                connector=connector_name,
+                                datatype=_dt_name,
+                                method="GET",
                             ).inc()
                             display = {
                                 k: v for k, v in rec.items() if not k.startswith("__")
@@ -725,6 +734,11 @@ def build_connector_router(
                             if evs:
                                 event_bus.publish_mutation(evs[0])
                             ms = int((time.monotonic() - t0) * 1000)
+                            display = {
+                                k: v
+                                for k, v in record.items()
+                                if not k.startswith("__")
+                            }
                             event_bus.publish_request(
                                 connector_name,
                                 _dt_name,
@@ -734,18 +748,16 @@ def build_connector_router(
                                 ms,
                                 request_body_json=json.dumps(body),
                                 request_headers_json=json.dumps(dict(request.headers)),
+                                response_body_json=json.dumps(display),
                             )
                             sim_api_requests_total.labels(
-                                connector=connector_name, datatype=_dt_name, method="POST"
+                                connector=connector_name,
+                                datatype=_dt_name,
+                                method="POST",
                             ).inc()
                             sim_records_stored.labels(
                                 connector=connector_name, datatype=_dt_name
                             ).set(await store.count(connector_name, _dt_name))
-                            display = {
-                                k: v
-                                for k, v in record.items()
-                                if not k.startswith("__")
-                            }
                             return JSONResponse(display, status_code=201)
 
                         # update / archive / upsert
@@ -772,6 +784,7 @@ def build_connector_router(
                                 ms,
                                 request_body_json=json.dumps(body),
                                 request_headers_json=json.dumps(dict(request.headers)),
+                                response_body_json=json.dumps({"error": "not found"}),
                             )
                             return JSONResponse({"error": "not found"}, status_code=404)
                         dispatcher.dispatch_nowait(
@@ -781,6 +794,9 @@ def build_connector_router(
                         if evs:
                             event_bus.publish_mutation(evs[0])
                         ms = int((time.monotonic() - t0) * 1000)
+                        display = {
+                            k: v for k, v in updated.items() if not k.startswith("__")
+                        }
                         event_bus.publish_request(
                             connector_name,
                             _dt_name,
@@ -790,13 +806,11 @@ def build_connector_router(
                             ms,
                             request_body_json=json.dumps(body),
                             request_headers_json=json.dumps(dict(request.headers)),
+                            response_body_json=json.dumps(display),
                         )
                         sim_api_requests_total.labels(
                             connector=connector_name, datatype=_dt_name, method=_method
                         ).inc()
-                        display = {
-                            k: v for k, v in updated.items() if not k.startswith("__")
-                        }
                         return JSONResponse(display)
 
                     _extra = _build_openapi_extra(_action, _seed, _pk)

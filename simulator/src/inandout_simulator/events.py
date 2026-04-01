@@ -30,6 +30,7 @@ class SimulatorEvent:
     sent_headers_json: str = ""  # headers sent with webhook (webhook events)
     request_body_json: str = ""  # request body JSON          (request events)
     request_headers_json: str = ""  # received headers JSON   (request events)
+    response_body_json: str = ""  # response body JSON         (request events)
     timestamp: str = field(default_factory=_now_iso)
     event_id: str = field(default_factory=_new_id)
 
@@ -88,6 +89,7 @@ class EventBus:
         request_body_json: str = "",
         request_headers_json: str = "",
         record_id: str = "",
+        response_body_json: str = "",
     ) -> None:
         self.publish(
             SimulatorEvent(
@@ -101,6 +103,7 @@ class EventBus:
                 request_body_json=request_body_json,
                 request_headers_json=request_headers_json,
                 record_id=record_id,
+                response_body_json=response_body_json,
             )
         )
 
